@@ -311,55 +311,129 @@ export function parseMatchesMap(rawData: RawApiResponse): ParsedCricketMatch[] {
   return matches;
 }
 
+// In-memory registry of all matches seen so far
+let combinedMatchesPool: Record<string, RawCrexMatch> = {};
+let hasInitialMappingLoaded = false;
+let lastBackgroundSyncTime = 0;
+
 /**
- * Ultra-fast low-latency match fetch:
- * Requests local in-memory endpoint or Goscorer API with tight 450ms timeout
+ * Fetch background mapping (teams, venues, series names) without blocking live updates
  */
-export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResult> {
-  const startTime = performance.now();
-  let rawData: RawApiResponse = {};
-
+async function syncBackgroundMapping(countryCode: string) {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 450);
-
     const res = await fetch(LOCAL_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cc: countryCode }),
-      signal: controller.signal,
     });
-    clearTimeout(timeoutId);
-
     if (res.ok) {
-      const json = await res.json();
-      rawData = json.matches || {};
-      if (json.mapping) registerDynamicMapping(json.mapping);
-    } else {
-      throw new Error('Local endpoint non-200');
+      const data = await res.json();
+      if (data?.matches) {
+        for (const [id, m] of Object.entries(data.matches)) {
+          // Only populate if not already present or merge without overwriting newer live scores
+          if (!combinedMatchesPool[id]) {
+            combinedMatchesPool[id] = m as any;
+          } else {
+            combinedMatchesPool[id] = {
+              ...(m as any),
+              ...combinedMatchesPool[id], // Keep the fresh live scores
+            };
+          }
+        }
+      }
+      if (data?.mapping) {
+        registerDynamicMapping(data.mapping);
+      }
+      hasInitialMappingLoaded = true;
+      lastBackgroundSyncTime = Date.now();
     }
   } catch {
-    // Ultra-fast direct fetch to Goscorer API (takes ~7-25ms)
+    // Non-blocking background sync
+  }
+}
+
+/**
+ * Ultra-fast direct live fetch (executes every single second in < 15ms):
+ * 1. Directly queries https://api.goscorer.com/api/v2/getTopMatches?_t=... with cache-busting
+ * 2. Immediately parses and returns fresh scores
+ * 3. Falls back to local endpoint only if direct fetch fails
+ */
+export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResult> {
+  const startTime = performance.now();
+  const now = Date.now();
+
+  // Trigger non-blocking background mapping sync if needed (once at start or every 30s)
+  if (!hasInitialMappingLoaded || now - lastBackgroundSyncTime > 30000) {
+    syncBackgroundMapping(countryCode);
+  }
+
+  let freshUpdates: RawApiResponse | null = null;
+
+  try {
+    // Direct Goscorer API call with cache-busting query parameter and headers
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+
+    const directRes = await fetch(`${DIRECT_GOSCORER_ENDPOINT}?_t=${now}`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        Pragma: 'no-cache',
+      },
+      body: JSON.stringify({ cc: countryCode, _t: now }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (directRes.ok) {
+      const data = await directRes.json();
+      if (data && typeof data === 'object') {
+        freshUpdates = data;
+      }
+    }
+  } catch {
+    // Direct call failed (e.g. offline/strict firewall), fall back to local endpoint
+  }
+
+  // If direct fetch didn't return data, try local endpoint
+  if (!freshUpdates) {
     try {
-      const res = await fetch(DIRECT_GOSCORER_ENDPOINT, {
+      const localRes = await fetch(LOCAL_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cc: countryCode }),
       });
-      if (res.ok) {
-        rawData = await res.json();
+      if (localRes.ok) {
+        const localData = await localRes.json();
+        if (localData?.matches) {
+          freshUpdates = localData.matches;
+          if (localData.mapping) registerDynamicMapping(localData.mapping);
+        }
       }
     } catch {
-      // Ignore
+      // Fallback failed
     }
   }
 
+  if (freshUpdates) {
+    // Merge new updates into combined pool
+    for (const [id, m] of Object.entries(freshUpdates)) {
+      combinedMatchesPool[id] = {
+        ...(combinedMatchesPool[id] || {}),
+        ...(m as any),
+      };
+    }
+  }
+
+  const finalSource = { ...combinedMatchesPool };
   const latencyMs = Math.round(performance.now() - startTime);
-  const matches = parseMatchesMap(rawData);
+  const matches = parseMatchesMap(finalSource);
 
   return {
     matches,
-    raw: rawData,
+    raw: finalSource,
     latencyMs,
     timestamp: new Date(),
     matchCount: matches.length,
@@ -399,6 +473,13 @@ export function playAlertSound(type: 'wicket' | 'boundary' | 'refresh' = 'refres
       gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
       osc.start(now);
       osc.stop(now + 0.25);
+    } else {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(600, now);
+      gain.gain.setValueAtTime(0.05, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+      osc.start(now);
+      osc.stop(now + 0.08);
     }
   } catch {
     // Ignore audio context restrictions if blocked

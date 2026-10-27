@@ -113,9 +113,12 @@ export const Navbar: React.FC<NavbarProps> = ({
                 {autoRefreshInterval > 0 ? (
                   <>
                     <Pause className="w-3.5 h-3.5" />
-                    <span className="font-mono-numbers text-[11px]">
-                      {secondsRemaining}s
+                    <span className="font-mono-numbers text-[11px] font-semibold">
+                      {autoRefreshInterval === 1 ? '1s Live' : `${secondsRemaining}s`}
                     </span>
+                    {autoRefreshInterval === 1 && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                    )}
                   </>
                 ) : (
                   <>

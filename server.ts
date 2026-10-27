@@ -44,15 +44,21 @@ let isCrexRunning = false;
 async function syncGoscorerApi(countryCode = 'IN') {
   if (isGoscorerRunning) return;
   isGoscorerRunning = true;
+  const now = Date.now();
 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1200);
 
-    const res = await fetch('https://api.goscorer.com/api/v2/getTopMatches', {
+    const res = await fetch(`https://api.goscorer.com/api/v2/getTopMatches?_t=${now}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cc: countryCode }),
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        Pragma: 'no-cache',
+      },
+      body: JSON.stringify({ cc: countryCode, _t: now }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -91,14 +97,14 @@ async function syncGoscorerApi(countryCode = 'IN') {
   }
 }
 
-// 2. Continuous 1.5s Crex Pool sync so all matches (including OMA vs NED, etc.) stay 100% updated every 1-2s
+// 2. Crex Pool sync (runs every 15s) to collect extra matches and mapping without overwriting fresh scores
 async function syncCrexPool() {
   if (isCrexRunning) return;
   isCrexRunning = true;
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
+    const timeout = setTimeout(() => controller.abort(), 2000);
 
     const html = await fetch('https://crex.com/cricket-live-score', {
       headers: {
@@ -127,16 +133,11 @@ async function syncCrexPool() {
           if (parsed.desktopTopMatchesRaw) {
             for (const [id, m] of Object.entries(parsed.desktopTopMatchesRaw)) {
               const existing = matchStore.matches[id];
-              if (
-                !existing ||
-                existing.j !== (m as any).j ||
-                existing.k !== (m as any).k ||
-                existing.res !== (m as any).res ||
-                existing.finishTime !== (m as any).finishTime
-              ) {
-                hasChange = true;
-              }
-              matchStore.matches[id] = { ...(matchStore.matches[id] || {}), ...(m as any) };
+              // Merge metadata while preserving existing live scores
+              matchStore.matches[id] = {
+                ...(m as any),
+                ...(existing || {}),
+              };
             }
           }
 
@@ -174,9 +175,9 @@ async function syncCrexPool() {
 // Initial eager sync
 syncGoscorerApi().then(syncCrexPool);
 
-// Continuous 1-second live polling loop
+// Continuous live polling loop
 setInterval(syncGoscorerApi, 1000); // Check Goscorer API every 1000ms
-setInterval(syncCrexPool, 1800);    // Check Crex match pool every 1800ms
+setInterval(syncCrexPool, 20000);   // Sync background mapping/metadata every 20s
 
 // SSE Live Stream: Instant zero-latency push to connected clients
 app.get('/api/live-stream', (req, res) => {

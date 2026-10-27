@@ -19,6 +19,27 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
   const isCompleted = match.status === 'completed';
   const isUpcoming = match.status === 'upcoming';
 
+  const [isScoreFlashing, setIsScoreFlashing] = React.useState(false);
+  const prevScoreStringRef = React.useRef<string>('');
+
+  React.useEffect(() => {
+    const scoreKey = `${match.team1Score?.runs || 0}/${match.team1Score?.wickets || 0}(${match.team1Score?.overs || 0})-${match.team2Score?.runs || 0}/${match.team2Score?.wickets || 0}(${match.team2Score?.overs || 0})-${match.resultText || ''}`;
+    if (prevScoreStringRef.current && prevScoreStringRef.current !== scoreKey) {
+      setIsScoreFlashing(true);
+      const timer = setTimeout(() => setIsScoreFlashing(false), 1200);
+      return () => clearTimeout(timer);
+    }
+    prevScoreStringRef.current = scoreKey;
+  }, [
+    match.team1Score?.runs,
+    match.team1Score?.wickets,
+    match.team1Score?.overs,
+    match.team2Score?.runs,
+    match.team2Score?.wickets,
+    match.team2Score?.overs,
+    match.resultText,
+  ]);
+
   const formatStartTime = (date: Date) => {
     try {
       const isToday = new Date().toDateString() === date.toDateString();
@@ -67,8 +88,10 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
   return (
     <div
       onClick={() => onSelect(match)}
-      className={`group relative rounded-2xl border p-4 sm:p-5 transition-all cursor-pointer flex flex-col justify-between ${
-        isLive
+      className={`group relative rounded-2xl border p-4 sm:p-5 transition-all duration-300 cursor-pointer flex flex-col justify-between ${
+        isScoreFlashing
+          ? 'ring-2 ring-emerald-400 bg-emerald-950/30 border-emerald-500 shadow-xl shadow-emerald-900/40 scale-[1.01]'
+          : isLive
           ? 'bg-slate-900/95 border-slate-700/90 hover:border-emerald-500/50 hover:shadow-lg hover:shadow-emerald-950/20'
           : 'bg-slate-900/50 border-slate-800/80 hover:border-slate-700 hover:bg-slate-900/80'
       }`}
@@ -84,7 +107,12 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
 
           {/* Status Indicator */}
           <div>
-            {isLive ? (
+            {isScoreFlashing ? (
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold tracking-wider animate-pulse">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                BALL UPDATE
+              </span>
+            ) : isLive ? (
               <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[11px] font-semibold uppercase tracking-wider">
                 <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-ping" />
                 Live
