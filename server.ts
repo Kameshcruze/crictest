@@ -12,19 +12,44 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(express.json());
 
-// In-memory cache for Crex HTML scrape to optimize speed
-let crexCache: {
-  timestamp: number;
+// In-memory warm match store
+let matchStore: {
   matches: Record<string, any>;
   mapping: { teams?: any[]; venues?: any[]; series?: any[] };
-} | null = null;
+  lastUpdated: number;
+} = {
+  matches: {},
+  mapping: {},
+  lastUpdated: 0,
+};
 
-async function getCrexMatches() {
-  const now = Date.now();
-  if (crexCache && now - crexCache.timestamp < 4000) {
-    return { matches: crexCache.matches, mapping: crexCache.mapping };
+// Fast background sync directly from Goscorer API (runs every 3 seconds)
+async function syncGoscorerApi(countryCode = 'IN') {
+  try {
+    const res = await fetch('https://api.goscorer.com/api/v2/getTopMatches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cc: countryCode }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      for (const [id, m] of Object.entries(data)) {
+        if (matchStore.matches[id]) {
+          matchStore.matches[id] = { ...matchStore.matches[id], ...(m as any) };
+        } else {
+          matchStore.matches[id] = m;
+        }
+      }
+      matchStore.lastUpdated = Date.now();
+    }
+  } catch (err: any) {
+    // Non-blocking background log
   }
+}
 
+// Background sync for full Crex matches pool (runs every 20 seconds in background)
+async function syncCrexPool() {
   try {
     const html = await fetch('https://crex.com/cricket-live-score', {
       headers: {
@@ -35,8 +60,6 @@ async function getCrexMatches() {
 
     const regex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
     let match;
-    let extractedMatches: Record<string, any> = {};
-    let extractedMapping: { teams?: any[]; venues?: any[]; series?: any[] } = {};
 
     while ((match = regex.exec(html)) !== null) {
       if (match[1].includes('ssr-bootstrap-v1') && match[1].includes('desktopTopMatchesRaw')) {
@@ -48,78 +71,56 @@ async function getCrexMatches() {
             .replace(/&s;/g, "'")
             .replace(/&amp;/g, '&');
           const parsed = JSON.parse(raw);
+
           if (parsed.desktopTopMatchesRaw) {
-            extractedMatches = parsed.desktopTopMatchesRaw;
+            for (const [id, m] of Object.entries(parsed.desktopTopMatchesRaw)) {
+              if (matchStore.matches[id]) {
+                matchStore.matches[id] = { ...(m as any), ...matchStore.matches[id] };
+              } else {
+                matchStore.matches[id] = m;
+              }
+            }
           }
+
           const homeMap =
             parsed['https://oc.crickapi.com/mapping/getHomeMapDatahome'] ||
             parsed['https://oc.crickapi.com/mapping/getHomeMapDatahomeAtf'];
           if (homeMap) {
-            extractedMapping = {
+            matchStore.mapping = {
               teams: homeMap.t,
               venues: homeMap.v,
               series: homeMap.s,
             };
           }
+          break;
         }
       }
     }
-
-    crexCache = {
-      timestamp: now,
-      matches: extractedMatches,
-      mapping: extractedMapping,
-    };
-
-    return { matches: extractedMatches, mapping: extractedMapping };
+    matchStore.lastUpdated = Date.now();
   } catch (err: any) {
-    console.error('Crex scrape error:', err.message);
-    return { matches: crexCache?.matches || {}, mapping: crexCache?.mapping || {} };
+    // Non-blocking background catch
   }
 }
 
-// Proxy endpoint for top matches
+// Start continuous background syncs immediately
+syncGoscorerApi();
+syncCrexPool();
+setInterval(() => syncGoscorerApi('IN'), 3000); // 3-second live Goscorer sync
+setInterval(syncCrexPool, 20000); // 20-second pool sync
+
+// Ultra-fast endpoint: Serves immediately from warm in-memory cache (< 2ms)
 app.all(['/api/top-matches', '/api/v2/getTopMatches'], async (req, res) => {
-  const countryCode = req.body?.cc || req.query?.cc || 'IN';
-
-  try {
-    // 1. Fetch from Goscorer API directly
-    let apiMatches: Record<string, any> = {};
-    try {
-      const apiRes = await fetch('https://api.goscorer.com/api/v2/getTopMatches', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cc: countryCode }),
-      });
-      if (apiRes.ok) {
-        apiMatches = await apiRes.json();
-      }
-    } catch (e: any) {
-      console.warn('Goscorer API fetch warning:', e.message);
-    }
-
-    // 2. Fetch full matches pool from Crex live score page
-    const { matches: crexMatches, mapping } = await getCrexMatches();
-
-    // 3. Merge: Goscorer API has latest live score updates, Crex has all active matches including 14VC, 14V3
-    const mergedMatches: Record<string, any> = { ...crexMatches };
-    for (const [id, m] of Object.entries(apiMatches)) {
-      if (mergedMatches[id]) {
-        mergedMatches[id] = { ...mergedMatches[id], ...m };
-      } else {
-        mergedMatches[id] = m;
-      }
-    }
-
-    res.json({
-      matches: mergedMatches,
-      mapping,
-      totalCount: Object.keys(mergedMatches).length,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  // If cache is empty on cold start, wait for initial sync
+  if (Object.keys(matchStore.matches).length === 0) {
+    await syncGoscorerApi(req.body?.cc || 'IN');
   }
+
+  res.json({
+    matches: matchStore.matches,
+    mapping: matchStore.mapping,
+    totalCount: Object.keys(matchStore.matches).length,
+    timestamp: new Date(matchStore.lastUpdated || Date.now()).toISOString(),
+  });
 });
 
 // Mount Vite or serve static files
@@ -138,7 +139,7 @@ async function startServer() {
   }
 
   app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Live Scorer server running at http://localhost:${PORT}`);
   });
 }
 

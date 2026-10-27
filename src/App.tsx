@@ -31,10 +31,10 @@ export default function App() {
   const [latencyMs, setLatencyMs] = useState<number>(0);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
 
-  // Configuration
+  // Configuration - 3s default matching Crex live rate
   const [countryCode, setCountryCode] = useState<string>('IN');
-  const [autoRefreshInterval, setAutoRefreshInterval] = useState<number>(10); // 10s default
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(10);
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState<number>(3); // 3s live rate
+  const [secondsRemaining, setSecondsRemaining] = useState<number>(3);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
 
   // Filters

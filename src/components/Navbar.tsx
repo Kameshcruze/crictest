@@ -8,6 +8,7 @@ import {
   VolumeX,
   Play,
   Pause,
+  Zap,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -66,6 +67,9 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
                   LIVE
                 </span>
+                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-300 bg-emerald-950/80 px-1.5 py-0.5 rounded border border-emerald-800/40">
+                  <Zap className="w-3 h-3 text-amber-400" /> 3s Sync
+                </span>
               </div>
               <p className="text-[11px] text-slate-400 hidden sm:block">
                 Real-time Crex Match Extractor
@@ -95,18 +99,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="flex items-center bg-slate-800/80 border border-slate-700 rounded-lg p-1 text-xs">
               <button
                 type="button"
-                onClick={() => onIntervalChange(autoRefreshInterval === 0 ? 10 : 0)}
+                onClick={() => onIntervalChange(autoRefreshInterval === 0 ? 3 : 0)}
                 className={`px-2 py-1 rounded flex items-center gap-1 font-medium transition-colors ${
                   autoRefreshInterval > 0
                     ? 'text-emerald-400 hover:bg-slate-700'
                     : 'text-amber-400 hover:bg-slate-700'
                 }`}
-                title={autoRefreshInterval > 0 ? 'Pause auto refresh' : 'Resume auto refresh'}
+                title={autoRefreshInterval > 0 ? 'Pause live auto-refresh' : 'Resume live auto-refresh'}
               >
                 {autoRefreshInterval > 0 ? (
                   <>
                     <Pause className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline font-mono-numbers">
+                    <span className="font-mono-numbers text-[11px]">
                       {secondsRemaining}s
                     </span>
                   </>
@@ -121,13 +125,13 @@ export const Navbar: React.FC<NavbarProps> = ({
               <select
                 value={autoRefreshInterval}
                 onChange={(e) => onIntervalChange(Number(e.target.value))}
-                className="bg-transparent text-slate-300 text-[11px] border-l border-slate-700 pl-1.5 pr-1 py-0.5 focus:outline-none cursor-pointer"
-                title="Select refresh rate"
+                className="bg-transparent text-slate-300 text-[11px] border-l border-slate-700 pl-1.5 pr-1 py-0.5 focus:outline-none cursor-pointer font-medium"
+                title="Select live refresh frequency"
               >
+                <option value={2} className="bg-slate-900 text-slate-100">2s (Fastest)</option>
+                <option value={3} className="bg-slate-900 text-slate-100">3s (Crex Live)</option>
                 <option value={5} className="bg-slate-900 text-slate-100">5s</option>
                 <option value={10} className="bg-slate-900 text-slate-100">10s</option>
-                <option value={15} className="bg-slate-900 text-slate-100">15s</option>
-                <option value={30} className="bg-slate-900 text-slate-100">30s</option>
                 <option value={0} className="bg-slate-900 text-slate-100">Off</option>
               </select>
             </div>

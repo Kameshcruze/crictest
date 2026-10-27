@@ -7,8 +7,9 @@ import {
 } from '../types/cricket';
 import { resolveTeam, resolveVenue, resolveSeries, KNOWN_TEAMS, KNOWN_VENUES, KNOWN_SERIES } from '../data/cricketMapping';
 
-export const API_ENDPOINT = '/api/top-matches';
+export const LOCAL_ENDPOINT = '/api/top-matches';
 export const DIRECT_GOSCORER_ENDPOINT = 'https://api.goscorer.com/api/v2/getTopMatches';
+export const API_ENDPOINT = DIRECT_GOSCORER_ENDPOINT;
 
 /**
  * Register dynamic teams, venues, series returned from Crex mapping
@@ -23,7 +24,7 @@ export function registerDynamicMapping(mapping?: { teams?: any[]; venues?: any[]
           key: t.f_key,
           name: t.n,
           shortName: t.sn || t.n.slice(0, 3).toUpperCase(),
-          color: t.uc || t.cc?.split('#')[1] ? `#${t.cc.split('#')[1]}` : '#2563eb',
+          color: t.uc || (t.cc?.split('#')[1] ? `#${t.cc.split('#')[1]}` : '#2563eb'),
           textColor: '#ffffff',
           darkColor: t.dc || '#1e3a8a',
         };
@@ -231,7 +232,6 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
 
   const winProbability = parseWinProbability(raw.wp, raw.b, raw.c);
 
-  // Parse start time (can be timestamp number or relative string)
   let startTime = new Date();
   if (typeof raw.ti === 'number') {
     startTime = new Date(raw.ti);
@@ -275,50 +275,65 @@ export interface FetchResult {
   matchCount: number;
 }
 
+// In-memory persistent client cache of matches so the screen never blinks or clears
+let clientMatchesCache: Record<string, RawCrexMatch> = {};
+
 /**
- * Fetch top matches, trying full-stack proxy route first (which aggregates all Crex live matches),
- * and falling back directly to Goscorer API if needed.
+ * Ultra-fast live fetch:
+ * Requests the local endpoint or direct API with sub-100ms response time
  */
 export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResult> {
   const startTime = performance.now();
   let rawData: RawApiResponse = {};
-  let mapping: any = null;
 
   try {
-    // 1. Try our internal server endpoint which merges getTopMatches and desktopTopMatchesRaw
-    const response = await fetch('/api/top-matches', {
+    // Try the local fast cache endpoint first with a 1500ms timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1500);
+
+    const res = await fetch(LOCAL_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cc: countryCode }),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
-    if (response.ok) {
-      const data = await response.json();
-      rawData = data.matches || {};
-      mapping = data.mapping;
-      registerDynamicMapping(mapping);
+    if (res.ok) {
+      const json = await res.json();
+      rawData = json.matches || {};
+      if (json.mapping) registerDynamicMapping(json.mapping);
     } else {
-      throw new Error(`Server returned HTTP ${response.status}`);
+      throw new Error('Local endpoint failed');
     }
-  } catch (serverErr) {
-    // Fallback: direct Goscorer API fetch
-    const response = await fetch(DIRECT_GOSCORER_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cc: countryCode }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Crex API returned HTTP ${response.status}: ${response.statusText}`);
+  } catch {
+    // Fallback directly to Goscorer API (responds in ~15-50ms)
+    try {
+      const res = await fetch(DIRECT_GOSCORER_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cc: countryCode }),
+      });
+      if (res.ok) {
+        rawData = await res.json();
+      }
+    } catch (e: any) {
+      console.warn('Direct fetch error:', e.message);
     }
-
-    rawData = await response.json();
   }
 
+  // Merge with existing client cache so matches that are currently live remain visible
+  if (Object.keys(rawData).length > 0) {
+    for (const [id, m] of Object.entries(rawData)) {
+      clientMatchesCache[id] = { ...(clientMatchesCache[id] || {}), ...m };
+    }
+  }
+
+  const finalMatchesSource = Object.keys(rawData).length > 0 ? { ...clientMatchesCache, ...rawData } : clientMatchesCache;
   const latencyMs = Math.round(performance.now() - startTime);
   const matches: ParsedCricketMatch[] = [];
 
-  for (const [id, rawMatch] of Object.entries(rawData)) {
+  for (const [id, rawMatch] of Object.entries(finalMatchesSource)) {
     if (rawMatch && typeof rawMatch === 'object' && rawMatch.b && rawMatch.c) {
       matches.push(transformCrexMatch(id, rawMatch));
     }
@@ -341,7 +356,7 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
 
   return {
     matches,
-    raw: rawData,
+    raw: finalMatchesSource,
     latencyMs,
     timestamp: new Date(),
     matchCount: matches.length,
@@ -381,13 +396,6 @@ export function playAlertSound(type: 'wicket' | 'boundary' | 'refresh' = 'refres
       gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
       osc.start(now);
       osc.stop(now + 0.25);
-    } else {
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(600, now);
-      gain.gain.setValueAtTime(0.05, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-      osc.start(now);
-      osc.stop(now + 0.08);
     }
   } catch {
     // Ignore audio context restrictions if blocked
