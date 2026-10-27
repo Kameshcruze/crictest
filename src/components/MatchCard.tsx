@@ -40,7 +40,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
     navigator.clipboard.writeText(text);
   };
 
-  // Live chasing equation (e.g. "337 runs needed in 251 balls")
+  // Crex style live status text
   const getLiveEquation = () => {
     if (match.resultText) return match.resultText;
     if (match.statusLabel && match.statusLabel !== 'Live') return match.statusLabel;
@@ -73,16 +73,12 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
           : 'bg-slate-900/50 border-slate-800/80 hover:border-slate-700 hover:bg-slate-900/80'
       }`}
     >
-      {/* Top Header: Series, Format & Status */}
+      {/* Top Header: Match Number, Venue, Format & Live Badge */}
       <div>
         <div className="flex items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-800/80 text-xs">
-          <div className="flex items-center gap-2 truncate text-slate-400">
-            <span className="font-semibold text-slate-300 truncate max-w-[170px] sm:max-w-[220px]">
-              {match.seriesName}
-            </span>
-            <span className="text-slate-600">·</span>
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-medium whitespace-nowrap">
-              {match.format}
+          <div className="flex items-center gap-1.5 truncate text-slate-400">
+            <span className="font-semibold text-slate-300 truncate max-w-[200px] sm:max-w-[260px]">
+              {match.matchTitlePrefix ? `${match.matchTitlePrefix}, ${match.venueName}` : `${match.seriesName} · ${match.venueName}`}
             </span>
           </div>
 
@@ -107,43 +103,51 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
           </div>
         </div>
 
-        {/* Teams & Scores */}
+        {/* Teams & Scores (Crex style) */}
         <div className="space-y-3">
           {/* Team 1 */}
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className="w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 shadow-sm"
-                style={{
-                  backgroundColor: match.team1.color,
-                  color: match.team1.textColor || '#ffffff',
-                }}
-              >
-                {match.team1.shortName.slice(0, 2)}
-              </div>
+              {match.team1.flagUrl ? (
+                <img
+                  src={match.team1.flagUrl}
+                  alt={match.team1.shortName}
+                  className="w-6 h-6 rounded-full object-cover shrink-0 border border-slate-700 bg-slate-800 shadow-sm"
+                  onError={(e) => {
+                    (e.target as HTMLElement).style.display = 'none';
+                  }}
+                />
+              ) : (
+                <div
+                  className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 shadow-sm"
+                  style={{
+                    backgroundColor: match.team1.color,
+                    color: match.team1.textColor || '#ffffff',
+                  }}
+                >
+                  {match.team1.shortName.slice(0, 2)}
+                </div>
+              )}
               <div className="truncate">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-slate-100 truncate">
-                    {match.team1.name}
-                  </span>
-                  <span className="text-xs text-slate-400 font-medium">
+                  <span className="text-sm font-bold text-slate-100 truncate">
                     {match.team1.shortName}
                   </span>
-                  {match.battingTeamKey === match.team1.key && isLive && (
-                    <span className="text-xs shrink-0" title="Currently Batting">
-                      🏏
-                    </span>
-                  )}
+                  <span className="text-xs text-slate-400 truncate hidden sm:inline">
+                    {match.team1.name}
+                  </span>
                 </div>
               </div>
             </div>
 
             {/* Team 1 Score */}
-            <div className="text-right shrink-0">
+            <div className="text-right shrink-0 flex items-center gap-1.5">
               {match.team1Score ? (
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-base sm:text-lg font-bold font-mono-numbers text-white">
-                    {match.team1Score.runs}-{match.team1Score.wickets}
+                    {match.team1Score.wickets > 0
+                      ? `${match.team1Score.runs}-${match.team1Score.wickets}`
+                      : `${match.team1Score.runs}`}
                   </span>
                   <span className="text-xs text-slate-400 font-mono-numbers">
                     {match.team1Score.overs}
@@ -152,44 +156,57 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
               ) : (
                 <span className="text-xs text-slate-500 font-mono-numbers">Yet to bat</span>
               )}
+              {match.battingTeamKey === match.team1.key && isLive && (
+                <span className="text-xs shrink-0 text-amber-400" title="Batting">
+                  🏏
+                </span>
+              )}
             </div>
           </div>
 
           {/* Team 2 */}
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className="w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 shadow-sm"
-                style={{
-                  backgroundColor: match.team2.color,
-                  color: match.team2.textColor || '#ffffff',
-                }}
-              >
-                {match.team2.shortName.slice(0, 2)}
-              </div>
+              {match.team2.flagUrl ? (
+                <img
+                  src={match.team2.flagUrl}
+                  alt={match.team2.shortName}
+                  className="w-6 h-6 rounded-full object-cover shrink-0 border border-slate-700 bg-slate-800 shadow-sm"
+                  onError={(e) => {
+                    (e.target as HTMLElement).style.display = 'none';
+                  }}
+                />
+              ) : (
+                <div
+                  className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 shadow-sm"
+                  style={{
+                    backgroundColor: match.team2.color,
+                    color: match.team2.textColor || '#ffffff',
+                  }}
+                >
+                  {match.team2.shortName.slice(0, 2)}
+                </div>
+              )}
               <div className="truncate">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-slate-100 truncate">
-                    {match.team2.name}
-                  </span>
-                  <span className="text-xs text-slate-400 font-medium">
+                  <span className="text-sm font-bold text-slate-100 truncate">
                     {match.team2.shortName}
                   </span>
-                  {match.battingTeamKey === match.team2.key && isLive && (
-                    <span className="text-xs shrink-0" title="Currently Batting">
-                      🏏
-                    </span>
-                  )}
+                  <span className="text-xs text-slate-400 truncate hidden sm:inline">
+                    {match.team2.name}
+                  </span>
                 </div>
               </div>
             </div>
 
             {/* Team 2 Score */}
-            <div className="text-right shrink-0">
+            <div className="text-right shrink-0 flex items-center gap-1.5">
               {match.team2Score ? (
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-base sm:text-lg font-bold font-mono-numbers text-white">
-                    {match.team2Score.runs}-{match.team2Score.wickets}
+                    {match.team2Score.wickets > 0
+                      ? `${match.team2Score.runs}-${match.team2Score.wickets}`
+                      : `${match.team2Score.runs}`}
                   </span>
                   <span className="text-xs text-slate-400 font-mono-numbers">
                     {match.team2Score.overs}
@@ -200,18 +217,20 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
                   {isUpcoming ? 'Scheduled' : 'Yet to bat'}
                 </span>
               )}
+              {match.battingTeamKey === match.team2.key && isLive && (
+                <span className="text-xs shrink-0 text-amber-400" title="Batting">
+                  🏏
+                </span>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Live Status or Result Summary Text */}
+        {/* Live Status / Chasing Equation (Crex style amber footer) */}
         <div className="mt-3.5 pt-3 border-t border-slate-800/60">
-          <p className="text-xs font-semibold text-amber-300/90 line-clamp-1">
+          <p className="text-xs font-semibold text-amber-300/95 line-clamp-1">
             {getLiveEquation()}
           </p>
-          {match.sessionText && match.sessionText !== getLiveEquation() && (
-            <p className="text-[11px] text-slate-400 mt-0.5">{match.sessionText}</p>
-          )}
         </div>
 
         {/* Win Probability Bar (if available) */}
@@ -242,11 +261,10 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
         )}
       </div>
 
-      {/* Footer Info: Venue & Card Actions */}
+      {/* Footer Info: Series Name & Card Actions */}
       <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between text-xs text-slate-400">
         <div className="flex items-center gap-1.5 truncate max-w-[200px]">
-          <MapPin className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-          <span className="truncate text-[11px]">{match.venueName}</span>
+          <span className="truncate text-[11px] text-slate-400">{match.seriesName}</span>
         </div>
 
         <div className="flex items-center gap-1">

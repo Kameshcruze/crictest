@@ -118,9 +118,16 @@ export function parseWinProbability(wpStr?: string, team1Key?: string, team2Key?
 export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricketMatch {
   const team1 = resolveTeam(raw.b);
   const team2 = resolveTeam(raw.c);
-  const venueName = resolveVenue(raw.v);
-  const seriesName = resolveSeries(raw.q);
-  const format = (raw.fo || 'Match').trim();
+
+  if (raw.team1flag) team1.flagUrl = raw.team1flag;
+  if (raw.team2flag) team2.flagUrl = raw.team2flag;
+  if (raw.t1Sname) team1.shortName = raw.t1Sname;
+  if (raw.t2Sname) team2.shortName = raw.t2Sname;
+
+  const venueName = raw.vname || resolveVenue(raw.v);
+  const seriesName = raw.sfullname || raw.sname || resolveSeries(raw.q);
+  const format = (raw.fo || raw.t || 'Match').toString().trim();
+  const matchTitlePrefix = raw.matchNums ? `${raw.matchNums} ${format}` : format;
 
   // Innings parsing
   const innings: ParsedInningsScore[] = [];
@@ -154,37 +161,33 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
   let status: 'live' | 'upcoming' | 'completed' = 'upcoming';
   let statusLabel = 'Upcoming';
 
-  const resLower = (raw.res || '').toLowerCase();
+  const resText = (raw.res || raw.soResult || '').toLowerCase();
   const isTerminalResult =
-    resLower.includes('won by') ||
-    resLower.includes('won') ||
-    resLower.includes('drawn') ||
-    resLower.includes('tied') ||
-    resLower.includes('no result') ||
-    resLower.includes('abandoned');
+    resText.includes('won by') ||
+    resText.includes('won') ||
+    resText.includes('drawn') ||
+    resText.includes('tied') ||
+    resText.includes('no result') ||
+    resText.includes('abandoned');
 
   const isInMatchBreak =
-    resLower.includes('innings break') ||
-    resLower.includes('lunch break') ||
-    resLower.includes('tea break') ||
-    resLower.includes('dinner break') ||
-    resLower.includes('stumps') ||
-    resLower.includes('delay') ||
-    resLower.includes('break');
+    resText.includes('innings break') ||
+    resText.includes('lunch break') ||
+    resText.includes('tea break') ||
+    resText.includes('dinner break') ||
+    resText.includes('stumps') ||
+    resText.includes('delay') ||
+    resText.includes('break');
+
+  const hasLiveScore = !!(raw.j || raw.k);
 
   // Match is completed ONLY if finishTime exists or has a terminal win/draw result
   if (raw.finishTime || (isTerminalResult && !isInMatchBreak)) {
     status = 'completed';
-    statusLabel = raw.res || (raw.d === 6 ? 'Match Drawn' : 'Match Ended');
-  } else if (raw.j || raw.k || isInMatchBreak || raw.d === 1 || raw.d === 2) {
-    // Has live score or is currently in progress
-    if (raw.j || raw.k || isInMatchBreak) {
-      status = 'live';
-      statusLabel = raw.res || 'Live';
-    } else {
-      status = 'upcoming';
-      statusLabel = 'Upcoming';
-    }
+    statusLabel = raw.res || raw.soResult || (raw.d === 6 ? 'Match Drawn' : 'Match Ended');
+  } else if (hasLiveScore) {
+    status = 'live';
+    statusLabel = raw.a && !raw.a.startsWith('&') ? raw.a : (raw.soResult || raw.res || 'Live');
   } else {
     status = 'upcoming';
     statusLabel = 'Upcoming';
@@ -194,10 +197,8 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
   let battingTeamKey: string | undefined;
   if (status === 'live') {
     if (raw.k && team2Score) {
-      // 2nd innings is underway: Team 2 is batting
       battingTeamKey = raw.c;
     } else if (raw.j && team1Score) {
-      // 1st innings is underway: Team 1 is batting
       battingTeamKey = raw.b;
     }
   }
@@ -235,7 +236,17 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
   let startTime = new Date();
   if (typeof raw.ti === 'number') {
     startTime = new Date(raw.ti);
+  } else if (typeof raw.tiMs === 'number') {
+    startTime = new Date(raw.tiMs);
   }
+
+  // Result text priority: cleaned a (toss / chasing equation), or soResult, or res
+  const displayResultText =
+    raw.a && !raw.a.startsWith('&')
+      ? raw.a
+      : raw.soResult && !raw.soResult.startsWith('&')
+      ? raw.soResult
+      : raw.res;
 
   return {
     id,
@@ -246,11 +257,12 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
     venueName,
     venueKey: raw.v,
     format,
+    matchTitlePrefix,
     status,
     statusLabel,
-    statusDetail: raw.s || undefined,
-    resultText: raw.res || undefined,
-    sessionText: raw.s || undefined,
+    statusDetail: typeof raw.s === 'string' ? raw.s : undefined,
+    resultText: displayResultText,
+    sessionText: typeof raw.s === 'string' ? raw.s : undefined,
     innings,
     team1Score,
     team2Score,
@@ -275,9 +287,6 @@ export interface FetchResult {
   matchCount: number;
 }
 
-// In-memory persistent client cache of matches so the screen never blinks or clears
-let clientMatchesCache: Record<string, RawCrexMatch> = {};
-
 /**
  * Ultra-fast live fetch:
  * Requests the local endpoint or direct API with sub-100ms response time
@@ -287,9 +296,8 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
   let rawData: RawApiResponse = {};
 
   try {
-    // Try the local fast cache endpoint first with a 1500ms timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1500);
+    const timeoutId = setTimeout(() => controller.abort(), 1200);
 
     const res = await fetch(LOCAL_ENDPOINT, {
       method: 'POST',
@@ -322,18 +330,10 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
     }
   }
 
-  // Merge with existing client cache so matches that are currently live remain visible
-  if (Object.keys(rawData).length > 0) {
-    for (const [id, m] of Object.entries(rawData)) {
-      clientMatchesCache[id] = { ...(clientMatchesCache[id] || {}), ...m };
-    }
-  }
-
-  const finalMatchesSource = Object.keys(rawData).length > 0 ? { ...clientMatchesCache, ...rawData } : clientMatchesCache;
   const latencyMs = Math.round(performance.now() - startTime);
   const matches: ParsedCricketMatch[] = [];
 
-  for (const [id, rawMatch] of Object.entries(finalMatchesSource)) {
+  for (const [id, rawMatch] of Object.entries(rawData)) {
     if (rawMatch && typeof rawMatch === 'object' && rawMatch.b && rawMatch.c) {
       matches.push(transformCrexMatch(id, rawMatch));
     }
@@ -356,7 +356,7 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
 
   return {
     matches,
-    raw: finalMatchesSource,
+    raw: rawData,
     latencyMs,
     timestamp: new Date(),
     matchCount: matches.length,
@@ -396,6 +396,13 @@ export function playAlertSound(type: 'wicket' | 'boundary' | 'refresh' = 'refres
       gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
       osc.start(now);
       osc.stop(now + 0.25);
+    } else {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(600, now);
+      gain.gain.setValueAtTime(0.05, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+      osc.start(now);
+      osc.stop(now + 0.08);
     }
   } catch {
     // Ignore audio context restrictions if blocked

@@ -36,11 +36,22 @@ export interface RawCrexMatch {
   r?: string;
   relevant_team_fkey?: string;
   res?: string; // Result string e.g. "IND won by 6 wickets"
-  s?: string; // Day/Session info e.g. "1/3/90"
-  t?: number;
-  ti: number; // Match start timestamp in milliseconds
+  s?: string | number; // Day/Session info e.g. "1/3/90"
+  t?: number | string;
+  ti: number | string; // Match start timestamp in milliseconds
   v: string; // Venue key
   wp?: string; // Win probability e.g. "R,218014,646624,13"
+  team1flag?: string;
+  team2flag?: string;
+  vname?: string;
+  sname?: string;
+  sfullname?: string;
+  matchNums?: string;
+  soResult?: string;
+  t1Sname?: string;
+  t2Sname?: string;
+  t1scoreDisplay?: string;
+  t2scoreDisplay?: string;
   [key: string]: unknown;
 }
 
@@ -56,6 +67,7 @@ export interface TeamInfo {
   textColor?: string;
   darkColor?: string;
   lightColor?: string;
+  flagUrl?: string;
 }
 
 export interface ParsedInningsScore {
@@ -86,6 +98,7 @@ export interface ParsedCricketMatch {
   venueName: string;
   venueKey: string;
   format: string;
+  matchTitlePrefix?: string;
   status: 'live' | 'upcoming' | 'completed';
   statusLabel: string;
   statusDetail?: string;
