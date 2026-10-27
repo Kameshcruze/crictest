@@ -24,6 +24,7 @@ interface NavbarProps {
   onOpenScriptModal: () => void;
   onOpenInspectorModal: () => void;
   lastUpdated?: Date;
+  isSseActive?: boolean;
 }
 
 const COUNTRY_OPTIONS = [
@@ -48,6 +49,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleSound,
   onOpenScriptModal,
   onOpenInspectorModal,
+  isSseActive,
 }) => {
   return (
     <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-slate-800">
@@ -67,12 +69,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
                   LIVE
                 </span>
-                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-300 bg-emerald-950/80 px-1.5 py-0.5 rounded border border-emerald-800/40">
-                  <Zap className="w-3 h-3 text-amber-400" /> 3s Sync
+                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-300 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800/40">
+                  <Zap className="w-3 h-3 text-amber-400 animate-bounce" />
+                  {isSseActive ? 'Instant Push' : '1s Real-time'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 hidden sm:block">
-                Real-time Crex Match Extractor
+                Real-time Crex Match Extractor · Updated Every Second
               </p>
             </div>
           </div>
@@ -99,7 +102,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="flex items-center bg-slate-800/80 border border-slate-700 rounded-lg p-1 text-xs">
               <button
                 type="button"
-                onClick={() => onIntervalChange(autoRefreshInterval === 0 ? 3 : 0)}
+                onClick={() => onIntervalChange(autoRefreshInterval === 0 ? 1 : 0)}
                 className={`px-2 py-1 rounded flex items-center gap-1 font-medium transition-colors ${
                   autoRefreshInterval > 0
                     ? 'text-emerald-400 hover:bg-slate-700'
@@ -128,10 +131,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                 className="bg-transparent text-slate-300 text-[11px] border-l border-slate-700 pl-1.5 pr-1 py-0.5 focus:outline-none cursor-pointer font-medium"
                 title="Select live refresh frequency"
               >
-                <option value={2} className="bg-slate-900 text-slate-100">2s (Fastest)</option>
-                <option value={3} className="bg-slate-900 text-slate-100">3s (Crex Live)</option>
+                <option value={1} className="bg-slate-900 text-slate-100">1s (Every Second)</option>
+                <option value={2} className="bg-slate-900 text-slate-100">2s</option>
+                <option value={3} className="bg-slate-900 text-slate-100">3s</option>
                 <option value={5} className="bg-slate-900 text-slate-100">5s</option>
-                <option value={10} className="bg-slate-900 text-slate-100">10s</option>
                 <option value={0} className="bg-slate-900 text-slate-100">Off</option>
               </select>
             </div>

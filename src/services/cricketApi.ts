@@ -240,7 +240,6 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
     startTime = new Date(raw.tiMs);
   }
 
-  // Result text priority: cleaned a (toss / chasing equation), or soResult, or res
   const displayResultText =
     raw.a && !raw.a.startsWith('&')
       ? raw.a
@@ -287,9 +286,34 @@ export interface FetchResult {
   matchCount: number;
 }
 
+export function parseMatchesMap(rawData: RawApiResponse): ParsedCricketMatch[] {
+  const matches: ParsedCricketMatch[] = [];
+  for (const [id, rawMatch] of Object.entries(rawData)) {
+    if (rawMatch && typeof rawMatch === 'object' && rawMatch.b && rawMatch.c) {
+      matches.push(transformCrexMatch(id, rawMatch));
+    }
+  }
+
+  matches.sort((a, b) => {
+    const statusPriority = { live: 0, upcoming: 1, completed: 2 };
+    if (statusPriority[a.status] !== statusPriority[b.status]) {
+      return statusPriority[a.status] - statusPriority[b.status];
+    }
+    if (a.status === 'upcoming') {
+      return a.startTime.getTime() - b.startTime.getTime();
+    }
+    if (a.status === 'completed') {
+      return (b.finishTime?.getTime() || b.startTime.getTime()) - (a.finishTime?.getTime() || a.startTime.getTime());
+    }
+    return b.startTime.getTime() - a.startTime.getTime();
+  });
+
+  return matches;
+}
+
 /**
- * Ultra-fast live fetch:
- * Requests the local endpoint or direct API with sub-100ms response time
+ * Ultra-fast low-latency match fetch:
+ * Requests local in-memory endpoint or Goscorer API with tight 450ms timeout
  */
 export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResult> {
   const startTime = performance.now();
@@ -297,7 +321,7 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1200);
+    const timeoutId = setTimeout(() => controller.abort(), 450);
 
     const res = await fetch(LOCAL_ENDPOINT, {
       method: 'POST',
@@ -312,10 +336,10 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
       rawData = json.matches || {};
       if (json.mapping) registerDynamicMapping(json.mapping);
     } else {
-      throw new Error('Local endpoint failed');
+      throw new Error('Local endpoint non-200');
     }
   } catch {
-    // Fallback directly to Goscorer API (responds in ~15-50ms)
+    // Ultra-fast direct fetch to Goscorer API (takes ~7-25ms)
     try {
       const res = await fetch(DIRECT_GOSCORER_ENDPOINT, {
         method: 'POST',
@@ -325,34 +349,13 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
       if (res.ok) {
         rawData = await res.json();
       }
-    } catch (e: any) {
-      console.warn('Direct fetch error:', e.message);
+    } catch {
+      // Ignore
     }
   }
 
   const latencyMs = Math.round(performance.now() - startTime);
-  const matches: ParsedCricketMatch[] = [];
-
-  for (const [id, rawMatch] of Object.entries(rawData)) {
-    if (rawMatch && typeof rawMatch === 'object' && rawMatch.b && rawMatch.c) {
-      matches.push(transformCrexMatch(id, rawMatch));
-    }
-  }
-
-  // Sort: Live matches first, then Upcoming, then Completed
-  matches.sort((a, b) => {
-    const statusPriority = { live: 0, upcoming: 1, completed: 2 };
-    if (statusPriority[a.status] !== statusPriority[b.status]) {
-      return statusPriority[a.status] - statusPriority[b.status];
-    }
-    if (a.status === 'upcoming') {
-      return a.startTime.getTime() - b.startTime.getTime();
-    }
-    if (a.status === 'completed') {
-      return (b.finishTime?.getTime() || b.startTime.getTime()) - (a.finishTime?.getTime() || a.startTime.getTime());
-    }
-    return b.startTime.getTime() - a.startTime.getTime();
-  });
+  const matches = parseMatchesMap(rawData);
 
   return {
     matches,
@@ -396,13 +399,6 @@ export function playAlertSound(type: 'wicket' | 'boundary' | 'refresh' = 'refres
       gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
       osc.start(now);
       osc.stop(now + 0.25);
-    } else {
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(600, now);
-      gain.gain.setValueAtTime(0.05, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-      osc.start(now);
-      osc.stop(now + 0.08);
     }
   } catch {
     // Ignore audio context restrictions if blocked

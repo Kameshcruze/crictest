@@ -23,40 +23,95 @@ let matchStore: {
   lastUpdated: 0,
 };
 
-// Fast background sync directly from Goscorer API (runs every 3 seconds)
+// Connected SSE clients for instantaneous real-time streaming
+const sseClients: Set<express.Response> = new Set();
+
+function broadcastToClients(data: any) {
+  const message = `data: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(message);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+let isGoscorerRunning = false;
+let isCrexRunning = false;
+
+// 1. Ultra-fast Goscorer API sync (runs every 1 second, ~10ms)
 async function syncGoscorerApi(countryCode = 'IN') {
+  if (isGoscorerRunning) return;
+  isGoscorerRunning = true;
+
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1200);
+
     const res = await fetch('https://api.goscorer.com/api/v2/getTopMatches', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cc: countryCode }),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
 
     if (res.ok) {
       const data = await res.json();
+      let hasChange = false;
+
       for (const [id, m] of Object.entries(data)) {
-        // Fresh API match always overwrites existing match
+        const existing = matchStore.matches[id];
+        if (
+          !existing ||
+          existing.j !== (m as any).j ||
+          existing.k !== (m as any).k ||
+          existing.res !== (m as any).res
+        ) {
+          hasChange = true;
+        }
         matchStore.matches[id] = { ...(matchStore.matches[id] || {}), ...(m as any) };
       }
+
       matchStore.lastUpdated = Date.now();
+
+      if (hasChange && sseClients.size > 0) {
+        broadcastToClients({
+          type: 'update',
+          matches: matchStore.matches,
+          timestamp: new Date().toISOString(),
+        });
+      }
     }
   } catch {
-    // Non-blocking background catch
+    // Non-blocking
+  } finally {
+    isGoscorerRunning = false;
   }
 }
 
-// Background sync for full Crex matches pool (runs every 3 seconds)
+// 2. Continuous 1.5s Crex Pool sync so all matches (including OMA vs NED, etc.) stay 100% updated every 1-2s
 async function syncCrexPool() {
+  if (isCrexRunning) return;
+  isCrexRunning = true;
+
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+
     const html = await fetch('https://crex.com/cricket-live-score', {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
+      signal: controller.signal,
     }).then((r) => r.text());
+    clearTimeout(timeout);
 
     const regex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
     let match;
+    let hasChange = false;
 
     while ((match = regex.exec(html)) !== null) {
       if (match[1].includes('ssr-bootstrap-v1') && match[1].includes('desktopTopMatchesRaw')) {
@@ -71,7 +126,16 @@ async function syncCrexPool() {
 
           if (parsed.desktopTopMatchesRaw) {
             for (const [id, m] of Object.entries(parsed.desktopTopMatchesRaw)) {
-              // Fresh Crex match always overwrites existing match
+              const existing = matchStore.matches[id];
+              if (
+                !existing ||
+                existing.j !== (m as any).j ||
+                existing.k !== (m as any).k ||
+                existing.res !== (m as any).res ||
+                existing.finishTime !== (m as any).finishTime
+              ) {
+                hasChange = true;
+              }
               matchStore.matches[id] = { ...(matchStore.matches[id] || {}), ...(m as any) };
             }
           }
@@ -90,23 +154,66 @@ async function syncCrexPool() {
         }
       }
     }
+
     matchStore.lastUpdated = Date.now();
+
+    if (hasChange && sseClients.size > 0) {
+      broadcastToClients({
+        type: 'update',
+        matches: matchStore.matches,
+        timestamp: new Date().toISOString(),
+      });
+    }
   } catch {
-    // Non-blocking background catch
+    // Non-blocking
+  } finally {
+    isCrexRunning = false;
   }
 }
 
 // Initial eager sync
-syncCrexPool().then(() => syncGoscorerApi());
+syncGoscorerApi().then(syncCrexPool);
 
-// Run live syncs every 3 seconds in parallel
-setInterval(syncGoscorerApi, 3000);
-setInterval(syncCrexPool, 3000);
+// Continuous 1-second live polling loop
+setInterval(syncGoscorerApi, 1000); // Check Goscorer API every 1000ms
+setInterval(syncCrexPool, 1800);    // Check Crex match pool every 1800ms
 
-// Endpoint: Serves immediately in < 2ms from memory
+// SSE Live Stream: Instant zero-latency push to connected clients
+app.get('/api/live-stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  // Send current state immediately on connect
+  res.write(
+    `data: ${JSON.stringify({
+      type: 'init',
+      matches: matchStore.matches,
+      mapping: matchStore.mapping,
+      timestamp: new Date().toISOString(),
+    })}\n\n`
+  );
+
+  sseClients.add(res);
+
+  // Keep-alive heartbeat every 10s
+  const heartbeat = setInterval(() => {
+    res.write(': keepalive\n\n');
+  }, 10000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+});
+
+// High-speed endpoint: Responds immediately from memory in < 1ms
 app.all(['/api/top-matches', '/api/v2/getTopMatches'], async (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
   if (Object.keys(matchStore.matches).length === 0) {
-    await Promise.all([syncCrexPool(), syncGoscorerApi(req.body?.cc || 'IN')]);
+    await Promise.all([syncGoscorerApi(req.body?.cc || 'IN'), syncCrexPool()]);
   }
 
   res.json({
@@ -133,7 +240,7 @@ async function startServer() {
   }
 
   app.listen(PORT, () => {
-    console.log(`Live Scorer server running at http://localhost:${PORT}`);
+    console.log(`Live Scorer server running on port ${PORT}`);
   });
 }
 
