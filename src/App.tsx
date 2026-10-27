@@ -11,6 +11,16 @@ import { MatchCard } from './components/MatchCard';
 import { MatchDetailModal } from './components/MatchDetailModal';
 import { OnlineScriptModal } from './components/OnlineScriptModal';
 import { ApiInspectorModal } from './components/ApiInspectorModal';
+import { TelegramBotModal } from './components/TelegramBotModal';
+import {
+  TelegramConfig,
+  getStoredTelegramConfig,
+  saveStoredTelegramConfig,
+  sendTelegramMessage,
+  formatWicketAlert,
+  formatResultAlert,
+  formatScoreboardDigest,
+} from './services/telegramService';
 import {
   Radio,
   AlertTriangle,
@@ -19,6 +29,7 @@ import {
   Code2,
   Info,
   Zap,
+  Send,
 } from 'lucide-react';
 
 export default function App() {
@@ -44,6 +55,12 @@ export default function App() {
   const [selectedMatch, setSelectedMatch] = useState<ParsedCricketMatch | null>(null);
   const [isScriptModalOpen, setIsScriptModalOpen] = useState<boolean>(false);
   const [isInspectorModalOpen, setIsInspectorModalOpen] = useState<boolean>(false);
+  const [isTelegramModalOpen, setIsTelegramModalOpen] = useState<boolean>(false);
+
+  // Telegram Bot Configuration
+  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>(getStoredTelegramConfig);
+  const lastDigestTimeRef = useRef<number>(Date.now());
+  const finishedMatchesRef = useRef<Set<string>>(new Set());
 
   const [secondsRemaining, setSecondsRemaining] = useState<number>(1);
   const inFlightRef = useRef<boolean>(false);
@@ -68,7 +85,7 @@ export default function App() {
         setLastUpdated(new Date());
         setTickCounter((prev) => prev + 1);
 
-        // Detect score changes for audio chime alerts
+        // Detect score changes for audio chime alerts & Telegram alerts
         let scoreChanged = false;
         let wicketFell = false;
 
@@ -80,6 +97,24 @@ export default function App() {
               if (prev) {
                 if (activeScore.wickets > prev.wickets) {
                   wicketFell = true;
+
+                  // Telegram Wicket Alert
+                  if (
+                    telegramConfig.enabled &&
+                    telegramConfig.botToken &&
+                    telegramConfig.chatId &&
+                    telegramConfig.notifyWickets
+                  ) {
+                    const battingTeam = m.battingTeamKey === m.team2.key ? m.team2.shortName : m.team1.shortName;
+                    const alertHtml = formatWicketAlert(
+                      m,
+                      battingTeam,
+                      activeScore.runs,
+                      activeScore.wickets,
+                      activeScore.overs
+                    );
+                    sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertHtml);
+                  }
                 } else if (activeScore.runs > prev.runs) {
                   scoreChanged = true;
                 }
@@ -90,7 +125,34 @@ export default function App() {
               };
             }
           }
+
+          // Telegram Match Result Alert
+          if (
+            m.status === 'completed' &&
+            telegramConfig.enabled &&
+            telegramConfig.botToken &&
+            telegramConfig.chatId &&
+            telegramConfig.notifyResults &&
+            !finishedMatchesRef.current.has(m.id)
+          ) {
+            finishedMatchesRef.current.add(m.id);
+            const resultHtml = formatResultAlert(m);
+            sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, resultHtml);
+          }
         });
+
+        // Telegram Periodic Scoreboard Digest
+        if (
+          telegramConfig.enabled &&
+          telegramConfig.botToken &&
+          telegramConfig.chatId &&
+          telegramConfig.notifyPeriodicDigest &&
+          Date.now() - lastDigestTimeRef.current >= telegramConfig.digestIntervalMinutes * 60 * 1000
+        ) {
+          lastDigestTimeRef.current = Date.now();
+          const digestHtml = formatScoreboardDigest(result.matches);
+          sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, digestHtml);
+        }
 
         if (soundEnabled && silent) {
           if (wicketFell) {
@@ -110,7 +172,7 @@ export default function App() {
         setIsFetching(false);
       }
     },
-    [countryCode, soundEnabled]
+    [countryCode, soundEnabled, telegramConfig]
   );
 
   // Initial load
@@ -182,6 +244,8 @@ export default function App() {
         onToggleSound={() => setSoundEnabled(!soundEnabled)}
         onOpenScriptModal={() => setIsScriptModalOpen(true)}
         onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
+        onOpenTelegramModal={() => setIsTelegramModalOpen(true)}
+        isTelegramActive={telegramConfig.enabled && !!telegramConfig.botToken && !!telegramConfig.chatId}
         lastUpdated={lastUpdated}
         isSseActive={true}
       />
@@ -213,7 +277,22 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-start md:self-auto">
+          <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+            <button
+              type="button"
+              onClick={() => setIsTelegramModalOpen(true)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors border shadow-sm ${
+                telegramConfig.enabled && telegramConfig.botToken && telegramConfig.chatId
+                  ? 'bg-blue-600/30 text-blue-300 border-blue-500/50 hover:bg-blue-600/40'
+                  : 'bg-slate-800 text-blue-300 border-slate-700 hover:bg-slate-700'
+              }`}
+            >
+              <Send className="w-3.5 h-3.5 -rotate-12" />
+              <span>Telegram Bot</span>
+              {telegramConfig.enabled && telegramConfig.botToken && telegramConfig.chatId && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+              )}
+            </button>
             <button
               type="button"
               onClick={() => setIsScriptModalOpen(true)}
@@ -345,6 +424,15 @@ export default function App() {
             >
               API Raw Inspector
             </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={() => setIsTelegramModalOpen(true)}
+              className="text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1 font-semibold"
+            >
+              <Send className="w-3 h-3 -rotate-12" />
+              <span>Telegram Bot</span>
+            </button>
           </div>
         </div>
       </footer>
@@ -374,6 +462,18 @@ export default function App() {
         }}
         isFetching={isFetching}
         latencyMs={latencyMs}
+      />
+
+      {/* Telegram Bot Manager & Broadcaster Modal */}
+      <TelegramBotModal
+        isOpen={isTelegramModalOpen}
+        onClose={() => setIsTelegramModalOpen(false)}
+        config={telegramConfig}
+        onSaveConfig={(newConfig) => {
+          setTelegramConfig(newConfig);
+          saveStoredTelegramConfig(newConfig);
+        }}
+        matches={matches}
       />
     </div>
   );

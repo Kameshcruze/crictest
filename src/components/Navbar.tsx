@@ -9,6 +9,7 @@ import {
   Play,
   Pause,
   Zap,
+  Send,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -23,6 +24,8 @@ interface NavbarProps {
   onToggleSound: () => void;
   onOpenScriptModal: () => void;
   onOpenInspectorModal: () => void;
+  onOpenTelegramModal: () => void;
+  isTelegramActive?: boolean;
   lastUpdated?: Date;
   isSseActive?: boolean;
 }
@@ -49,6 +52,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleSound,
   onOpenScriptModal,
   onOpenInspectorModal,
+  onOpenTelegramModal,
+  isTelegramActive,
   isSseActive,
 }) => {
   return (
@@ -182,11 +187,29 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               type="button"
               onClick={onOpenInspectorModal}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-colors shadow-sm shadow-emerald-900/30"
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-colors shadow-sm shadow-emerald-900/30"
               title="Inspect payload and raw JSON data from api.goscorer.com"
             >
               <Code2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">API Inspector</span>
+              <span>API Inspector</span>
+            </button>
+
+            {/* Telegram Bot Integration Button */}
+            <button
+              type="button"
+              onClick={onOpenTelegramModal}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm ${
+                isTelegramActive
+                  ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/40 ring-1 ring-blue-400/50'
+                  : 'bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-700'
+              }`}
+              title="Connect Telegram Bot to broadcast live cricket updates to your group"
+            >
+              <Send className="w-3.5 h-3.5 -rotate-12" />
+              <span>Telegram Bot</span>
+              {isTelegramActive && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+              )}
             </button>
           </div>
         </div>
