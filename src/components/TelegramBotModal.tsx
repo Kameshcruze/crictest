@@ -43,19 +43,25 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   matches,
 }) => {
   const [activeTab, setActiveTab] = useState<'control' | 'guide' | 'scripts'>('control');
-  const [botToken, setBotToken] = useState<string>(config.botToken);
-  const [chatId, setChatId] = useState<string>(config.chatId);
-  const [enabled, setEnabled] = useState<boolean>(config.enabled);
-  const [notifyWickets, setNotifyWickets] = useState<boolean>(config.notifyWickets);
-  const [notifyResults, setNotifyResults] = useState<boolean>(config.notifyResults);
-  const [notifyPeriodicDigest, setNotifyPeriodicDigest] = useState<boolean>(config.notifyPeriodicDigest);
-  const [digestIntervalMinutes, setDigestIntervalMinutes] = useState<number>(config.digestIntervalMinutes || 5);
+  const [botToken, setBotToken] = useState<string>(config.botToken || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ');
+  const [chatId, setChatId] = useState<string>(config.chatId || '-1003980667930');
+  const [enabled, setEnabled] = useState<boolean>(config.enabled ?? true);
+  const [notifyWickets, setNotifyWickets] = useState<boolean>(config.notifyWickets ?? true);
+  const [notifyResults, setNotifyResults] = useState<boolean>(config.notifyResults ?? true);
+  const [notifyPeriodicDigest, setNotifyPeriodicDigest] = useState<boolean>(config.notifyPeriodicDigest ?? true);
+  const [digestIntervalMinutes, setDigestIntervalMinutes] = useState<number>(config.digestIntervalMinutes || 3);
 
   const [showToken, setShowToken] = useState<boolean>(false);
   const [isTesting, setIsTesting] = useState<boolean>(false);
   const [testStatus, setTestStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [isSendingManual, setIsSendingManual] = useState<boolean>(false);
   const [copiedScript, setCopiedScript] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (config.botToken) setBotToken(config.botToken);
+    if (config.chatId) setChatId(config.chatId);
+    setEnabled(config.enabled ?? true);
+  }, [config]);
 
   if (!isOpen) return null;
 

@@ -8,17 +8,20 @@ export default async function handler(req: any, res: any) {
   }
 
   const { botToken, chatId, text } = req.body || {};
-  if (!botToken || !chatId || !text) {
-    return res.status(400).json({ ok: false, error: 'Missing botToken, chatId, or text' });
+  const finalToken = botToken || process.env.TELEGRAM_BOT_TOKEN || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ';
+  const finalChatId = chatId || process.env.TELEGRAM_CHAT_ID || '-1003980667930';
+
+  if (!text) {
+    return res.status(400).json({ ok: false, error: 'Missing message text' });
   }
 
   try {
-    const cleanToken = String(botToken).trim().replace(/^bot/i, '');
+    const cleanToken = String(finalToken).trim().replace(/^bot/i, '');
     const tgRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: String(chatId).trim(),
+        chat_id: String(finalChatId).trim(),
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,

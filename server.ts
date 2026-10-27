@@ -37,6 +37,56 @@ function broadcastToClients(data: any) {
   }
 }
 
+// Backend Automated Telegram Broadcaster
+const DEFAULT_TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ';
+const DEFAULT_TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '-1003980667930';
+
+async function sendTelegramBroadcast(htmlText: string) {
+  if (!DEFAULT_TELEGRAM_BOT_TOKEN || !DEFAULT_TELEGRAM_CHAT_ID) return false;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${DEFAULT_TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: DEFAULT_TELEGRAM_CHAT_ID,
+        text: htmlText,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+    });
+    return res.ok;
+  } catch (e: any) {
+    console.error('Telegram broadcast error:', e.message);
+    return false;
+  }
+}
+
+// Track match state for automated notifications
+const backendScoresSnapshot: Record<
+  string,
+  {
+    score1: string;
+    score2: string;
+    wickets1: number;
+    wickets2: number;
+    res?: string;
+  }
+> = {};
+
+const finishedNotifiedMatches = new Set<string>();
+let lastDigestTimestamp = Date.now();
+
+function parseScore(raw?: string) {
+  if (!raw || typeof raw !== 'string') return { runs: 0, wickets: 0, overs: '0' };
+  const match = raw.trim().match(/^(\d+)(?:\/(\d+))?(?:\((\d+(?:\.\d+)?))?/);
+  if (!match) return { runs: 0, wickets: 0, overs: '0' };
+  return {
+    runs: parseInt(match[1], 10) || 0,
+    wickets: match[2] !== undefined ? parseInt(match[2], 10) : 0,
+    overs: match[3] || '0',
+  };
+}
+
 let isGoscorerRunning = false;
 let isCrexRunning = false;
 
@@ -68,16 +118,95 @@ async function syncGoscorerApi(countryCode = 'IN') {
       let hasChange = false;
 
       for (const [id, m] of Object.entries(data)) {
+        const item = m as any;
         const existing = matchStore.matches[id];
         if (
           !existing ||
-          existing.j !== (m as any).j ||
-          existing.k !== (m as any).k ||
-          existing.res !== (m as any).res
+          existing.j !== item.j ||
+          existing.k !== item.k ||
+          existing.res !== item.res
         ) {
           hasChange = true;
         }
-        matchStore.matches[id] = { ...(matchStore.matches[id] || {}), ...(m as any) };
+        matchStore.matches[id] = { ...(matchStore.matches[id] || {}), ...item };
+
+        // Automated backend Telegram detection
+        const prev = backendScoresSnapshot[id];
+        const curScore1 = parseScore(item.j);
+        const curScore2 = parseScore(item.k);
+        const team1Name = item.t1Sname || item.b || 'Team 1';
+        const team2Name = item.t2Sname || item.c || 'Team 2';
+        const format = item.fo || 'Match';
+
+        if (prev) {
+          // Check for wicket in innings 1
+          if (curScore1.wickets > prev.wickets1 && (item.j || '').includes('/')) {
+            const wicketMsg =
+              `🚨 <b>WICKET FALLS!</b> 🚨\n\n` +
+              `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
+              `💥 <b>${team1Name}</b> lose a wicket!\n` +
+              `📊 Current Score: <b>${curScore1.runs}/${curScore1.wickets}</b> (${curScore1.overs} ov)\n` +
+              `⚡ <i>${item.res || item.soResult || 'Live'}</i>`;
+            sendTelegramBroadcast(wicketMsg);
+          }
+          // Check for wicket in innings 2
+          if (curScore2.wickets > prev.wickets2 && (item.k || '').includes('/')) {
+            const wicketMsg =
+              `🚨 <b>WICKET FALLS!</b> 🚨\n\n` +
+              `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
+              `💥 <b>${team2Name}</b> lose a wicket!\n` +
+              `📊 Current Score: <b>${curScore2.runs}/${curScore2.wickets}</b> (${curScore2.overs} ov)\n` +
+              `⚡ <i>${item.res || item.soResult || 'Live'}</i>`;
+            sendTelegramBroadcast(wicketMsg);
+          }
+        }
+
+        // Check for match conclusion
+        const resText = (item.res || item.soResult || '').toLowerCase();
+        const isFinished = item.finishTime || resText.includes('won by') || resText.includes('won') || resText.includes('drawn');
+        if (isFinished && !finishedNotifiedMatches.has(id)) {
+          finishedNotifiedMatches.add(id);
+          const resultMsg =
+            `🏆 <b>MATCH CONCLUDED!</b> 🏆\n\n` +
+            `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
+            `🥇 <b>Result: ${item.res || item.soResult}</b>\n\n` +
+            `📊 <b>Scores:</b>\n` +
+            (item.j ? `• ${team1Name}: <b>${item.j}</b>\n` : '') +
+            (item.k ? `• ${team2Name}: <b>${item.k}</b>\n` : '') +
+            (item.sname || item.sfullname ? `\n🏆 ${item.sname || item.sfullname}` : '');
+          sendTelegramBroadcast(resultMsg);
+        }
+
+        backendScoresSnapshot[id] = {
+          score1: item.j || '',
+          score2: item.k || '',
+          wickets1: curScore1.wickets,
+          wickets2: curScore2.wickets,
+          res: item.res,
+        };
+      }
+
+      // Periodic Scoreboard Digest: Every 3 minutes automatically
+      if (now - lastDigestTimestamp >= 180000) {
+        lastDigestTimestamp = now;
+        const liveItems = Object.entries(matchStore.matches).filter(([_, m]) => (m.j || m.k) && !m.finishTime);
+        if (liveItems.length > 0) {
+          const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          let digest = `🏏 <b>CREX LIVE CRICKET DIGEST</b> · <i>${timeStr}</i>\n`;
+          digest += `🔥 <b>${liveItems.length} Live Matches in Progress</b>\n`;
+          digest += `───────────────────\n\n`;
+          liveItems.forEach(([_, m], idx) => {
+            const t1 = m.t1Sname || m.b || 'T1';
+            const t2 = m.t2Sname || m.c || 'T2';
+            digest += `<b>${idx + 1}. ${t1} vs ${t2}</b> (${m.fo || 'Match'})\n`;
+            digest += `   • <b>${t1}</b>: ${m.j || 'Yet to bat'}\n`;
+            digest += `   • <b>${t2}</b>: ${m.k || 'Yet to bat'}\n`;
+            if (m.res || m.soResult) digest += `   • <i>${m.res || m.soResult}</i>\n`;
+            digest += `\n`;
+          });
+          digest += `───────────────────\n⚡ <i>Live automated broadcast</i>`;
+          sendTelegramBroadcast(digest);
+        }
       }
 
       matchStore.lastUpdated = Date.now();
@@ -228,17 +357,20 @@ app.all(['/api/top-matches', '/api/v2/getTopMatches'], async (req, res) => {
 // Telegram Bot Dispatch Proxy
 app.post('/api/telegram/send', async (req, res) => {
   const { botToken, chatId, text } = req.body || {};
-  if (!botToken || !chatId || !text) {
-    return res.status(400).json({ ok: false, error: 'Missing botToken, chatId, or text' });
+  const token = botToken || DEFAULT_TELEGRAM_BOT_TOKEN;
+  const targetChatId = chatId || DEFAULT_TELEGRAM_CHAT_ID;
+
+  if (!text) {
+    return res.status(400).json({ ok: false, error: 'Missing message text' });
   }
 
   try {
-    const cleanToken = String(botToken).trim().replace(/^bot/i, '');
+    const cleanToken = String(token).trim().replace(/^bot/i, '');
     const tgRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: String(chatId).trim(),
+        chat_id: String(targetChatId).trim(),
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
@@ -250,6 +382,15 @@ app.post('/api/telegram/send', async (req, res) => {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// Trigger initial connection greeting on boot
+setTimeout(() => {
+  sendTelegramBroadcast(
+    '🏏 <b>Crex Live Cricket Scorer Connected!</b>\n\n' +
+    '✅ Backend automated live cricket feed is now active.\n' +
+    '📢 Real-time wickets, match conclusions, and live scoreboards will be broadcasted here automatically.'
+  );
+}, 2000);
 
 // Mount Vite or serve static files
 async function startServer() {

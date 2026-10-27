@@ -12,23 +12,29 @@ export interface TelegramConfig {
 }
 
 export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
-  botToken: '',
-  chatId: '',
-  enabled: false,
+  botToken: '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ',
+  chatId: '-1003980667930',
+  enabled: true,
   notifyWickets: true,
   notifyResults: true,
   notifyBoundaries: false,
-  notifyPeriodicDigest: false,
-  digestIntervalMinutes: 5,
+  notifyPeriodicDigest: true,
+  digestIntervalMinutes: 3,
 };
 
-const STORAGE_KEY = 'crex_telegram_bot_config_v1';
+const STORAGE_KEY = 'crex_telegram_bot_config_v2';
 
 export function getStoredTelegramConfig(): TelegramConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_TELEGRAM_CONFIG;
-    return { ...DEFAULT_TELEGRAM_CONFIG, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_TELEGRAM_CONFIG,
+      ...parsed,
+      botToken: parsed.botToken || DEFAULT_TELEGRAM_CONFIG.botToken,
+      chatId: parsed.chatId || DEFAULT_TELEGRAM_CONFIG.chatId,
+    };
   } catch {
     return DEFAULT_TELEGRAM_CONFIG;
   }
