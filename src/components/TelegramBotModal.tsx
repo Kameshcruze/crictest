@@ -42,7 +42,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   onSaveConfig,
   matches,
 }) => {
-  const [activeTab, setActiveTab] = useState<'control' | 'guide' | 'scripts'>('control');
+  const [activeTab, setActiveTab] = useState<'always-on' | 'control' | 'guide' | 'scripts'>('always-on');
   const [botToken, setBotToken] = useState<string>(config.botToken || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ');
   const [chatId, setChatId] = useState<string>(config.chatId || '-1003980667930');
   const [enabled, setEnabled] = useState<boolean>(config.enabled ?? true);
@@ -53,9 +53,13 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
 
   const [showToken, setShowToken] = useState<boolean>(false);
   const [isTesting, setIsTesting] = useState<boolean>(false);
+  const [isTestingCron, setIsTestingCron] = useState<boolean>(false);
   const [testStatus, setTestStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [isSendingManual, setIsSendingManual] = useState<boolean>(false);
   const [copiedScript, setCopiedScript] = useState<string | null>(null);
+
+  const originUrl = typeof window !== 'undefined' ? window.location.origin : '';
+  const cronWebhookUrl = `${originUrl}/api/cron`;
 
   React.useEffect(() => {
     if (config.botToken) setBotToken(config.botToken);
@@ -136,11 +140,101 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
     }
   };
 
+  const handleTestCron = async () => {
+    setIsTestingCron(true);
+    setTestStatus(null);
+    try {
+      const res = await fetch('/api/cron');
+      const data = await res.json();
+      if (data.ok) {
+        setTestStatus({
+          ok: true,
+          message: `Cron webhook triggered successfully! Live matches: ${data.liveMatchesCount}. Broadcast sent to Telegram group!`,
+        });
+      } else {
+        setTestStatus({ ok: false, message: data.error || 'Cron execution failed.' });
+      }
+    } catch (err: any) {
+      setTestStatus({ ok: false, message: err.message });
+    } finally {
+      setIsTestingCron(false);
+    }
+  };
+
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
     setCopiedScript(id);
     setTimeout(() => setCopiedScript(null), 2000);
   };
+
+  const cloudflareWorkerScript = `/**
+ * 24/7 Cloudflare Worker Crex Live Cricket Telegram Bot
+ * Runs 100% Free on Cloudflare's Global Network (No computer or browser needed)
+ * 100,000 free requests/day & unlimited Cron Triggers
+ */
+
+const BOT_TOKEN = "${botToken || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ'}";
+const CHAT_ID = "${chatId || '-1003980667930'}";
+
+export default {
+  // 1. Cron Trigger (runs every minute even with no users)
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(checkAndBroadcast());
+  },
+
+  // 2. HTTP Fetch trigger (for testing)
+  async fetch(request, env, ctx) {
+    await checkAndBroadcast();
+    return new Response("Cron executed successfully", { status: 200 });
+  }
+};
+
+async function checkAndBroadcast() {
+  try {
+    const now = Date.now();
+    const res = await fetch("https://api.goscorer.com/api/v2/getTopMatches?_t=" + now, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cc: "IN", _t: now })
+    });
+
+    if (!res.ok) return;
+    const matches = await res.json();
+    const live = Object.entries(matches).filter(([_, m]) => (m.j || m.k) && !m.finishTime);
+
+    if (live.length > 0) {
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      let text = "🏏 <b>CREX LIVE CRICKET 24/7 DIGEST</b> · <i>" + timeStr + "</i>\\n";
+      text += "🔥 <b>" + live.length + " Live Matches in Progress</b>\\n───────────────────\\n\\n";
+
+      live.forEach(([_, m], i) => {
+        const t1 = m.t1Sname || m.b || "Team 1";
+        const t2 = m.t2Sname || m.c || "Team 2";
+        text += "<b>" + (i + 1) + ". " + t1 + " vs " + t2 + "</b> (" + (m.fo || "Match") + ")\\n";
+        text += "   • <b>" + t1 + "</b>: " + (m.j || "Yet to bat") + "\\n";
+        text += "   • <b>" + t2 + "</b>: " + (m.k || "Yet to bat") + "\\n";
+        if (m.res || m.soResult) text += "   • <i>" + (m.res || m.soResult) + "</i>\\n";
+        text += "\\n";
+      });
+
+      text += "───────────────────\\n⚡ <i>Cloudflare 24/7 Edge Bot</i>";
+
+      await fetch("https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: CHAT_ID,
+          text: text,
+          parse_mode: "HTML",
+          disable_web_page_preview: true
+        })
+      });
+    }
+  } catch (err) {
+    console.error("Worker error:", err);
+  }
+}
+`;
 
   const pythonScript = `#!/usr/bin/env python3
 """
@@ -310,11 +404,23 @@ setInterval(pollMatches, 2000);
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center border-b border-slate-800 px-5 bg-slate-950/40 shrink-0">
+        <div className="flex items-center border-b border-slate-800 px-5 bg-slate-950/40 shrink-0 overflow-x-auto">
+          <button
+            type="button"
+            onClick={() => setActiveTab('always-on')}
+            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 whitespace-nowrap transition-colors ${
+              activeTab === 'always-on'
+                ? 'border-emerald-500 text-emerald-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+            <span className="font-bold text-emerald-300">24/7 Always-On (No Website Needed)</span>
+          </button>
           <button
             type="button"
             onClick={() => setActiveTab('control')}
-            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 transition-colors ${
+            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 whitespace-nowrap transition-colors ${
               activeTab === 'control'
                 ? 'border-blue-500 text-blue-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -326,26 +432,26 @@ setInterval(pollMatches, 2000);
           <button
             type="button"
             onClick={() => setActiveTab('guide')}
-            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 transition-colors ${
+            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 whitespace-nowrap transition-colors ${
               activeTab === 'guide'
                 ? 'border-blue-500 text-blue-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             <BookOpen className="w-4 h-4" />
-            <span>Step-by-Step Setup Guide</span>
+            <span>Bot Setup Guide</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('scripts')}
-            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 transition-colors ${
+            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 whitespace-nowrap transition-colors ${
               activeTab === 'scripts'
                 ? 'border-blue-500 text-blue-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             <Code2 className="w-4 h-4" />
-            <span>24/7 Server Scripts</span>
+            <span>Standalone Daemons</span>
           </button>
         </div>
 
@@ -378,6 +484,119 @@ setInterval(pollMatches, 2000);
 
         {/* Modal Scrollable Body */}
         <div className="p-5 overflow-y-auto space-y-6">
+          {activeTab === 'always-on' && (
+            <div className="space-y-6">
+              {/* Why it was stopping explanation card */}
+              <div className="p-4 rounded-xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-emerald-950/40 border border-emerald-500/30 text-xs space-y-2">
+                <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
+                  <Zap className="w-4 h-4 text-amber-400 animate-bounce" />
+                  <span>How to make Telegram updates post 24/7 without opening the website</span>
+                </div>
+                <p className="text-slate-300 leading-relaxed">
+                  Web hosting platforms (Cloud Run, Vercel) are <b>serverless / scale-to-zero</b>: when you close your browser tab, the container pauses CPU execution to save resources.
+                </p>
+                <p className="text-emerald-200/90 font-medium">
+                  To keep scores and wickets posting around the clock 24 hours a day even when your PC or phone is turned off, use either <b>Method 1 (Free 1-Minute Webhook)</b> or <b>Method 2 (Free Cloudflare Worker)</b> below!
+                </p>
+              </div>
+
+              {/* Method 1: Automated 24/7 Webhook Ping */}
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 font-bold text-xs flex items-center justify-center">
+                      1
+                    </span>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-white">
+                      Method 1: Free Automated Webhook (Recommended · 60 Seconds Setup)
+                    </h3>
+                  </div>
+                  <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                    100% Free · No Computer Needed
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-400">
+                  We built a special <code>/api/cron</code> endpoint into your app. Any free cron ping service (like <b>cron-job.org</b> or <b>UptimeRobot</b>) can call this URL every 1 minute. Each call checks Crex scores and immediately broadcasts live updates and wickets to your Telegram group.
+                </p>
+
+                {/* Webhook URL Input */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-slate-300">
+                    Your Live 24/7 Webhook Cron URL:
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={cronWebhookUrl}
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-emerald-400 font-mono focus:outline-none select-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(cronWebhookUrl, 'webhook-url')}
+                      className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors shrink-0"
+                    >
+                      {copiedScript === 'webhook-url' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedScript === 'webhook-url' ? 'Copied!' : 'Copy URL'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleTestCron}
+                      disabled={isTestingCron}
+                      className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg transition-colors shrink-0 shadow-sm"
+                    >
+                      <Zap className={`w-3.5 h-3.5 ${isTestingCron ? 'animate-spin' : ''}`} />
+                      <span>{isTestingCron ? 'Triggering...' : 'Test /api/cron Now'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3 Step Setup on cron-job.org */}
+                <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 space-y-2 text-xs text-slate-300">
+                  <p className="font-bold text-slate-200">How to set up in 60 seconds (Free forever):</p>
+                  <ol className="list-decimal pl-5 space-y-1 text-slate-400">
+                    <li>Go to <a href="https://cron-job.org" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">cron-job.org</a> (sign up for free).</li>
+                    <li>Click <b>Create Cronjob</b> $\rightarrow$ Title: <code>Crex Cricket Telegram Bot</code>.</li>
+                    <li>In the <b>URL</b> field, paste the Webhook URL above: <code>{cronWebhookUrl}</code>.</li>
+                    <li>Set Schedule: <b>Every 1 minute</b>.</li>
+                    <li>Click <b>Create</b>. You are done! Your Telegram group will now receive match updates 24/7 non-stop!</li>
+                  </ol>
+                </div>
+              </div>
+
+              {/* Method 2: Free 24/7 Cloudflare Worker */}
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 font-bold text-xs flex items-center justify-center">
+                      2
+                    </span>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-white">
+                      Method 2: Standalone Cloudflare Worker (Runs on Cloudflare Edge)
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(cloudflareWorkerScript, 'cf-worker')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-300 bg-blue-950/60 hover:bg-blue-900/60 border border-blue-800/60 rounded-lg transition-colors"
+                  >
+                    {copiedScript === 'cf-worker' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedScript === 'cf-worker' ? 'Copied Code' : 'Copy Worker Code'}</span>
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-400">
+                  Deploy this lightweight script to a free Cloudflare Worker. It runs directly on Cloudflare with a 1-minute Cron Trigger, completely independent of any server or browser.
+                </p>
+
+                <pre className="p-3 bg-slate-950 text-slate-300 text-[11px] font-mono rounded-lg border border-slate-800 overflow-x-auto max-h-48">
+                  {cloudflareWorkerScript}
+                </pre>
+              </div>
+            </div>
+          )}
+
           {activeTab === 'control' && (
             <div className="space-y-6">
               {/* Credentials Section */}

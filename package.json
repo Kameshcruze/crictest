@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "tsx server.ts",
+    "worker": "node live-worker.js",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

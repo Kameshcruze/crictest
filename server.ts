@@ -354,6 +354,45 @@ app.all(['/api/top-matches', '/api/v2/getTopMatches'], async (req, res) => {
   });
 });
 
+// 24/7 Webhook / Cron Endpoint (hit by cron-job.org, UptimeRobot, or Vercel Cron)
+app.all(['/api/cron', '/api/telegram/cron'], async (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  await syncGoscorerApi('IN');
+
+  const liveItems = Object.entries(matchStore.matches).filter(
+    ([_, m]) => (m.j || m.k) && !m.finishTime
+  );
+
+  let sent = false;
+  if (liveItems.length > 0) {
+    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    let digest = `🏏 <b>CREX LIVE CRICKET 24/7 DIGEST</b> · <i>${timeStr}</i>\n`;
+    digest += `🔥 <b>${liveItems.length} Live Matches in Progress</b>\n`;
+    digest += `───────────────────\n\n`;
+
+    liveItems.forEach(([_, m], idx) => {
+      const t1 = m.t1Sname || m.b || 'T1';
+      const t2 = m.t2Sname || m.c || 'T2';
+      digest += `<b>${idx + 1}. ${t1} vs ${t2}</b> (${m.fo || 'Match'})\n`;
+      digest += `   • <b>${t1}</b>: ${m.j || 'Yet to bat'}\n`;
+      digest += `   • <b>${t2}</b>: ${m.k || 'Yet to bat'}\n`;
+      if (m.res || m.soResult) digest += `   • <i>${m.res || m.soResult}</i>\n`;
+      digest += `\n`;
+    });
+
+    digest += `───────────────────\n⚡ <i>24/7 Automated cron broadcast</i>`;
+    sent = await sendTelegramBroadcast(digest);
+  }
+
+  res.json({
+    ok: true,
+    status: 'cron_executed',
+    timestamp: new Date().toISOString(),
+    liveMatchesCount: liveItems.length,
+    telegramSent: sent,
+  });
+});
+
 // Telegram Bot Dispatch Proxy
 app.post('/api/telegram/send', async (req, res) => {
   const { botToken, chatId, text } = req.body || {};
