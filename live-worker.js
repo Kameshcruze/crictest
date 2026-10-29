@@ -8,10 +8,31 @@
  *   node live-worker.js
  */
 
+import http from 'http';
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ';
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID || '-1003980667930';
 const POLL_INTERVAL_MS = 3000; // Check every 3 seconds (True Live)
 const DIGEST_INTERVAL_MS = 5 * 60 * 1000; // Send full summary every 5 minutes
+const PORT = process.env.PORT || 3000;
+
+// Lightweight HTTP server so Render / Cloud Web Services pass health checks
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(
+    JSON.stringify({
+      status: 'active',
+      daemon: 'Crex Live Cricket Telegram Bot',
+      pollInterval: `${POLL_INTERVAL_MS / 1000}s`,
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+    })
+  );
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 HTTP Health Check Server listening on port ${PORT}`);
+});
 
 console.log('🚀 Starting 24/7 Live Cricket Telegram Bot Daemon...');
 console.log(`📱 Bot Token: ${BOT_TOKEN.slice(0, 10)}...`);
