@@ -24,14 +24,18 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
   const requestSeqRef = useRef<Record<string, number>>({});
 
   // Reference to current matches array for cross-consistency checks in async callbacks
+  const matchesRef = useRef<ParsedCricketMatch[]>(matches);
+  matchesRef.current = matches;
+
   const matchesMapRef = useRef<Record<string, ParsedCricketMatch>>({});
-  useEffect(() => {
-    const map: Record<string, ParsedCricketMatch> = {};
-    matches.forEach((m) => {
-      map[m.id] = m;
-    });
-    matchesMapRef.current = map;
-  }, [matches]);
+  const map: Record<string, ParsedCricketMatch> = {};
+  matches.forEach((m) => {
+    map[m.id] = m;
+  });
+  matchesMapRef.current = map;
+
+  // Track initial fetch so matches are fetched immediately once discovered
+  const initialFetchedRef = useRef<Set<string>>(new Set());
 
   // Total counter of all odds updates processed across the session
   const totalRecordsRef = useRef(0);
@@ -44,8 +48,7 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
     const cleanId = String(matchId || '').trim();
     if (!cleanId) return;
 
-    const match = matchesMapRef.current[cleanId];
-    if (!match) return;
+    const match = matchesMapRef.current[cleanId] || matchesRef.current.find((m) => m.id === cleanId);
 
     // Increment and capture sequence number for this match
     const seq = (requestSeqRef.current[cleanId] || 0) + 1;
@@ -82,8 +85,10 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
         return;
       }
 
-      // Verify consistency against the match record
-      const consistency = verifyMatchOddsConsistency(match, odds);
+      // Verify consistency against the match record if available
+      const consistency = match
+        ? verifyMatchOddsConsistency(match, odds)
+        : { isConsistent: true, status: 'unverified' as const, reason: 'Standalone verification' };
 
       totalRecordsRef.current += 1;
       setTotalRecordsReceived(totalRecordsRef.current);
@@ -196,21 +201,25 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
 
   /**
    * Automatic background polling loop for odds
-   * - Live matches: polled every 3 seconds
+   * - Trigger initial fetch once when a match is discovered
+   * - Live matches: polled steadily every 3 seconds
    * - Upcoming/Completed matches: polled every 20 seconds
    */
   useEffect(() => {
     if (matches.length === 0) return;
 
-    // Immediately trigger initial fetch for any newly discovered matches
+    // Trigger initial fetch for any new match not yet fetched
     matches.forEach((m) => {
-      if (!oddsByMatchId[m.id]) {
+      if (!initialFetchedRef.current.has(m.id)) {
+        initialFetchedRef.current.add(m.id);
         fetchOddsForMatch(m.id);
       }
     });
+  }, [matches, fetchOddsForMatch]);
 
+  useEffect(() => {
     const liveTimer = setInterval(() => {
-      matches
+      matchesRef.current
         .filter((m) => m.status === 'live')
         .forEach((m) => {
           fetchOddsForMatch(m.id);
@@ -218,7 +227,7 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
     }, 3000);
 
     const nonLiveTimer = setInterval(() => {
-      matches
+      matchesRef.current
         .filter((m) => m.status !== 'live')
         .forEach((m) => {
           fetchOddsForMatch(m.id);
@@ -229,7 +238,7 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
       clearInterval(liveTimer);
       clearInterval(nonLiveTimer);
     };
-  }, [matches, fetchOddsForMatch, oddsByMatchId]);
+  }, [fetchOddsForMatch]);
 
   const getMatchOdds = useCallback(
     (matchId: string) => {

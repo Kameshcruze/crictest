@@ -376,11 +376,8 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
 
     const directRes = await fetch(`${DIRECT_GOSCORER_ENDPOINT}?_t=${now}`, {
       method: 'POST',
-      cache: 'no-store',
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        Pragma: 'no-cache',
       },
       body: JSON.stringify({ cc: countryCode, _t: now }),
       signal: controller.signal,
@@ -413,7 +410,37 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
         }
       }
     } catch {
-      // Fallback failed
+      // Local fallback failed
+    }
+  }
+
+  // If both failed (e.g. static host like GitHub Pages without backend), try CORS proxies
+  if (!freshUpdates) {
+    const corsProxies = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(DIRECT_GOSCORER_ENDPOINT)}`,
+      `https://corsproxy.io/?url=${encodeURIComponent(DIRECT_GOSCORER_ENDPOINT)}`,
+    ];
+    for (const proxyUrl of corsProxies) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        const proxyRes = await fetch(proxyUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cc: countryCode, _t: now }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (proxyRes.ok) {
+          const proxyData = await proxyRes.json();
+          if (proxyData && typeof proxyData === 'object') {
+            freshUpdates = proxyData;
+            break;
+          }
+        }
+      } catch {
+        // Continue to next proxy
+      }
     }
   }
 

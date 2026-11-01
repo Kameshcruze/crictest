@@ -1,16 +1,24 @@
 {
-  "framework": "vite",
-  "buildCommand": "vite build",
-  "outputDirectory": "dist",
-  "crons": [
-    {
-      "path": "/api/cron",
-      "schedule": "* * * * *"
-    }
-  ],
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/api/odds",
+      "destination": "https://api.goscorer.com/api/v3/getSV3"
+    },
+    {
+      "source": "/api/v3/getSV3",
+      "destination": "https://api.goscorer.com/api/v3/getSV3"
+    },
+    {
+      "source": "/api/top-matches",
+      "destination": "https://api.goscorer.com/api/v2/getTopMatches"
+    },
+    {
+      "source": "/api/v2/getTopMatches",
+      "destination": "https://api.goscorer.com/api/v2/getTopMatches"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ]
 }
-

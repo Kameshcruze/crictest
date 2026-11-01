@@ -1,0 +1,5 @@
+/api/odds  https://api.goscorer.com/api/v3/getSV3  200
+/api/v3/getSV3  https://api.goscorer.com/api/v3/getSV3  200
+/api/top-matches  https://api.goscorer.com/api/v2/getTopMatches  200
+/api/v2/getTopMatches  https://api.goscorer.com/api/v2/getTopMatches  200
+/*  /index.html  200

@@ -264,33 +264,27 @@ export async function fetchMatchOdds(
     let response: Response | null = null;
     let rawText = '';
 
-    // Step A: Attempt direct API call
+    // Step A: Attempt direct API call with simple GET (no custom headers to prevent browser OPTIONS preflight)
+    const directUrl = `${DIRECT_ODDS_ENDPOINT}?key=${encodeURIComponent(cleanKey)}&_t=${now}`;
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Link caller signal if provided
       if (options.signal) {
         options.signal.addEventListener('abort', () => controller.abort(), { once: true });
       }
 
-      response = await fetch(`${DIRECT_ODDS_ENDPOINT}?key=${encodeURIComponent(cleanKey)}`, {
+      response = await fetch(directUrl, {
         method: 'GET',
-        cache: 'no-store',
-        headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          Pragma: 'no-cache',
-        },
         signal: controller.signal,
       });
 
       clearTimeout(timeoutId);
     } catch {
-      // Direct call failed (network error, CORS block, timeout)
       response = null;
     }
 
-    // Step B: Fall back to backend proxy route if direct call failed or returned error
+    // Step B: Fall back to local backend proxy route (/api/odds)
     if (!response || !response.ok) {
       try {
         const controller = new AbortController();
@@ -300,24 +294,49 @@ export async function fetchMatchOdds(
           options.signal.addEventListener('abort', () => controller.abort(), { once: true });
         }
 
-        response = await fetch(`${LOCAL_ODDS_ENDPOINT}?key=${encodeURIComponent(cleanKey)}`, {
+        response = await fetch(`${LOCAL_ODDS_ENDPOINT}?key=${encodeURIComponent(cleanKey)}&_t=${now}`, {
           method: 'GET',
-          cache: 'no-store',
           signal: controller.signal,
         });
 
         clearTimeout(timeoutId);
-      } catch (proxyErr: any) {
-        throw new Error(
-          `Failed to fetch odds for key "${cleanKey}": ${proxyErr?.message || 'Network failure'}`
-        );
+      } catch {
+        response = null;
       }
     }
 
-    // Step C: Validate HTTP status
-    if (!response.ok) {
+    // Step C: Fall back to public CORS proxy if running on static hosting (e.g. GitHub Pages without backend)
+    if (!response || !response.ok) {
+      const fallbackProxies = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(`${DIRECT_ODDS_ENDPOINT}?key=${encodeURIComponent(cleanKey)}`)}`,
+        `https://corsproxy.io/?url=${encodeURIComponent(`${DIRECT_ODDS_ENDPOINT}?key=${encodeURIComponent(cleanKey)}`)}`,
+      ];
+
+      for (const proxyUrl of fallbackProxies) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+          if (options.signal) {
+            options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+          }
+
+          const proxyRes = await fetch(proxyUrl, { method: 'GET', signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (proxyRes.ok) {
+            response = proxyRes;
+            break;
+          }
+        } catch {
+          // Continue to next proxy
+        }
+      }
+    }
+
+    // Step D: Validate HTTP response
+    if (!response || !response.ok) {
       throw new Error(
-        `Odds API returned HTTP status ${response.status} (${response.statusText}) for key "${cleanKey}"`
+        `Odds API could not retrieve odds for key "${cleanKey}" (${response?.status ? `HTTP ${response.status}` : 'All endpoints unreachable'})`
       );
     }
 
