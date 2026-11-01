@@ -12,6 +12,9 @@ import { MatchDetailModal } from './components/MatchDetailModal';
 import { OnlineScriptModal } from './components/OnlineScriptModal';
 import { ApiInspectorModal } from './components/ApiInspectorModal';
 import { TelegramBotModal } from './components/TelegramBotModal';
+import { OddsDiagnosticModal } from './components/OddsDiagnosticModal';
+import { MatchAnalysisPage } from './components/MatchAnalysisPage';
+import { useOddsManager } from './hooks/useOddsManager';
 import {
   TelegramConfig,
   getStoredTelegramConfig,
@@ -56,6 +59,52 @@ export default function App() {
   const [isScriptModalOpen, setIsScriptModalOpen] = useState<boolean>(false);
   const [isInspectorModalOpen, setIsInspectorModalOpen] = useState<boolean>(false);
   const [isTelegramModalOpen, setIsTelegramModalOpen] = useState<boolean>(false);
+  const [isOddsDiagnosticOpen, setIsOddsDiagnosticOpen] = useState<boolean>(false);
+
+  // Phase 5 Routing: Dedicated Match Analysis View
+  const [activeAnalysisMatchId, setActiveAnalysisMatchId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined' && window.location.hash.startsWith('#/match/')) {
+      return window.location.hash.replace('#/match/', '').trim() || null;
+    }
+    return null;
+  });
+
+  // Listen to hash changes for browser forward/back buttons and deep links
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash;
+      if (hash.startsWith('#/match/')) {
+        const id = hash.replace('#/match/', '').trim();
+        setActiveAnalysisMatchId(id || null);
+      } else {
+        setActiveAnalysisMatchId(null);
+      }
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  const navigateToAnalysis = useCallback((matchId: string) => {
+    setActiveAnalysisMatchId(matchId);
+    window.location.hash = `#/match/${matchId}`;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
+  const navigateToDashboard = useCallback(() => {
+    setActiveAnalysisMatchId(null);
+    window.location.hash = '';
+  }, []);
+
+  // Phase 4: Per-Match Isolated Odds Manager
+  const {
+    oddsByMatchId,
+    getMatchOdds,
+    refreshMatchOdds,
+    refreshAllOdds,
+    isGlobalRefreshing,
+    totalRecordsReceived,
+  } = useOddsManager(matches);
 
   // Telegram Bot Configuration
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>(getStoredTelegramConfig);
@@ -224,6 +273,75 @@ export default function App() {
 
   const liveMatchesCount = matches.filter((m) => m.status === 'live').length;
 
+  // Dedicated Match Analysis View (Phase 5)
+  if (activeAnalysisMatchId) {
+    const analysisMatch = matches.find((m) => m.id === activeAnalysisMatchId);
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+        <MatchAnalysisPage
+          matchId={activeAnalysisMatchId}
+          match={analysisMatch}
+          oddsState={getMatchOdds(activeAnalysisMatchId)}
+          allMatches={matches}
+          onBack={navigateToDashboard}
+          onSelectMatch={navigateToAnalysis}
+          onRefreshOdds={refreshMatchOdds}
+        />
+
+        {/* Match Details Scorecard Modal if triggered */}
+        <MatchDetailModal
+          match={selectedMatch}
+          onClose={() => setSelectedMatch(null)}
+        />
+
+        {/* Standalone Online Script Generator Modal */}
+        <OnlineScriptModal
+          isOpen={isScriptModalOpen}
+          onClose={() => setIsScriptModalOpen(false)}
+          countryCode={countryCode}
+        />
+
+        {/* API Inspector & Payload Test Modal */}
+        <ApiInspectorModal
+          isOpen={isInspectorModalOpen}
+          onClose={() => setIsInspectorModalOpen(false)}
+          initialPayload={`{"cc":"${countryCode}"}`}
+          rawData={rawData}
+          onPayloadSend={async (newCc) => {
+            setCountryCode(newCc);
+            await loadMatches(false, newCc);
+          }}
+          isFetching={isFetching}
+          latencyMs={latencyMs}
+        />
+
+        {/* Telegram Bot Manager & Broadcaster Modal */}
+        <TelegramBotModal
+          isOpen={isTelegramModalOpen}
+          onClose={() => setIsTelegramModalOpen(false)}
+          config={telegramConfig}
+          onSaveConfig={(newConfig) => {
+            setTelegramConfig(newConfig);
+            saveStoredTelegramConfig(newConfig);
+          }}
+          matches={matches}
+        />
+
+        {/* Dev-Only Odds Diagnostic Modal */}
+        <OddsDiagnosticModal
+          isOpen={isOddsDiagnosticOpen}
+          onClose={() => setIsOddsDiagnosticOpen(false)}
+          matches={matches}
+          oddsByMatchId={oddsByMatchId}
+          onRefreshAll={refreshAllOdds}
+          onRefreshMatch={refreshMatchOdds}
+          isRefreshing={isGlobalRefreshing}
+          totalRecordsReceived={totalRecordsReceived}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       {/* Top Navigation */}
@@ -278,6 +396,18 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+            <button
+              type="button"
+              onClick={() => setIsOddsDiagnosticOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-300 bg-amber-950/40 hover:bg-amber-900/50 border border-amber-700/60 rounded-lg transition-colors shadow-sm"
+              title="Open Phase 4 Odds Diagnostic Inspector"
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              <span>Odds Diagnostics</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono">
+                Dev
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => setIsTelegramModalOpen(true)}
@@ -389,7 +519,8 @@ export default function App() {
                 <MatchCard
                   key={m.id}
                   match={m}
-                  onSelect={(match) => setSelectedMatch(match)}
+                  oddsState={getMatchOdds(m.id)}
+                  onSelect={(match) => navigateToAnalysis(match.id)}
                   onInspect={(match) => {
                     setSelectedMatch(match);
                   }}
@@ -474,6 +605,18 @@ export default function App() {
           saveStoredTelegramConfig(newConfig);
         }}
         matches={matches}
+      />
+
+      {/* Dev-Only Odds Diagnostic Modal (Phase 4 Verification) */}
+      <OddsDiagnosticModal
+        isOpen={isOddsDiagnosticOpen}
+        onClose={() => setIsOddsDiagnosticOpen(false)}
+        matches={matches}
+        oddsByMatchId={oddsByMatchId}
+        onRefreshAll={refreshAllOdds}
+        onRefreshMatch={refreshMatchOdds}
+        isRefreshing={isGlobalRefreshing}
+        totalRecordsReceived={totalRecordsReceived}
       />
     </div>
   );

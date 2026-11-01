@@ -7,14 +7,16 @@ import {
   Share2,
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
+import { MatchOddsState } from '../types/odds';
 
 interface MatchCardProps {
   match: ParsedCricketMatch;
   onSelect: (match: ParsedCricketMatch) => void;
   onInspect: (match: ParsedCricketMatch) => void;
+  oddsState?: MatchOddsState;
 }
 
-export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect }) => {
+export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect, oddsState }) => {
   const isLive = match.status === 'live';
   const isCompleted = match.status === 'completed';
   const isUpcoming = match.status === 'upcoming';
@@ -261,6 +263,54 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
           </p>
         </div>
 
+        {/* Dedicated Live Match Odds Strip (Phase 4 Verified Integration) */}
+        {oddsState && (
+          <div className="mt-2.5 px-2.5 py-1.5 rounded-lg bg-slate-950/70 border border-slate-800/90 flex items-center justify-between text-[11px]">
+            <div className="flex items-center gap-1.5 truncate">
+              <span className="font-semibold text-slate-400">Odds:</span>
+              {oddsState.status === 'loading' ? (
+                <span className="text-slate-500 animate-pulse font-mono">Loading...</span>
+              ) : oddsState.status === 'success' && oddsState.odds?.bookmaker && !oddsState.odds.bookmaker.isSuspended ? (
+                <div className="flex items-center gap-1.5">
+                  {oddsState.odds.favoriteTeamName && (
+                    <span className="font-bold text-amber-300 truncate max-w-[80px]">
+                      {oddsState.odds.favoriteTeamName}
+                    </span>
+                  )}
+                  {oddsState.odds.bookmaker.backRate !== null && (
+                    <span className="px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-600/40 text-sky-300 font-mono font-bold text-[10px]">
+                      B: {oddsState.odds.bookmaker.backRate}
+                    </span>
+                  )}
+                  {oddsState.odds.bookmaker.layRate !== null && (
+                    <span className="px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-600/40 text-rose-300 font-mono font-bold text-[10px]">
+                      L: {oddsState.odds.bookmaker.layRate}
+                    </span>
+                  )}
+                </div>
+              ) : oddsState.status === 'unavailable' || oddsState.odds?.bookmaker?.isSuspended ? (
+                <span className="text-slate-500 font-mono text-[10px]">Closed / Suspended</span>
+              ) : oddsState.status === 'error' ? (
+                <span className="text-rose-400 font-mono text-[10px]">Unavailable</span>
+              ) : (
+                <span className="text-slate-500 font-mono text-[10px]">Ready</span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {oddsState.consistency.status === 'verified' && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400"
+                  title="Verified mapping with cricket match"
+                />
+              )}
+              <span className="text-[10px] text-slate-500 font-mono">
+                {oddsState.maskedKey}
+              </span>
+            </div>
+          </div>
+        )}
+
         {/* Win Probability Bar (if available) */}
         {match.winProbability && (
           <div className="mt-3 bg-slate-800/40 rounded-lg p-2 border border-slate-800/60">
@@ -295,7 +345,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
           <span className="truncate text-[11px] text-slate-400">{match.seriesName}</span>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={copyMatchSummary}
@@ -315,9 +365,18 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
           >
             JSON
           </button>
-          <div className="text-emerald-400 group-hover:translate-x-0.5 transition-transform flex items-center">
-            <ChevronRight className="w-4 h-4" />
-          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect(match);
+            }}
+            className="px-2.5 py-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/50 hover:bg-emerald-900/60 border border-emerald-500/30 rounded-md transition-colors flex items-center gap-1 group-hover:border-emerald-500/60"
+            title="Open Dedicated Match Analysis & Live Odds"
+          >
+            <span>Analysis</span>
+            <ChevronRight className="w-3.5 h-3.5 text-emerald-400 group-hover:translate-x-0.5 transition-transform" />
+          </button>
         </div>
       </div>
     </div>

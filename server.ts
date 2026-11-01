@@ -354,6 +354,81 @@ app.all(['/api/top-matches', '/api/v2/getTopMatches'], async (req, res) => {
   });
 });
 
+// In-flight server request deduplication & short TTL cache for odds
+const serverOddsCache = new Map<string, { data: any; timestamp: number }>();
+const serverOddsInFlight = new Map<string, Promise<any>>();
+
+// Match-specific Odds Endpoint Proxy (CORS bypass and server-side deduplication)
+app.get(['/api/odds', '/api/v3/getSV3'], async (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const key = String(req.query.key || '').trim();
+
+  if (!key) {
+    return res.status(400).json({ ok: false, error: 'Missing match key parameter' });
+  }
+
+  // Input validation
+  if (!/^[a-zA-Z0-9_-]+$/.test(key)) {
+    return res.status(400).json({ ok: false, error: 'Invalid match key format' });
+  }
+
+  // Check 500ms cache
+  const cached = serverOddsCache.get(key);
+  if (cached && Date.now() - cached.timestamp < 500) {
+    return res.json(cached.data);
+  }
+
+  // Deduplicate concurrent upstream requests for the same key
+  if (serverOddsInFlight.has(key)) {
+    try {
+      const data = await serverOddsInFlight.get(key);
+      return res.json(data);
+    } catch (err: any) {
+      return res.status(502).json({ ok: false, error: err.message });
+    }
+  }
+
+  const fetchTask = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+
+    const upstreamRes = await fetch(
+      `https://api.goscorer.com/api/v3/getSV3?key=${encodeURIComponent(key)}`,
+      {
+        method: 'GET',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timeout);
+
+    if (!upstreamRes.ok) {
+      throw new Error(`Upstream odds API returned status ${upstreamRes.status}`);
+    }
+
+    const data = await upstreamRes.json();
+    serverOddsCache.set(key, { data, timestamp: Date.now() });
+    return data;
+  })();
+
+  serverOddsInFlight.set(key, fetchTask);
+
+  try {
+    const data = await fetchTask;
+    return res.json(data);
+  } catch (err: any) {
+    return res.status(502).json({
+      ok: false,
+      error: err.message || 'Failed to fetch odds from upstream',
+    });
+  } finally {
+    serverOddsInFlight.delete(key);
+  }
+});
+
 // 24/7 Webhook / Cron Endpoint (hit by cron-job.org, UptimeRobot, or Vercel Cron)
 app.all(['/api/cron', '/api/telegram/cron'], async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
