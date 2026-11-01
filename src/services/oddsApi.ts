@@ -35,8 +35,8 @@ const CACHE_TTL_MS = 600;
  * - "86+1": Back is 86, Lay is 86 + 1 = 87.
  * - In decimal odds: Back = 1 + (86 / 100) = 1.86, Lay = 1 + (87 / 100) = 1.87.
  */
-export function parseBookmakerRate(rateStr?: string): BookmakerOdds {
-  if (!rateStr || typeof rateStr !== 'string') {
+export function parseBookmakerRate(rateStr?: unknown): BookmakerOdds {
+  if (rateStr === undefined || rateStr === null) {
     return {
       rawRateString: '',
       backRate: null,
@@ -48,7 +48,18 @@ export function parseBookmakerRate(rateStr?: string): BookmakerOdds {
     };
   }
 
-  const clean = rateStr.trim();
+  const clean = typeof rateStr === 'string' ? rateStr.trim() : String(rateStr).trim();
+  if (!clean) {
+    return {
+      rawRateString: '',
+      backRate: null,
+      layRate: null,
+      decimalBack: null,
+      decimalLay: null,
+      spread: null,
+      isSuspended: true,
+    };
+  }
 
   // If rate contains 0-0 or 0+0, market is suspended / closed
   if (clean === '0+0' || clean.startsWith('0-0') || clean === '0') {
@@ -147,12 +158,27 @@ export function parseBookmakerRate(rateStr?: string): BookmakerOdds {
  *  - 6 Overs: Low 64, High 66 (spread 2)
  *  - 20 Overs: Low 208, High 211 (spread 3)
  */
-export function parseSessionMarkets(zStr?: string, dStr?: string): SessionMarket[] {
-  if (!zStr || typeof zStr !== 'string') return [];
+export function parseSessionMarkets(zStr?: unknown, dStr?: unknown): SessionMarket[] {
+  if (zStr === undefined || zStr === null) return [];
+  const zString = typeof zStr === 'string' ? zStr.trim() : String(zStr).trim();
+  if (!zString) return [];
 
   const sessions: SessionMarket[] = [];
-  const overMarkers = dStr ? dStr.split(',').map((o) => parseInt(o.trim(), 10)).filter((n) => !isNaN(n)) : [];
-  const sessionEntries = zStr.split(',').map((s) => s.trim()).filter(Boolean);
+  let overMarkers: number[] = [];
+
+  if (dStr !== undefined && dStr !== null) {
+    if (Array.isArray(dStr)) {
+      overMarkers = dStr.map((o) => parseInt(String(o).trim(), 10)).filter((n) => !isNaN(n));
+    } else if (typeof dStr === 'number') {
+      overMarkers = [dStr];
+    } else if (typeof dStr === 'string') {
+      overMarkers = dStr.split(',').map((o) => parseInt(o.trim(), 10)).filter((n) => !isNaN(n));
+    } else {
+      overMarkers = String(dStr).split(',').map((o) => parseInt(o.trim(), 10)).filter((n) => !isNaN(n));
+    }
+  }
+
+  const sessionEntries = zString.split(',').map((s) => s.trim()).filter(Boolean);
 
   sessionEntries.forEach((entry, idx) => {
     const match = entry.match(/^(\d+(?:\.\d+)?)\+(\d+(?:\.\d+)?)/);
@@ -160,7 +186,7 @@ export function parseSessionMarkets(zStr?: string, dStr?: string): SessionMarket
       const low = parseFloat(match[1]);
       const spread = parseFloat(match[2]);
       const high = low + spread;
-      const overs = overMarkers[idx] || (idx === 0 ? 6 : idx === 1 ? 20 : (idx + 1) * 10);
+      const overs = overMarkers[idx] !== undefined ? overMarkers[idx] : (idx === 0 ? 6 : idx === 1 ? 20 : (idx + 1) * 10);
 
       sessions.push({
         overs,
@@ -183,7 +209,7 @@ export function transformGetSV3Response(
   raw: RawGetSV3Response,
   latencyMs: number
 ): ParsedMatchOdds {
-  const speechNames = raw.speech_names || {};
+  const speechNames = (raw.speech_names && typeof raw.speech_names === 'object') ? raw.speech_names : {};
   let favoriteTeamKey: string | undefined;
   let favoriteTeamName: string | undefined;
 
@@ -197,11 +223,22 @@ export function transformGetSV3Response(
   const bookmaker = parseBookmakerRate(raw.R);
   const sessions = parseSessionMarkets(raw.Z, raw.D);
 
+  const statusText =
+    typeof raw.B === 'string'
+      ? raw.B
+      : typeof raw.B === 'number'
+      ? String(raw.B)
+      : typeof raw.b === 'string'
+      ? raw.b
+      : typeof raw.b === 'number'
+      ? String(raw.b)
+      : undefined;
+
   return {
     matchKey,
-    dtId: raw.dt_id,
-    format: raw.fo,
-    statusText: raw.B || raw.b,
+    dtId: typeof raw.dt_id === 'string' ? raw.dt_id : String(raw.dt_id || ''),
+    format: typeof raw.fo === 'string' ? raw.fo : undefined,
+    statusText,
     favoriteTeamKey,
     favoriteTeamName,
     speechNames,

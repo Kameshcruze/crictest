@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState, OddsTick } from '../types/odds';
+import { KNOWN_TEAMS } from '../data/cricketMapping';
 import {
   strategyEngine,
   StrategySignal,
@@ -110,9 +111,36 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   const history = oddsState?.history || [];
   const sessions = oddsState?.odds?.sessions || [];
 
-  // Match details resolution
-  const team1 = match?.team1;
-  const team2 = match?.team2;
+  // Match details resolution with KNOWN_TEAMS and speechNames dynamic fallback
+  const team1Resolved = (match?.team1.key ? KNOWN_TEAMS[match.team1.key] : undefined) || match?.team1;
+  const team2Resolved = (match?.team2.key ? KNOWN_TEAMS[match.team2.key] : undefined) || match?.team2;
+
+  const team1Name =
+    match?.team1.key && oddsState?.odds?.speechNames?.[match.team1.key] && team1Resolved?.name?.startsWith('Team ')
+      ? oddsState.odds.speechNames[match.team1.key]
+      : team1Resolved?.name || 'Team 1';
+
+  const team1Short =
+    team1Resolved?.shortName && team1Resolved.shortName !== match?.team1.key && !team1Resolved.shortName.startsWith('TEAM')
+      ? team1Resolved.shortName
+      : match?.team1.key && oddsState?.odds?.speechNames?.[match.team1.key]
+      ? oddsState.odds.speechNames[match.team1.key].slice(0, 4).toUpperCase()
+      : match?.team1.shortName || 'T1';
+
+  const team2Name =
+    match?.team2.key && oddsState?.odds?.speechNames?.[match.team2.key] && team2Resolved?.name?.startsWith('Team ')
+      ? oddsState.odds.speechNames[match.team2.key]
+      : team2Resolved?.name || 'Team 2';
+
+  const team2Short =
+    team2Resolved?.shortName && team2Resolved.shortName !== match?.team2.key && !team2Resolved.shortName.startsWith('TEAM')
+      ? team2Resolved.shortName
+      : match?.team2.key && oddsState?.odds?.speechNames?.[match.team2.key]
+      ? oddsState.odds.speechNames[match.team2.key].slice(0, 4).toUpperCase()
+      : match?.team2.shortName || 'T2';
+
+  const team1 = team1Resolved || match?.team1;
+  const team2 = team2Resolved || match?.team2;
   const t1Score = match?.team1Score;
   const t2Score = match?.team2Score;
   const activeScore = t2Score || t1Score;
@@ -352,7 +380,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   ID: {matchId}
                 </span>
                 <h1 className="text-sm sm:text-base font-bold text-white truncate">
-                  {match ? `${match.team1.shortName} vs ${match.team2.shortName}` : `Match ${matchId}`}
+                  {match ? `${team1Short} vs ${team2Short}` : `Match ${matchId}`}
                 </h1>
                 {isLive && (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[10px] font-bold uppercase tracking-wider">
@@ -449,9 +477,9 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="font-bold text-white text-base sm:text-lg">{team1?.name}</span>
+                        <span className="font-bold text-white text-base sm:text-lg">{team1Name}</span>
                         <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                          {team1?.shortName}
+                          {team1Short}
                         </span>
                         {match.battingTeamKey === team1?.key && (
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
@@ -489,9 +517,9 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="font-bold text-white text-base sm:text-lg">{team2?.name}</span>
+                        <span className="font-bold text-white text-base sm:text-lg">{team2Name}</span>
                         <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                          {team2?.shortName}
+                          {team2Short}
                         </span>
                         {match.battingTeamKey === team2?.key && (
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">

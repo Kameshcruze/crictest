@@ -119,10 +119,18 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
   const team1 = resolveTeam(raw.b);
   const team2 = resolveTeam(raw.c);
 
+  if (raw.team1 && typeof raw.team1 === 'string' && raw.team1.trim().length > 0) {
+    team1.name = raw.team1.trim();
+  }
+  if (raw.team2 && typeof raw.team2 === 'string' && raw.team2.trim().length > 0) {
+    team2.name = raw.team2.trim();
+  }
   if (raw.team1flag) team1.flagUrl = raw.team1flag;
   if (raw.team2flag) team2.flagUrl = raw.team2flag;
   if (raw.t1Sname) team1.shortName = raw.t1Sname;
   if (raw.t2Sname) team2.shortName = raw.t2Sname;
+  if (raw.t1cc && typeof raw.t1cc === 'string') team1.color = raw.t1cc;
+  if (raw.t2cc && typeof raw.t2cc === 'string') team2.color = raw.t2cc;
 
   const venueName = raw.vname || resolveVenue(raw.v);
   const seriesName = raw.sfullname || raw.sname || resolveSeries(raw.q);

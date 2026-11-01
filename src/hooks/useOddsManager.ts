@@ -6,6 +6,7 @@ import {
   maskOddsKey,
   verifyMatchOddsConsistency,
 } from '../services/oddsApi';
+import { registerDynamicTeam } from '../data/cricketMapping';
 
 export interface UseOddsManagerReturn {
   oddsByMatchId: Record<string, MatchOddsState>;
@@ -83,6 +84,15 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
       // Guard: Discard if a newer request for this match was already dispatched
       if (requestSeqRef.current[cleanId] !== seq) {
         return;
+      }
+
+      // Dynamically register team names from odds speechNames if provided
+      if (odds.speechNames && typeof odds.speechNames === 'object') {
+        for (const [tKey, tName] of Object.entries(odds.speechNames)) {
+          if (tKey && typeof tName === 'string' && tName.trim().length > 0) {
+            registerDynamicTeam(tKey, tName.trim());
+          }
+        }
       }
 
       // Verify consistency against the match record if available

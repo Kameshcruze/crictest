@@ -4,14 +4,14 @@
 
 export interface RawGetSV3Response {
   A?: string;
-  B?: string; // Toss info or status e.g. "NZ opt to bowl"
-  D?: string; // Session overs markers e.g. "6,20"
+  B?: string | number; // Toss info or status e.g. "NZ opt to bowl" or 1
+  D?: string | number; // Session overs markers e.g. "6,20" or 6
   F?: string; // Favorite team key with ^ prefix, e.g. "^O"
   L?: string;
   M?: string;
-  R?: string; // Indian rate format e.g. "86+1", "0-0,0-0,0-0", "0+0"
+  R?: string | number; // Indian rate format e.g. "86+1", "0-0,0-0,0-0", "0+0"
   S?: string;
-  Z?: string; // Session lines e.g. "64+2,208+3"
+  Z?: string | number; // Session lines e.g. "64+2,208+3"
   a?: string; // Team codes separated by dot e.g. "R.O"
   b?: string;
   c?: string;

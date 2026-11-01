@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState } from '../types/odds';
+import { KNOWN_TEAMS } from '../data/cricketMapping';
 
 interface MatchCardProps {
   match: ParsedCricketMatch;
@@ -20,6 +21,34 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
   const isLive = match.status === 'live';
   const isCompleted = match.status === 'completed';
   const isUpcoming = match.status === 'upcoming';
+
+  // Dynamic resolution fallback: Check KNOWN_TEAMS or odds speechNames if name was fallback
+  const team1Resolved = KNOWN_TEAMS[match.team1.key] || match.team1;
+  const team2Resolved = KNOWN_TEAMS[match.team2.key] || match.team2;
+
+  const team1Name =
+    oddsState?.odds?.speechNames?.[match.team1.key] && team1Resolved.name.startsWith('Team ')
+      ? oddsState.odds.speechNames[match.team1.key]
+      : team1Resolved.name;
+
+  const team1Short =
+    team1Resolved.shortName !== match.team1.key && !team1Resolved.shortName.startsWith('TEAM')
+      ? team1Resolved.shortName
+      : oddsState?.odds?.speechNames?.[match.team1.key]
+      ? oddsState.odds.speechNames[match.team1.key].slice(0, 4).toUpperCase()
+      : match.team1.shortName;
+
+  const team2Name =
+    oddsState?.odds?.speechNames?.[match.team2.key] && team2Resolved.name.startsWith('Team ')
+      ? oddsState.odds.speechNames[match.team2.key]
+      : team2Resolved.name;
+
+  const team2Short =
+    team2Resolved.shortName !== match.team2.key && !team2Resolved.shortName.startsWith('TEAM')
+      ? team2Resolved.shortName
+      : oddsState?.odds?.speechNames?.[match.team2.key]
+      ? oddsState.odds.speechNames[match.team2.key].slice(0, 4).toUpperCase()
+      : match.team2.shortName;
 
   const [isScoreFlashing, setIsScoreFlashing] = React.useState(false);
   const prevScoreStringRef = React.useRef<string>('');
@@ -55,11 +84,9 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
 
   const copyMatchSummary = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const t1 = match.team1;
-    const t2 = match.team2;
     const s1 = match.team1Score ? `${match.team1Score.runs}/${match.team1Score.wickets} (${match.team1Score.overs} ov)` : '';
     const s2 = match.team2Score ? `${match.team2Score.runs}/${match.team2Score.wickets} (${match.team2Score.overs} ov)` : '';
-    const text = `${t1.name} vs ${t2.name}\n${s1 ? `${t1.shortName}: ${s1}\n` : ''}${s2 ? `${t2.shortName}: ${s2}\n` : ''}${match.resultText || match.statusLabel}\n${match.seriesName}`;
+    const text = `${team1Name} vs ${team2Name}\n${s1 ? `${team1Short}: ${s1}\n` : ''}${s2 ? `${team2Short}: ${s2}\n` : ''}${match.resultText || match.statusLabel}\n${match.seriesName}`;
     navigator.clipboard.writeText(text);
   };
 
@@ -141,7 +168,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
               {match.team1.flagUrl ? (
                 <img
                   src={match.team1.flagUrl}
-                  alt={match.team1.shortName}
+                  alt={team1Short}
                   className="w-6 h-6 rounded-full object-cover shrink-0 border border-slate-700 bg-slate-800 shadow-sm"
                   onError={(e) => {
                     (e.target as HTMLElement).style.display = 'none';
@@ -151,20 +178,20 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
                 <div
                   className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 shadow-sm"
                   style={{
-                    backgroundColor: match.team1.color,
-                    color: match.team1.textColor || '#ffffff',
+                    backgroundColor: team1Resolved.color || match.team1.color,
+                    color: team1Resolved.textColor || '#ffffff',
                   }}
                 >
-                  {match.team1.shortName.slice(0, 2)}
+                  {team1Short.slice(0, 2)}
                 </div>
               )}
               <div className="truncate">
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-bold text-slate-100 truncate">
-                    {match.team1.shortName}
+                    {team1Short}
                   </span>
                   <span className="text-xs text-slate-400 truncate hidden sm:inline">
-                    {match.team1.name}
+                    {team1Name}
                   </span>
                 </div>
               </div>
@@ -200,7 +227,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
               {match.team2.flagUrl ? (
                 <img
                   src={match.team2.flagUrl}
-                  alt={match.team2.shortName}
+                  alt={team2Short}
                   className="w-6 h-6 rounded-full object-cover shrink-0 border border-slate-700 bg-slate-800 shadow-sm"
                   onError={(e) => {
                     (e.target as HTMLElement).style.display = 'none';
@@ -210,20 +237,20 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
                 <div
                   className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 shadow-sm"
                   style={{
-                    backgroundColor: match.team2.color,
-                    color: match.team2.textColor || '#ffffff',
+                    backgroundColor: team2Resolved.color || match.team2.color,
+                    color: team2Resolved.textColor || '#ffffff',
                   }}
                 >
-                  {match.team2.shortName.slice(0, 2)}
+                  {team2Short.slice(0, 2)}
                 </div>
               )}
               <div className="truncate">
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-bold text-slate-100 truncate">
-                    {match.team2.shortName}
+                    {team2Short}
                   </span>
                   <span className="text-xs text-slate-400 truncate hidden sm:inline">
-                    {match.team2.name}
+                    {team2Name}
                   </span>
                 </div>
               </div>
@@ -315,9 +342,9 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
         {match.winProbability && (
           <div className="mt-3 bg-slate-800/40 rounded-lg p-2 border border-slate-800/60">
             <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium mb-1">
-              <span>{match.team1.shortName} {match.winProbability.team1Prob}%</span>
+              <span>{team1Short} {match.winProbability.team1Prob}%</span>
               <span className="text-slate-500">Win Probability</span>
-              <span>{match.team2.shortName} {match.winProbability.team2Prob}%</span>
+              <span>{team2Short} {match.winProbability.team2Prob}%</span>
             </div>
             <div className="h-1.5 w-full bg-slate-700/60 rounded-full overflow-hidden flex">
               <div
