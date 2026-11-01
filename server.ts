@@ -12,6 +12,17 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(express.json());
 
+// Enable CORS for all incoming client requests
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // In-memory warm match store
 let matchStore: {
   matches: Record<string, any>;
@@ -306,7 +317,7 @@ syncGoscorerApi().then(syncCrexPool);
 
 // Continuous live polling loop
 setInterval(syncGoscorerApi, 1000); // Check Goscorer API every 1000ms
-setInterval(syncCrexPool, 20000);   // Sync background mapping/metadata every 20s
+setInterval(syncCrexPool, 10000);   // Sync Crex fixtures pool every 10s
 
 // SSE Live Stream: Instant zero-latency push to connected clients
 app.get('/api/live-stream', (req, res) => {

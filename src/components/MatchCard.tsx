@@ -92,6 +92,21 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
 
   // Crex style live status text
   const getLiveEquation = () => {
+    // If team 2 is actively chasing, display runs needed in balls remaining (Crex style)
+    if (isLive && match.target && match.team2Score && match.team2Score.totalBalls > 0) {
+      const needed = Math.max(0, match.target - match.team2Score.runs);
+      let maxOvers = 20;
+      if (match.format.includes('ODI') || match.format.includes('List A')) maxOvers = 50;
+      if (match.format.includes('T20')) maxOvers = 20;
+      if (match.format.includes('Test') || match.format.includes('First Class')) maxOvers = 0;
+
+      if (maxOvers > 0) {
+        const remainingBalls = Math.max(0, maxOvers * 6 - match.team2Score.totalBalls);
+        return `${needed} runs needed in ${remainingBalls} balls`;
+      }
+      return `Target: ${match.target} runs`;
+    }
+
     if (match.resultText) return match.resultText;
     if (match.statusLabel && match.statusLabel !== 'Live') return match.statusLabel;
 

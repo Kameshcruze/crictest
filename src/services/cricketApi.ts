@@ -7,7 +7,8 @@ import {
 } from '../types/cricket';
 import { resolveTeam, resolveVenue, resolveSeries, KNOWN_TEAMS, KNOWN_VENUES, KNOWN_SERIES } from '../data/cricketMapping';
 
-export const LOCAL_ENDPOINT = '/api/top-matches';
+export const LOCAL_ENDPOINT =
+  typeof window !== 'undefined' ? '/api/top-matches' : 'http://localhost:3000/api/top-matches';
 export const DIRECT_GOSCORER_ENDPOINT = 'https://api.goscorer.com/api/v2/getTopMatches';
 export const API_ENDPOINT = DIRECT_GOSCORER_ENDPOINT;
 
@@ -178,22 +179,26 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
     resText.includes('no result') ||
     resText.includes('abandoned');
 
+  // Stumps indicates multi-day cricket play has concluded for the day (not an active live match)
+  const isStumps = resText.includes('stumps');
+
+  // Temporary in-match break during an active day of play
   const isInMatchBreak =
-    resText.includes('innings break') ||
-    resText.includes('lunch break') ||
-    resText.includes('tea break') ||
-    resText.includes('dinner break') ||
-    resText.includes('stumps') ||
-    resText.includes('delay') ||
-    resText.includes('break');
+    (resText.includes('innings break') ||
+      resText.includes('lunch break') ||
+      resText.includes('tea break') ||
+      resText.includes('dinner break') ||
+      resText.includes('delay') ||
+      resText.includes('rain')) &&
+    !isStumps;
 
   const hasLiveScore = !!(raw.j || raw.k);
 
-  // Match is completed ONLY if finishTime exists or has a terminal win/draw result
-  if (raw.finishTime || (isTerminalResult && !isInMatchBreak)) {
+  // Match is completed if finishTime exists, terminal win/draw result, drawn, or stumps (play concluded for the day)
+  if (raw.finishTime || raw.d === 6 || isStumps || (isTerminalResult && !isInMatchBreak)) {
     status = 'completed';
-    statusLabel = raw.res || raw.soResult || (raw.d === 6 ? 'Match Drawn' : 'Match Ended');
-  } else if (hasLiveScore) {
+    statusLabel = raw.res || raw.soResult || (isStumps ? 'Stumps' : raw.d === 6 ? 'Match Drawn' : 'Match Ended');
+  } else if (hasLiveScore || isInMatchBreak || (raw.d === 1 && !raw.a?.startsWith('&a;'))) {
     status = 'live';
     statusLabel = raw.a && !raw.a.startsWith('&') ? raw.a : (raw.soResult || raw.res || 'Live');
   } else {
@@ -338,15 +343,10 @@ async function syncBackgroundMapping(countryCode: string) {
       const data = await res.json();
       if (data?.matches) {
         for (const [id, m] of Object.entries(data.matches)) {
-          // Only populate if not already present or merge without overwriting newer live scores
-          if (!combinedMatchesPool[id]) {
-            combinedMatchesPool[id] = m as any;
-          } else {
-            combinedMatchesPool[id] = {
-              ...(m as any),
-              ...combinedMatchesPool[id], // Keep the fresh live scores
-            };
-          }
+          combinedMatchesPool[id] = {
+            ...(combinedMatchesPool[id] || {}),
+            ...(m as any),
+          };
         }
       }
       if (data?.mapping) {
@@ -361,18 +361,42 @@ async function syncBackgroundMapping(countryCode: string) {
 }
 
 /**
- * Ultra-fast direct live fetch (executes every single second in < 15ms):
- * 1. Directly queries https://api.goscorer.com/api/v2/getTopMatches?_t=... with cache-busting
- * 2. Immediately parses and returns fresh scores
- * 3. Falls back to local endpoint only if direct fetch fails
+ * Ultra-fast live fetch:
+ * 1. Synchronizes complete 31+ fixture catalog (including all active domestic leagues) from local endpoint
+ * 2. Overlays direct 1-second live score ticks from Goscorer API
+ * 3. Keeps all active matches permanently in memory
  */
 export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResult> {
   const startTime = performance.now();
   const now = Date.now();
 
-  // Trigger non-blocking background mapping sync if needed (once at start or every 30s)
-  if (!hasInitialMappingLoaded || now - lastBackgroundSyncTime > 30000) {
-    syncBackgroundMapping(countryCode);
+  // If pool has fewer than 15 fixtures or every 8s, sync from local endpoint to guarantee all fixtures
+  if (!hasInitialMappingLoaded || Object.keys(combinedMatchesPool).length < 15 || now - lastBackgroundSyncTime > 8000) {
+    try {
+      const localRes = await fetch(LOCAL_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cc: countryCode }),
+      });
+      if (localRes.ok) {
+        const localData = await localRes.json();
+        if (localData?.matches) {
+          for (const [id, m] of Object.entries(localData.matches)) {
+            combinedMatchesPool[id] = {
+              ...(combinedMatchesPool[id] || {}),
+              ...(m as any),
+            };
+          }
+        }
+        if (localData?.mapping) {
+          registerDynamicMapping(localData.mapping);
+        }
+        hasInitialMappingLoaded = true;
+        lastBackgroundSyncTime = now;
+      }
+    } catch {
+      // Local fallback failed
+    }
   }
 
   let freshUpdates: RawApiResponse | null = null;
@@ -380,7 +404,7 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
   try {
     // Direct Goscorer API call with cache-busting query parameter and headers
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
+    const timeout = setTimeout(() => controller.abort(), 1800);
 
     const directRes = await fetch(`${DIRECT_GOSCORER_ENDPOINT}?_t=${now}`, {
       method: 'POST',
@@ -399,31 +423,11 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
       }
     }
   } catch {
-    // Direct call failed (e.g. offline/strict firewall), fall back to local endpoint
+    // Direct call failed (e.g. offline/strict firewall)
   }
 
-  // If direct fetch didn't return data, try local endpoint
-  if (!freshUpdates) {
-    try {
-      const localRes = await fetch(LOCAL_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cc: countryCode }),
-      });
-      if (localRes.ok) {
-        const localData = await localRes.json();
-        if (localData?.matches) {
-          freshUpdates = localData.matches;
-          if (localData.mapping) registerDynamicMapping(localData.mapping);
-        }
-      }
-    } catch {
-      // Local fallback failed
-    }
-  }
-
-  // If both failed (e.g. static host like GitHub Pages without backend), try CORS proxies
-  if (!freshUpdates) {
+  // If direct fetch didn't return data and pool is empty, try CORS proxies
+  if (!freshUpdates && Object.keys(combinedMatchesPool).length === 0) {
     const corsProxies = [
       `https://api.allorigins.win/raw?url=${encodeURIComponent(DIRECT_GOSCORER_ENDPOINT)}`,
       `https://corsproxy.io/?url=${encodeURIComponent(DIRECT_GOSCORER_ENDPOINT)}`,
