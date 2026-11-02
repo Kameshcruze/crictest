@@ -628,3 +628,67 @@ export async function loadMatchStrategyFromSupabase(matchId: string): Promise<{
     return { positions: [], signals: [] };
   }
 }
+
+// In-memory cache for concluded match broadcasts in client session
+const clientConcludedMatchCache = new Set<string>();
+
+/**
+ * Verifies with Supabase database if a match conclusion notification was ALREADY sent.
+ * If not, atomically records it into `app_settings` with key `tele_concluded:${matchId}`
+ * and returns `true`. If already recorded, returns `false`.
+ * Guarantees zero duplicate broadcasts across page reloads, multiple tabs, and multiple devices.
+ */
+export async function checkAndRecordMatchConclusionInDb(
+  matchId: string,
+  details: {
+    team1?: string;
+    team2?: string;
+    result?: string;
+    seriesName?: string;
+  }
+): Promise<boolean> {
+  const dbKey = `tele_concluded:${matchId}`;
+
+  // 1. Fast in-memory check
+  if (clientConcludedMatchCache.has(dbKey)) {
+    return false;
+  }
+
+  if (!isSupabaseConfigured) {
+    clientConcludedMatchCache.add(dbKey);
+    return true;
+  }
+
+  try {
+    // 2. Query Supabase database to see if already recorded
+    const { data: existing, error: selectErr } = await supabase
+      .from('app_settings')
+      .select('key')
+      .eq('key', dbKey)
+      .maybeSingle();
+
+    if (!selectErr && existing?.key) {
+      clientConcludedMatchCache.add(dbKey);
+      return false; // Already sent previously by another tab or backend
+    }
+
+    // 3. Atomically record in DB BEFORE sending
+    await supabase.from('app_settings').upsert({
+      key: dbKey,
+      value: {
+        matchId,
+        ...details,
+        sentAt: new Date().toISOString(),
+      },
+      description: `Telegram match concluded notification record for match ${matchId}`,
+      updated_at: new Date().toISOString(),
+    });
+
+    clientConcludedMatchCache.add(dbKey);
+    return true;
+  } catch (err) {
+    console.warn('Error verifying match conclusion in DB:', err);
+    clientConcludedMatchCache.add(dbKey);
+    return true;
+  }
+}

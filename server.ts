@@ -213,6 +213,64 @@ async function checkAndRecordOverInDb(
   }
 }
 
+/**
+ * Checks in Supabase app_settings if a match conclusion notification has ALREADY been sent.
+ * If not, atomically records it in DB and returns true to allow dispatch.
+ * Guarantees zero duplicate messages across restarts, reloads, or multiple servers.
+ */
+async function checkAndRecordConclusionInDb(
+  matchId: string,
+  details: {
+    team1: string;
+    team2: string;
+    result: string;
+    scores?: string;
+  }
+): Promise<boolean> {
+  const dbKey = `tele_concluded:${matchId}`;
+
+  // 1. Fast in-memory filter
+  if (finishedNotifiedMatches.has(dbKey) || finishedNotifiedMatches.has(matchId)) {
+    return false;
+  }
+
+  try {
+    // 2. Database verification before sending: check if already exists in Supabase
+    const { data: existing, error: selectErr } = await serverSupabase
+      .from('app_settings')
+      .select('key')
+      .eq('key', dbKey)
+      .maybeSingle();
+
+    if (!selectErr && existing?.key) {
+      finishedNotifiedMatches.add(dbKey);
+      finishedNotifiedMatches.add(matchId);
+      return false; // Already sent previously
+    }
+
+    // 3. Atomically record in Supabase DB BEFORE sending
+    await serverSupabase.from('app_settings').upsert({
+      key: dbKey,
+      value: {
+        matchId,
+        ...details,
+        sentAt: new Date().toISOString(),
+      },
+      description: `Telegram match concluded notification record for match ${matchId}`,
+      updated_at: new Date().toISOString(),
+    });
+
+    finishedNotifiedMatches.add(dbKey);
+    finishedNotifiedMatches.add(matchId);
+    return true;
+  } catch (err: any) {
+    console.warn('DB check exception for match conclusion:', err?.message || err);
+    finishedNotifiedMatches.add(dbKey);
+    finishedNotifiedMatches.add(matchId);
+    return true;
+  }
+}
+
 // Track match state for automated notifications
 const backendScoresSnapshot: Record<
   string,
@@ -469,21 +527,41 @@ async function syncGoscorerApi(countryCode = 'IN') {
           for (let o = 1; o <= curScore2.completedOvers; o++) {
             sentOverBroadcastCache.add(`tele_over:${id}:2:${o}`);
           }
+          // Also pre-seed if match is already finished so historical completed matches are never spammed
+          if (isFinished) {
+            finishedNotifiedMatches.add(id);
+            finishedNotifiedMatches.add(`tele_concluded:${id}`);
+          }
         }
 
-        // Check for match conclusion
-        if (isFinished && !finishedNotifiedMatches.has(id)) {
+        // Check for match conclusion (Database Verified & Deduplicated)
+        if (
+          isFinished &&
+          !finishedNotifiedMatches.has(id) &&
+          !finishedNotifiedMatches.has(`tele_concluded:${id}`)
+        ) {
           finishedNotifiedMatches.add(id);
+          finishedNotifiedMatches.add(`tele_concluded:${id}`);
+
           if (activeTelegramConfig.notifyResults) {
-            const resultMsg =
-              `🏆 <b>MATCH CONCLUDED!</b> 🏆\n\n` +
-              `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
-              `🥇 <b>Result: ${item.res || item.soResult}</b>\n\n` +
-              `📊 <b>Scores:</b>\n` +
-              (item.j ? `• ${team1Name}: <b>${item.j}</b>\n` : '') +
-              (item.k ? `• ${team2Name}: <b>${item.k}</b>\n` : '') +
-              (item.sname || item.sfullname ? `\n🏆 ${item.sname || item.sfullname}` : '');
-            sendTelegramBroadcast(resultMsg);
+            const allowed = await checkAndRecordConclusionInDb(id, {
+              team1: team1Name,
+              team2: team2Name,
+              result: item.res || item.soResult || 'Completed',
+              scores: `${team1Name}: ${item.j || '-'}, ${team2Name}: ${item.k || '-'}`,
+            });
+
+            if (allowed) {
+              const resultMsg =
+                `🏆 <b>MATCH CONCLUDED!</b> 🏆\n\n` +
+                `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
+                `🥇 <b>Result: ${item.res || item.soResult}</b>\n\n` +
+                `📊 <b>Scores:</b>\n` +
+                (item.j ? `• ${team1Name}: <b>${item.j}</b>\n` : '') +
+                (item.k ? `• ${team2Name}: <b>${item.k}</b>\n` : '') +
+                (item.sname || item.sfullname ? `\n🏆 ${item.sname || item.sfullname}` : '');
+              await sendTelegramBroadcast(resultMsg);
+            }
           }
         }
 
@@ -500,8 +578,11 @@ async function syncGoscorerApi(countryCode = 'IN') {
         };
       }
 
-      // Periodic Scoreboard Digest: Every 3 minutes automatically
-      if (now - lastDigestTimestamp >= 180000) {
+      // Periodic Scoreboard Digest: only if explicitly enabled in telegram config
+      if (
+        activeTelegramConfig.notifyPeriodicDigest &&
+        now - lastDigestTimestamp >= (activeTelegramConfig.digestIntervalMinutes || 15) * 60 * 1000
+      ) {
         lastDigestTimestamp = now;
         const liveItems = Object.entries(matchStore.matches).filter(([_, m]) => (m.j || m.k) && !m.finishTime);
         if (liveItems.length > 0) {

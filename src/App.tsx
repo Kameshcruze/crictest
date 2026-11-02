@@ -28,6 +28,7 @@ import {
   migrateLocalStorageToSupabase,
   fetchMatchesFromSupabase,
   syncMatchToSupabase,
+  checkAndRecordMatchConclusionInDb,
 } from './services/supabaseSyncService';
 import {
   Radio,
@@ -115,6 +116,7 @@ export default function App() {
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>(getStoredTelegramConfig);
   const lastDigestTimeRef = useRef<number>(Date.now());
   const finishedMatchesRef = useRef<Set<string>>(new Set());
+  const isFirstFetchRef = useRef<boolean>(true);
 
   const [secondsRemaining, setSecondsRemaining] = useState<number>(1);
   const inFlightRef = useRef<boolean>(false);
@@ -138,6 +140,16 @@ export default function App() {
         setLatencyMs(result.latencyMs);
         setLastUpdated(new Date());
         setTickCounter((prev) => prev + 1);
+
+        // On first discovery: pre-seed existing completed matches so historical results are not spammed
+        if (isFirstFetchRef.current) {
+          result.matches.forEach((m) => {
+            if (m.status === 'completed') {
+              finishedMatchesRef.current.add(m.id);
+            }
+          });
+          isFirstFetchRef.current = false;
+        }
 
         // Detect score changes for audio chime alerts & Telegram alerts
         let scoreChanged = false;
@@ -180,7 +192,7 @@ export default function App() {
             }
           }
 
-          // Telegram Match Result Alert
+          // Telegram Match Result Alert (Database Verified & Deduplicated)
           if (
             m.status === 'completed' &&
             telegramConfig.enabled &&
@@ -190,8 +202,18 @@ export default function App() {
             !finishedMatchesRef.current.has(m.id)
           ) {
             finishedMatchesRef.current.add(m.id);
-            const resultHtml = formatResultAlert(m);
-            sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, resultHtml);
+            // Verify in Supabase DB before dispatching to eliminate multi-tab/refresh duplicates
+            checkAndRecordMatchConclusionInDb(m.id, {
+              team1: m.team1.name,
+              team2: m.team2.name,
+              result: m.resultText || m.statusLabel,
+              seriesName: m.seriesName,
+            }).then((allowed) => {
+              if (allowed) {
+                const resultHtml = formatResultAlert(m);
+                sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, resultHtml);
+              }
+            });
           }
         });
 
