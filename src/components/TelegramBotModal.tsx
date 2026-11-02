@@ -24,6 +24,7 @@ import {
   testTelegramConnection,
   sendTelegramMessage,
   formatScoreboardDigest,
+  testOverCompletionAlert,
 } from '../services/telegramService';
 import { ParsedCricketMatch } from '../types/cricket';
 
@@ -48,6 +49,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   const [enabled, setEnabled] = useState<boolean>(config.enabled ?? true);
   const [notifyWickets, setNotifyWickets] = useState<boolean>(config.notifyWickets ?? true);
   const [notifyResults, setNotifyResults] = useState<boolean>(config.notifyResults ?? true);
+  const [notifyOverCompletion, setNotifyOverCompletion] = useState<boolean>(config.notifyOverCompletion ?? true);
   const [notifyPeriodicDigest, setNotifyPeriodicDigest] = useState<boolean>(config.notifyPeriodicDigest ?? true);
   const [digestIntervalMinutes, setDigestIntervalMinutes] = useState<number>(config.digestIntervalMinutes || 3);
 
@@ -65,6 +67,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
     if (config.botToken) setBotToken(config.botToken);
     if (config.chatId) setChatId(config.chatId);
     setEnabled(config.enabled ?? true);
+    setNotifyOverCompletion(config.notifyOverCompletion ?? true);
   }, [config]);
 
   if (!isOpen) return null;
@@ -76,6 +79,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
       enabled,
       notifyWickets,
       notifyResults,
+      notifyOverCompletion,
       notifyBoundaries: false,
       notifyPeriodicDigest,
       digestIntervalMinutes,
@@ -83,6 +87,25 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
     onSaveConfig(updated);
     setTestStatus({ ok: true, message: 'Telegram settings saved successfully!' });
     setTimeout(() => setTestStatus(null), 3000);
+  };
+
+  const handleTestOverAlert = async () => {
+    if (!botToken.trim() || !chatId.trim()) {
+      setTestStatus({ ok: false, message: 'Please provide both Bot Token and Chat ID.' });
+      return;
+    }
+
+    setIsTesting(true);
+    setTestStatus(null);
+    const liveMatch = matches.find((m) => m.status === 'live');
+    const res = await testOverCompletionAlert(botToken, chatId, liveMatch);
+    setIsTesting(false);
+
+    if (res.ok) {
+      setTestStatus({ ok: true, message: 'Sample over completion alert sent to Telegram successfully!' });
+    } else {
+      setTestStatus({ ok: false, message: `Failed to send over alert: ${res.error}` });
+    }
   };
 
   const handleTestConnection = async () => {
@@ -690,7 +713,17 @@ setInterval(pollMatches, 2000);
                     className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-800/60 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors"
                   >
                     <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>{isSendingManual ? 'Broadcasting...' : 'Send Live Scoreboard Now'}</span>
+                    <span>{isSendingManual ? 'Broadcasting...' : 'Send Live Scoreboard'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleTestOverAlert}
+                    disabled={isTesting || !botToken.trim() || !chatId.trim()}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-amber-300 bg-amber-950/60 hover:bg-amber-900/60 border border-amber-800/60 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors"
+                  >
+                    <Radio className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Test Over Alert</span>
                   </button>
 
                   <button
@@ -729,6 +762,25 @@ setInterval(pollMatches, 2000);
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-800">
+                  {/* Over-by-Over Completion Alert (Verified in DB) */}
+                  <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-900/70 border border-amber-500/30 cursor-pointer hover:border-amber-500/60 transition-colors sm:col-span-2">
+                    <input
+                      type="checkbox"
+                      checked={notifyOverCompletion}
+                      onChange={(e) => setNotifyOverCompletion(e.target.checked)}
+                      className="mt-0.5 rounded text-amber-500 focus:ring-0 bg-slate-800 border-slate-700"
+                    />
+                    <div>
+                      <div className="text-xs font-semibold text-amber-200 flex items-center gap-1.5">
+                        <Radio className="w-3.5 h-3.5 text-amber-400" />
+                        <span>⚡ Over-by-Over Live Completion Alerts (Separate Match Updates)</span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        Posts a dedicated scorecard message for each match after every completed over (e.g., Over 5, Over 6). Checks the Supabase database before sending to strictly prevent duplicate posts.
+                      </p>
+                    </div>
+                  </label>
+
                   {/* Wickets Alert */}
                   <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-900/60 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors">
                     <input

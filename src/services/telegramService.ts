@@ -9,6 +9,7 @@ export interface TelegramConfig {
   notifyBoundaries: boolean;
   notifyPeriodicDigest: boolean;
   digestIntervalMinutes: number;
+  notifyOverCompletion?: boolean;
 }
 
 export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
@@ -20,6 +21,7 @@ export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
   notifyBoundaries: false,
   notifyPeriodicDigest: true,
   digestIntervalMinutes: 3,
+  notifyOverCompletion: true,
 };
 
 const STORAGE_KEY = 'crex_telegram_bot_config_v2';
@@ -298,3 +300,81 @@ export function formatResultAlert(match: ParsedCricketMatch): string {
     (s2 ? `• ${match.team2.shortName}: <b>${s2}</b>\n` : '') +
     `\n🏆 ${match.seriesName}`;
 }
+
+/**
+ * Formats a clean, dedicated match-specific Over Completion update
+ */
+export function formatOverCompletionAlert(
+  match: ParsedCricketMatch,
+  completedOver: number,
+  runs: number,
+  wickets: number,
+  runRate: number,
+  battingTeamName?: string,
+  oddsStr?: string
+): string {
+  const team1 = match.team1?.shortName || match.team1?.name || 'Team 1';
+  const team2 = match.team2?.shortName || match.team2?.name || 'Team 2';
+  const batting = battingTeamName || (match.battingTeamKey === match.team1?.key ? team1 : team2);
+  const status = match.resultText || match.statusLabel || match.sessionText || '';
+
+  let msg = `🏏 <b>OVER ${completedOver} COMPLETED</b>\n` +
+    `🏆 <b>${team1} vs ${team2}</b> · <i>${match.format}</i>\n` +
+    `───────────────────\n` +
+    `🔹 <b>Batting:</b> <b>${batting}</b>\n` +
+    `📊 <b>Score:</b> <b>${runs}/${wickets}</b> (${completedOver}.0 ov)\n` +
+    `📈 <b>Current Run Rate (CRR):</b> <b>${runRate.toFixed(2)}</b>\n`;
+
+  if (oddsStr) {
+    msg += `🎲 <b>Live Odds:</b> <code>${oddsStr}</code>\n`;
+  }
+  if (status) {
+    msg += `⚡ <b>Status:</b> <i>${status}</i>\n`;
+  }
+  if (match.venueName) {
+    msg += `📍 <i>${match.venueName}</i>\n`;
+  }
+
+  msg += `───────────────────\n` +
+    `⚡ <i>Crex Live Scorer · Verified Over Update</i>`;
+
+  return msg;
+}
+
+/**
+ * Tests sending a sample over completion alert to verify Telegram group delivery
+ */
+export async function testOverCompletionAlert(
+  botToken: string,
+  chatId: string,
+  sampleMatch?: ParsedCricketMatch
+): Promise<{ ok: boolean; error?: string }> {
+  const dummyMatch: ParsedCricketMatch = sampleMatch || {
+    id: 'sample-live',
+    team1: { key: 'IND', name: 'India', shortName: 'IND', color: '#1d4ed8', darkColor: '#1e3a8a' },
+    team2: { key: 'NZ', name: 'New Zealand', shortName: 'NZ', color: '#000000', darkColor: '#111827' },
+    format: 'T20I',
+    seriesName: 'India tour of New Zealand 2026',
+    seriesKey: 'ind-nz',
+    venueName: 'Seddon Park, Hamilton',
+    venueKey: 'seddon',
+    innings: [],
+    status: 'live',
+    statusLabel: 'Live · 1st Innings',
+    startTime: new Date(),
+    raw: {} as any,
+  };
+
+  const message = formatOverCompletionAlert(
+    dummyMatch,
+    10,
+    88,
+    2,
+    8.80,
+    dummyMatch.team1.shortName,
+    'India B: 72 | L: 74'
+  );
+
+  return sendTelegramMessage(botToken, chatId, message);
+}
+

@@ -68,18 +68,73 @@ function broadcastToClients(data: any) {
   }
 }
 
-// Backend Automated Telegram Broadcaster
+// Backend Automated Telegram Broadcaster with Dynamic Supabase Settings
 const DEFAULT_TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ';
 const DEFAULT_TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '-1003980667930';
 
-async function sendTelegramBroadcast(htmlText: string) {
-  if (!DEFAULT_TELEGRAM_BOT_TOKEN || !DEFAULT_TELEGRAM_CHAT_ID) return false;
+let activeTelegramConfig: {
+  botToken: string;
+  chatId: string;
+  enabled: boolean;
+  notifyWickets: boolean;
+  notifyResults: boolean;
+  notifyOverCompletion: boolean;
+  notifyPeriodicDigest: boolean;
+  digestIntervalMinutes: number;
+} = {
+  botToken: DEFAULT_TELEGRAM_BOT_TOKEN,
+  chatId: DEFAULT_TELEGRAM_CHAT_ID,
+  enabled: true,
+  notifyWickets: true,
+  notifyResults: true,
+  notifyOverCompletion: true,
+  notifyPeriodicDigest: true,
+  digestIntervalMinutes: 3,
+};
+
+async function reloadTelegramConfigFromDb() {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${DEFAULT_TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    const { data } = await serverSupabase
+      .from('app_settings')
+      .select('value')
+      .eq('key', 'telegram_config')
+      .maybeSingle();
+
+    if (data?.value && typeof data.value === 'object') {
+      const cfg = data.value as any;
+      activeTelegramConfig = {
+        ...activeTelegramConfig,
+        botToken: cfg.botToken || activeTelegramConfig.botToken,
+        chatId: cfg.chatId || activeTelegramConfig.chatId,
+        enabled: cfg.enabled ?? activeTelegramConfig.enabled,
+        notifyWickets: cfg.notifyWickets ?? activeTelegramConfig.notifyWickets,
+        notifyResults: cfg.notifyResults ?? activeTelegramConfig.notifyResults,
+        notifyOverCompletion: cfg.notifyOverCompletion ?? activeTelegramConfig.notifyOverCompletion,
+        notifyPeriodicDigest: cfg.notifyPeriodicDigest ?? activeTelegramConfig.notifyPeriodicDigest,
+        digestIntervalMinutes: cfg.digestIntervalMinutes || activeTelegramConfig.digestIntervalMinutes,
+      };
+    }
+  } catch {
+    // Non-blocking
+  }
+}
+
+// Initial config hydration and background periodic refresh every 30s
+reloadTelegramConfigFromDb();
+setInterval(reloadTelegramConfigFromDb, 30000);
+
+async function sendTelegramBroadcast(htmlText: string) {
+  const token = activeTelegramConfig.botToken || DEFAULT_TELEGRAM_BOT_TOKEN;
+  const chatId = activeTelegramConfig.chatId || DEFAULT_TELEGRAM_CHAT_ID;
+  if (!token || !chatId || !activeTelegramConfig.enabled) return false;
+
+  try {
+    const cleanToken = token.trim().replace(/^bot/i, '');
+    const res = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: DEFAULT_TELEGRAM_CHAT_ID,
+        chat_id: chatId.trim(),
         text: htmlText,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
@@ -92,6 +147,72 @@ async function sendTelegramBroadcast(htmlText: string) {
   }
 }
 
+// Fast in-memory cache to prevent redundant DB roundtrips for sent overs
+const sentOverBroadcastCache = new Set<string>();
+
+/**
+ * Checks in Supabase app_settings if an over update has ALREADY been sent.
+ * If not, atomically records it in DB and returns true to allow dispatch.
+ * Guarantees zero duplicate messages even across restarts or multiple tabs.
+ */
+async function checkAndRecordOverInDb(
+  matchId: string,
+  inningIndex: number,
+  completedOver: number,
+  details: {
+    team1: string;
+    team2: string;
+    battingTeam: string;
+    score: string;
+    runs: number;
+    wickets: number;
+    overs: string;
+    runRate: number;
+  }
+): Promise<boolean> {
+  const dbKey = `tele_over:${matchId}:${inningIndex}:${completedOver}`;
+
+  // 1. Fast in-memory filter
+  if (sentOverBroadcastCache.has(dbKey)) {
+    return false;
+  }
+
+  try {
+    // 2. Database verification before sending: check if already exists in Supabase
+    const { data: existing, error: selectErr } = await serverSupabase
+      .from('app_settings')
+      .select('key')
+      .eq('key', dbKey)
+      .maybeSingle();
+
+    if (!selectErr && existing?.key) {
+      sentOverBroadcastCache.add(dbKey);
+      return false; // Already sent previously
+    }
+
+    // 3. Atomically record in Supabase DB BEFORE sending
+    await serverSupabase.from('app_settings').upsert({
+      key: dbKey,
+      value: {
+        matchId,
+        inningIndex,
+        completedOver,
+        ...details,
+        sentAt: new Date().toISOString(),
+      },
+      description: `Telegram over ${completedOver} broadcast record for match ${matchId}`,
+      updated_at: new Date().toISOString(),
+    });
+
+    sentOverBroadcastCache.add(dbKey);
+    return true;
+  } catch (err: any) {
+    console.warn('DB check exception for over broadcast:', err.message);
+    sentOverBroadcastCache.add(dbKey);
+    return true;
+  }
+}
+
 // Track match state for automated notifications
 const backendScoresSnapshot: Record<
   string,
@@ -100,6 +221,10 @@ const backendScoresSnapshot: Record<
     score2: string;
     wickets1: number;
     wickets2: number;
+    completedOvers1: number;
+    ballsInOver1: number;
+    completedOvers2: number;
+    ballsInOver2: number;
     res?: string;
   }
 > = {};
@@ -108,13 +233,48 @@ const finishedNotifiedMatches = new Set<string>();
 let lastDigestTimestamp = Date.now();
 
 function parseScore(raw?: string) {
-  if (!raw || typeof raw !== 'string') return { runs: 0, wickets: 0, overs: '0' };
-  const match = raw.trim().match(/^(\d+)(?:\/(\d+))?(?:\((\d+(?:\.\d+)?))?/);
-  if (!match) return { runs: 0, wickets: 0, overs: '0' };
+  if (!raw || typeof raw !== 'string') {
+    return {
+      runs: 0,
+      wickets: 0,
+      overs: '0',
+      completedOvers: 0,
+      ballsInOver: 0,
+      isOverComplete: false,
+      runRate: 0,
+    };
+  }
+  const match = raw.trim().match(/^(\d+)(?:[\/-](\d+))?(?:\((\d+(?:\.\d+)?))?/);
+  if (!match) {
+    return {
+      runs: 0,
+      wickets: 0,
+      overs: '0',
+      completedOvers: 0,
+      ballsInOver: 0,
+      isOverComplete: false,
+      runRate: 0,
+    };
+  }
+  const runs = parseInt(match[1], 10) || 0;
+  const wickets = match[2] !== undefined ? parseInt(match[2], 10) : 0;
+  const oversStr = match[3] || '0';
+  const parts = oversStr.split('.');
+  const completedOvers = parseInt(parts[0], 10) || 0;
+  const ballsInOver = parts[1] !== undefined ? parseInt(parts[1], 10) : 0;
+  // An over is complete when whole completed overs >= 1 and 0 extra balls bowled
+  const isOverComplete = ballsInOver === 0 && completedOvers >= 1;
+  const totalBalls = completedOvers * 6 + Math.min(ballsInOver, 6);
+  const runRate = totalBalls > 0 ? Number((runs / (totalBalls / 6)).toFixed(2)) : 0;
+
   return {
-    runs: parseInt(match[1], 10) || 0,
-    wickets: match[2] !== undefined ? parseInt(match[2], 10) : 0,
-    overs: match[3] || '0',
+    runs,
+    wickets,
+    overs: oversStr,
+    completedOvers,
+    ballsInOver,
+    isOverComplete,
+    runRate,
   };
 }
 
@@ -169,9 +329,23 @@ async function syncGoscorerApi(countryCode = 'IN') {
         const team2Name = item.t2Sname || item.c || 'Team 2';
         const format = item.fo || 'Match';
 
+        // Check for match conclusion
+        const resText = (item.res || item.soResult || '').toLowerCase();
+        const isFinished =
+          Boolean(item.finishTime) ||
+          item.d === 2 ||
+          resText.includes('won by') ||
+          resText.includes('won') ||
+          resText.includes('drawn') ||
+          resText.includes('tied');
+
         if (prev) {
-          // Check for wicket in innings 1
-          if (curScore1.wickets > prev.wickets1 && (item.j || '').includes('/')) {
+          // 1. Check for wicket in innings 1
+          if (
+            activeTelegramConfig.notifyWickets &&
+            curScore1.wickets > prev.wickets1 &&
+            (item.j || '').includes('/')
+          ) {
             const wicketMsg =
               `🚨 <b>WICKET FALLS!</b> 🚨\n\n` +
               `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
@@ -180,8 +354,13 @@ async function syncGoscorerApi(countryCode = 'IN') {
               `⚡ <i>${item.res || item.soResult || 'Live'}</i>`;
             sendTelegramBroadcast(wicketMsg);
           }
-          // Check for wicket in innings 2
-          if (curScore2.wickets > prev.wickets2 && (item.k || '').includes('/')) {
+
+          // 2. Check for wicket in innings 2
+          if (
+            activeTelegramConfig.notifyWickets &&
+            curScore2.wickets > prev.wickets2 &&
+            (item.k || '').includes('/')
+          ) {
             const wicketMsg =
               `🚨 <b>WICKET FALLS!</b> 🚨\n\n` +
               `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
@@ -190,22 +369,122 @@ async function syncGoscorerApi(countryCode = 'IN') {
               `⚡ <i>${item.res || item.soResult || 'Live'}</i>`;
             sendTelegramBroadcast(wicketMsg);
           }
+
+          // 3. OVER COMPLETION INNINGS 1 (Sent separately for this match, verified in DB)
+          const inn1OverFinished =
+            curScore1.isOverComplete &&
+            (curScore1.completedOvers > prev.completedOvers1 ||
+              (curScore1.completedOvers === prev.completedOvers1 && prev.ballsInOver1 > 0));
+
+          if (
+            inn1OverFinished &&
+            !isFinished &&
+            activeTelegramConfig.notifyOverCompletion !== false
+          ) {
+            const allowed = await checkAndRecordOverInDb(id, 1, curScore1.completedOvers, {
+              team1: team1Name,
+              team2: team2Name,
+              battingTeam: team1Name,
+              score: `${curScore1.runs}/${curScore1.wickets}`,
+              runs: curScore1.runs,
+              wickets: curScore1.wickets,
+              overs: `${curScore1.completedOvers}.0`,
+              runRate: curScore1.runRate,
+            });
+
+            if (allowed) {
+              const cachedOdds = serverOddsCache.get(id);
+              const bookmaker = cachedOdds?.data?.bookmaker;
+              const oddsStr = bookmaker
+                ? `${cachedOdds?.data?.favoriteTeamName || 'Fav'} B: ${bookmaker.backRate} | L: ${bookmaker.layRate}`
+                : undefined;
+
+              const overMsg =
+                `🏏 <b>OVER ${curScore1.completedOvers} COMPLETED</b>\n` +
+                `🏆 <b>${team1Name} vs ${team2Name}</b> · <i>${format}</i>\n` +
+                `───────────────────\n` +
+                `🔹 <b>Batting:</b> <b>${team1Name}</b>\n` +
+                `📊 <b>Score:</b> <b>${curScore1.runs}/${curScore1.wickets}</b> (${curScore1.completedOvers}.0 ov)\n` +
+                `📈 <b>Current Run Rate (CRR):</b> <b>${curScore1.runRate.toFixed(2)}</b>\n` +
+                (oddsStr ? `🎲 <b>Live Odds:</b> <code>${oddsStr}</code>\n` : '') +
+                (item.res || item.soResult ? `⚡ <b>Status:</b> <i>${item.res || item.soResult}</i>\n` : '') +
+                (item.vname ? `📍 <i>${item.vname}</i>\n` : '') +
+                `───────────────────\n` +
+                `⚡ <i>Crex Live Scorer · Verified Over Update</i>`;
+
+              await sendTelegramBroadcast(overMsg);
+            }
+          }
+
+          // 4. OVER COMPLETION INNINGS 2 (Sent separately for this match, verified in DB)
+          const inn2OverFinished =
+            curScore2.isOverComplete &&
+            (curScore2.completedOvers > prev.completedOvers2 ||
+              (curScore2.completedOvers === prev.completedOvers2 && prev.ballsInOver2 > 0));
+
+          if (
+            inn2OverFinished &&
+            !isFinished &&
+            activeTelegramConfig.notifyOverCompletion !== false
+          ) {
+            const allowed = await checkAndRecordOverInDb(id, 2, curScore2.completedOvers, {
+              team1: team1Name,
+              team2: team2Name,
+              battingTeam: team2Name,
+              score: `${curScore2.runs}/${curScore2.wickets}`,
+              runs: curScore2.runs,
+              wickets: curScore2.wickets,
+              overs: `${curScore2.completedOvers}.0`,
+              runRate: curScore2.runRate,
+            });
+
+            if (allowed) {
+              const cachedOdds = serverOddsCache.get(id);
+              const bookmaker = cachedOdds?.data?.bookmaker;
+              const oddsStr = bookmaker
+                ? `${cachedOdds?.data?.favoriteTeamName || 'Fav'} B: ${bookmaker.backRate} | L: ${bookmaker.layRate}`
+                : undefined;
+
+              const overMsg =
+                `🏏 <b>OVER ${curScore2.completedOvers} COMPLETED</b>\n` +
+                `🏆 <b>${team1Name} vs ${team2Name}</b> · <i>${format}</i>\n` +
+                `───────────────────\n` +
+                `🔹 <b>Batting:</b> <b>${team2Name}</b>\n` +
+                `📊 <b>Score:</b> <b>${curScore2.runs}/${curScore2.wickets}</b> (${curScore2.completedOvers}.0 ov)\n` +
+                `📈 <b>Current Run Rate (CRR):</b> <b>${curScore2.runRate.toFixed(2)}</b>\n` +
+                (oddsStr ? `🎲 <b>Live Odds:</b> <code>${oddsStr}</code>\n` : '') +
+                (item.res || item.soResult ? `⚡ <b>Status:</b> <i>${item.res || item.soResult}</i>\n` : '') +
+                (item.vname ? `📍 <i>${item.vname}</i>\n` : '') +
+                `───────────────────\n` +
+                `⚡ <i>Crex Live Scorer · Verified Over Update</i>`;
+
+              await sendTelegramBroadcast(overMsg);
+            }
+          }
+        } else {
+          // On first discovery: pre-seed historical overs in cache so past completed overs are not spammed
+          for (let o = 1; o <= curScore1.completedOvers; o++) {
+            sentOverBroadcastCache.add(`tele_over:${id}:1:${o}`);
+          }
+          for (let o = 1; o <= curScore2.completedOvers; o++) {
+            sentOverBroadcastCache.add(`tele_over:${id}:2:${o}`);
+          }
         }
 
         // Check for match conclusion
-        const resText = (item.res || item.soResult || '').toLowerCase();
-        const isFinished = item.finishTime || resText.includes('won by') || resText.includes('won') || resText.includes('drawn');
         if (isFinished && !finishedNotifiedMatches.has(id)) {
           finishedNotifiedMatches.add(id);
-          const resultMsg =
-            `🏆 <b>MATCH CONCLUDED!</b> 🏆\n\n` +
-            `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
-            `🥇 <b>Result: ${item.res || item.soResult}</b>\n\n` +
-            `📊 <b>Scores:</b>\n` +
-            (item.j ? `• ${team1Name}: <b>${item.j}</b>\n` : '') +
-            (item.k ? `• ${team2Name}: <b>${item.k}</b>\n` : '') +
-            (item.sname || item.sfullname ? `\n🏆 ${item.sname || item.sfullname}` : '');
-          sendTelegramBroadcast(resultMsg);
+          if (activeTelegramConfig.notifyResults) {
+            const resultMsg =
+              `🏆 <b>MATCH CONCLUDED!</b> 🏆\n\n` +
+              `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
+              `🥇 <b>Result: ${item.res || item.soResult}</b>\n\n` +
+              `📊 <b>Scores:</b>\n` +
+              (item.j ? `• ${team1Name}: <b>${item.j}</b>\n` : '') +
+              (item.k ? `• ${team2Name}: <b>${item.k}</b>\n` : '') +
+              (item.sname || item.sfullname ? `\n🏆 ${item.sname || item.sfullname}` : '');
+            sendTelegramBroadcast(resultMsg);
+          }
         }
 
         backendScoresSnapshot[id] = {
@@ -213,6 +492,10 @@ async function syncGoscorerApi(countryCode = 'IN') {
           score2: item.k || '',
           wickets1: curScore1.wickets,
           wickets2: curScore2.wickets,
+          completedOvers1: curScore1.completedOvers,
+          ballsInOver1: curScore1.ballsInOver,
+          completedOvers2: curScore2.completedOvers,
+          ballsInOver2: curScore2.ballsInOver,
           res: item.res,
         };
       }
@@ -519,6 +802,53 @@ app.post('/api/telegram/send', async (req, res) => {
       body: JSON.stringify({
         chat_id: String(targetChatId).trim(),
         text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+    });
+    const data = await tgRes.json();
+    return res.status(tgRes.status).json(data);
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Endpoint to test an over completion alert directly
+app.post('/api/telegram/test-over', async (req, res) => {
+  const { botToken, chatId, matchId } = req.body || {};
+  const token = botToken || activeTelegramConfig.botToken || DEFAULT_TELEGRAM_BOT_TOKEN;
+  const targetChatId = chatId || activeTelegramConfig.chatId || DEFAULT_TELEGRAM_CHAT_ID;
+
+  const sampleMatch = (matchId && matchStore.matches[matchId])
+    ? matchStore.matches[matchId]
+    : Object.values(matchStore.matches)[0];
+
+  const t1 = sampleMatch?.t1Sname || sampleMatch?.b || 'IND';
+  const t2 = sampleMatch?.t2Sname || sampleMatch?.c || 'NZ';
+  const format = sampleMatch?.fo || 'T20I';
+  const venue = sampleMatch?.vname || 'Seddon Park, Hamilton';
+
+  const testMsg =
+    `🏏 <b>OVER 10 COMPLETED (TEST NOTIFICATION)</b>\n` +
+    `🏆 <b>${t1} vs ${t2}</b> · <i>${format}</i>\n` +
+    `───────────────────\n` +
+    `🔹 <b>Batting:</b> <b>${t1}</b>\n` +
+    `📊 <b>Score:</b> <b>88/2</b> (10.0 ov)\n` +
+    `📈 <b>Current Run Rate (CRR):</b> <b>8.80</b>\n` +
+    `🎲 <b>Live Odds:</b> <code>${t1} B: 72 | L: 74</code>\n` +
+    `⚡ <b>Status:</b> <i>${t1} opted to bat</i>\n` +
+    `📍 <i>${venue}</i>\n` +
+    `───────────────────\n` +
+    `⚡ <i>Crex Live Scorer · Verified Over Update</i>`;
+
+  try {
+    const cleanToken = String(token).trim().replace(/^bot/i, '');
+    const tgRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: String(targetChatId).trim(),
+        text: testMsg,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
       }),
