@@ -370,8 +370,8 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
   const startTime = performance.now();
   const now = Date.now();
 
-  // If pool has fewer than 15 fixtures or every 8s, sync from local endpoint to guarantee all fixtures
-  if (!hasInitialMappingLoaded || Object.keys(combinedMatchesPool).length < 15 || now - lastBackgroundSyncTime > 8000) {
+  // Sync from local endpoint every 1.5s to guarantee all domestic & international matches update live
+  if (!hasInitialMappingLoaded || Object.keys(combinedMatchesPool).length < 15 || now - lastBackgroundSyncTime >= 1500) {
     try {
       const localRes = await fetch(LOCAL_ENDPOINT, {
         method: 'POST',
