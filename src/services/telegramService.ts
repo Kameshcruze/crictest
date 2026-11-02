@@ -23,29 +23,84 @@ export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
 };
 
 const STORAGE_KEY = 'crex_telegram_bot_config_v2';
+let cachedTelegramConfig: TelegramConfig | null = null;
 
 export function getStoredTelegramConfig(): TelegramConfig {
+  if (cachedTelegramConfig) return cachedTelegramConfig;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
     if (!raw) return DEFAULT_TELEGRAM_CONFIG;
     const parsed = JSON.parse(raw);
-    return {
+    cachedTelegramConfig = {
       ...DEFAULT_TELEGRAM_CONFIG,
       ...parsed,
       botToken: parsed.botToken || DEFAULT_TELEGRAM_CONFIG.botToken,
       chatId: parsed.chatId || DEFAULT_TELEGRAM_CONFIG.chatId,
     };
+    return cachedTelegramConfig || DEFAULT_TELEGRAM_CONFIG;
   } catch {
     return DEFAULT_TELEGRAM_CONFIG;
   }
 }
 
-export function saveStoredTelegramConfig(config: TelegramConfig): void {
+/**
+ * Loads telegram configuration from Supabase app_settings
+ */
+export async function fetchTelegramConfigFromSupabase(): Promise<TelegramConfig | null> {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    const { supabase, isSupabaseConfigured } = await import('./supabaseClient');
+    if (!isSupabaseConfigured) return null;
+
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('value')
+      .eq('key', 'telegram_config')
+      .maybeSingle();
+
+    if (!error && data?.value) {
+      cachedTelegramConfig = {
+        ...DEFAULT_TELEGRAM_CONFIG,
+        ...(data.value as Partial<TelegramConfig>),
+      };
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(cachedTelegramConfig));
+      }
+      return cachedTelegramConfig;
+    }
+  } catch {
+    // Non-blocking
+  }
+  return null;
+}
+
+async function persistConfigToSupabase(config: TelegramConfig): Promise<void> {
+  try {
+    const { supabase, isSupabaseConfigured } = await import('./supabaseClient');
+    if (!isSupabaseConfigured) return;
+    const { error } = await supabase.from('app_settings').upsert({
+      key: 'telegram_config',
+      value: config,
+      description: 'Telegram Bot automated live feed dispatch configuration',
+      updated_at: new Date().toISOString(),
+    });
+    if (error) console.warn('Supabase telegram config save warning:', error.message);
+  } catch {
+    // Non-blocking
+  }
+}
+
+export function saveStoredTelegramConfig(config: TelegramConfig): void {
+  cachedTelegramConfig = config;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    }
   } catch {
     // LocalStorage write error fallback
   }
+
+  // Asynchronously persist to Supabase app_settings
+  void persistConfigToSupabase(config);
 }
 
 /**

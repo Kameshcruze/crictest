@@ -2,13 +2,33 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import { createClient } from '@supabase/supabase-js';
+
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vbcslopjzilphqpdggzp.supabase.co';
+const SUPABASE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_KEY ||
+  'sb_publishable_AdjpbtM51QRUXSC68vgpGg_LwEBDKAu';
+
+const serverSupabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: false },
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = '0.0.0.0';
 const isProduction = process.env.NODE_ENV === 'production';
+
+// Catch unhandled errors so the process never unexpectedly terminates
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
 
 app.use(express.json());
 
@@ -313,7 +333,9 @@ async function syncCrexPool() {
 }
 
 // Initial eager sync
-syncGoscorerApi().then(syncCrexPool);
+syncGoscorerApi()
+  .then(syncCrexPool)
+  .catch((err) => console.error('Initial sync error:', err));
 
 // Continuous live polling loop
 setInterval(syncGoscorerApi, 1000); // Check Goscorer API every 1000ms
@@ -517,6 +539,39 @@ setTimeout(() => {
   );
 }, 2000);
 
+// Diagnostic Endpoint: Check Supabase connectivity and table counts
+app.get('/api/supabase/status', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  try {
+    const [matchesRes, teamsRes, settingsRes, positionsRes] = await Promise.all([
+      serverSupabase.from('matches').select('*', { count: 'exact', head: true }),
+      serverSupabase.from('teams').select('*', { count: 'exact', head: true }),
+      serverSupabase.from('app_settings').select('key, updated_at'),
+      serverSupabase.from('trade_positions').select('*', { count: 'exact', head: true }),
+    ]);
+
+    res.json({
+      ok: !matchesRes.error && !teamsRes.error,
+      connected: true,
+      url: SUPABASE_URL,
+      matchesCount: matchesRes.count ?? 0,
+      teamsCount: teamsRes.count ?? 0,
+      positionsCount: positionsRes.count ?? 0,
+      settingsFound: settingsRes.data?.map((s: { key: string }) => s.key) ?? [],
+      errors: {
+        matches: matchesRes.error?.message || null,
+        teams: teamsRes.error?.message || null,
+        settings: settingsRes.error?.message || null,
+        positions: positionsRes.error?.message || null,
+      },
+      hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Mount Vite or serve static files
 async function startServer() {
   if (!isProduction) {
@@ -532,9 +587,12 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, () => {
-    console.log(`Live Scorer server running on port ${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`Live Scorer server running on http://${HOST}:${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});

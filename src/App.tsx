@@ -25,6 +25,11 @@ import {
   formatScoreboardDigest,
 } from './services/telegramService';
 import {
+  migrateLocalStorageToSupabase,
+  fetchMatchesFromSupabase,
+  syncMatchToSupabase,
+} from './services/supabaseSyncService';
+import {
   Radio,
   AlertTriangle,
   RefreshCw,
@@ -213,6 +218,13 @@ export default function App() {
 
         // Always create a new array reference to guarantee React state updates
         setMatches([...result.matches]);
+
+        // Asynchronously sync live matches to Supabase
+        result.matches.forEach((m) => {
+          if (m.status === 'live' || m.status === 'completed') {
+            syncMatchToSupabase(m).catch(() => {});
+          }
+        });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to fetch Crex matches';
         setError(msg);
@@ -224,8 +236,19 @@ export default function App() {
     [countryCode, soundEnabled, telegramConfig]
   );
 
-  // Initial load
+  // Initial load: Migrate local data, populate from Supabase, then fetch fresh feed
   useEffect(() => {
+    // 1. Migrate any existing local data
+    migrateLocalStorageToSupabase().catch(() => {});
+
+    // 2. Hydrate matches from Supabase if available
+    fetchMatchesFromSupabase().then((savedMatches) => {
+      if (savedMatches.length > 0) {
+        setMatches((prev) => (prev.length === 0 ? savedMatches : prev));
+      }
+    }).catch(() => {});
+
+    // 3. Initiate live streaming / polling
     loadMatches(false);
   }, [loadMatches]);
 

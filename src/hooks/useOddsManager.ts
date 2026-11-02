@@ -7,6 +7,7 @@ import {
   verifyMatchOddsConsistency,
 } from '../services/oddsApi';
 import { registerDynamicTeam } from '../data/cricketMapping';
+import { syncOddsToSupabase } from '../services/supabaseSyncService';
 
 export interface UseOddsManagerReturn {
   oddsByMatchId: Record<string, MatchOddsState>;
@@ -103,6 +104,12 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
       totalRecordsRef.current += 1;
       setTotalRecordsReceived(totalRecordsRef.current);
 
+      let computedMovement: OddsMovement = {
+        direction: 'stable',
+        deltaBack: 0,
+        deltaLay: 0,
+      };
+
       setOddsByMatchId((prev) => {
         const existing = prev[cleanId];
         const existingOdds = existing?.odds || null;
@@ -133,6 +140,8 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
             };
           }
         }
+
+        computedMovement = movement;
 
         // Record tick history (up to last 30 ticks)
         const newTick: OddsTick = {
@@ -166,6 +175,19 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
           },
         };
       });
+
+      // Asynchronously persist current odds and price movement to Supabase
+      syncOddsToSupabase(cleanId, {
+        matchId: cleanId,
+        oddsKey: cleanId,
+        maskedKey: maskOddsKey(cleanId),
+        status: odds.bookmaker.isSuspended ? 'unavailable' : 'success',
+        odds,
+        movement: computedMovement,
+        recordsCount: totalRecordsRef.current,
+        lastUpdated: new Date(),
+        consistency,
+      }).catch(() => {});
     } catch (err: unknown) {
       // Guard: Discard stale failures
       if (requestSeqRef.current[cleanId] !== seq) return;

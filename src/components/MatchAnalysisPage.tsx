@@ -33,6 +33,11 @@ import {
   calculateOpposingOdds,
   DEFAULT_STRATEGY_CONFIG,
 } from '../services/strategy';
+import {
+  syncStrategySignalToSupabase,
+  syncTradePositionToSupabase,
+  loadMatchStrategyFromSupabase,
+} from '../services/supabaseSyncService';
 
 interface MatchAnalysisPageProps {
   matchId: string;
@@ -180,11 +185,35 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     return strategyEngine.getState(matchId);
   }, [matchId, evaluationTick]);
 
+  // Requirement 6: Load persisted trade positions and historical signals from Supabase on mount
+  useEffect(() => {
+    if (!matchId) return;
+    loadMatchStrategyFromSupabase(matchId).then(({ positions, signals }) => {
+      const state = strategyEngine.getState(matchId);
+      positions.forEach((pos) => {
+        if (pos.positionType === 'FIRST_ENTRY' && pos.status !== 'NONE') {
+          state.firstEntryPosition = { ...state.firstEntryPosition, ...pos };
+        } else if (pos.positionType === 'SECOND_ENTRY' && pos.status !== 'NONE') {
+          state.secondEntryPosition = { ...state.secondEntryPosition, ...pos };
+        }
+      });
+      if (signals.length > 0 && state.signalsHistory.length === 0) {
+        state.signalsHistory = signals;
+      }
+      setEvaluationTick((prev) => prev + 1);
+    }).catch(() => {});
+  }, [matchId]);
+
   // Evaluate strategy rules whenever match or odds change
   useEffect(() => {
     if (!match || !oddsState) return;
     const isStale = isLive && freshnessSec > 15;
-    strategyEngine.evaluateMatch(match, oddsState, undefined, { isStale });
+    const newSignals = strategyEngine.evaluateMatch(match, oddsState, undefined, { isStale });
+    if (newSignals && newSignals.length > 0) {
+      newSignals.forEach((sig) => {
+        syncStrategySignalToSupabase(sig).catch(() => {});
+      });
+    }
     setEvaluationTick((prev) => prev + 1);
   }, [
     match?.id,
@@ -276,7 +305,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     const currentInnings = match.team2Score ? 2 : 1;
     const currentOver = activeScore ? activeScore.overs : 0;
     const currentWickets = activeScore ? activeScore.wickets : 0;
-    strategyEngine.recordEntry(
+    const pos = strategyEngine.recordEntry(
       matchId,
       'FIRST_ENTRY',
       bookmaker.decimalBack,
@@ -284,13 +313,15 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
       currentOver,
       currentWickets
     );
+    syncTradePositionToSupabase(pos).catch(() => {});
     setEvaluationTick((prev) => prev + 1);
   };
 
   const handleRecordFirstExit = () => {
     if (!bookmaker?.decimalLay || !match) return;
     const currentOver = activeScore ? activeScore.overs : 0;
-    strategyEngine.recordExit(matchId, 'FIRST_ENTRY', bookmaker.decimalLay, currentOver);
+    const pos = strategyEngine.recordExit(matchId, 'FIRST_ENTRY', bookmaker.decimalLay, currentOver);
+    syncTradePositionToSupabase(pos).catch(() => {});
     setEvaluationTick((prev) => prev + 1);
   };
 
@@ -299,7 +330,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     const currentInnings = match.team2Score ? 2 : 1;
     const currentOver = activeScore ? activeScore.overs : 0;
     const currentWickets = activeScore ? activeScore.wickets : 0;
-    strategyEngine.recordEntry(
+    const pos = strategyEngine.recordEntry(
       matchId,
       'SECOND_ENTRY',
       opposingOdds,
@@ -307,6 +338,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
       currentOver,
       currentWickets
     );
+    syncTradePositionToSupabase(pos).catch(() => {});
     setEvaluationTick((prev) => prev + 1);
   };
 
