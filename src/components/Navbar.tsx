@@ -10,6 +10,7 @@ import {
   Pause,
   Zap,
   Send,
+  Target,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -25,6 +26,8 @@ interface NavbarProps {
   onOpenScriptModal: () => void;
   onOpenInspectorModal: () => void;
   onOpenTelegramModal: () => void;
+  onOpenEntryRadarModal?: () => void;
+  entryOpportunitiesCount?: number;
   isTelegramActive?: boolean;
   lastUpdated?: Date;
   isSseActive?: boolean;
@@ -53,6 +56,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenScriptModal,
   onOpenInspectorModal,
   onOpenTelegramModal,
+  onOpenEntryRadarModal,
+  entryOpportunitiesCount = 0,
   isTelegramActive,
   isSseActive,
 }) => {
@@ -192,6 +197,30 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Code2 className="w-3.5 h-3.5" />
               <span>API Inspector</span>
+            </button>
+
+            {/* New: Entry Radar & Possibilities Button */}
+            <button
+              type="button"
+              onClick={onOpenEntryRadarModal}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all shadow-sm ${
+                entryOpportunitiesCount > 0
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-900/40 ring-1 ring-emerald-400/60'
+                  : 'bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30'
+              }`}
+              title="Check live entry possibilities (0.0 overs to finish) or wait for entry"
+            >
+              <Target className={`w-3.5 h-3.5 ${entryOpportunitiesCount > 0 ? 'text-white animate-pulse' : 'text-emerald-400'}`} />
+              <span>Entry Radar</span>
+              {entryOpportunitiesCount > 0 ? (
+                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-white text-emerald-950 ml-0.5 shadow-sm">
+                  {entryOpportunitiesCount} Ready
+                </span>
+              ) : (
+                <span className="text-[10px] text-slate-400 hidden xl:inline">
+                  (Wait)
+                </span>
+              )}
             </button>
 
             {/* Telegram Bot Integration Button */}

@@ -14,7 +14,9 @@ import { ApiInspectorModal } from './components/ApiInspectorModal';
 import { TelegramBotModal } from './components/TelegramBotModal';
 import { OddsDiagnosticModal } from './components/OddsDiagnosticModal';
 import { MatchAnalysisPage } from './components/MatchAnalysisPage';
+import { EntryPossibilitiesModal } from './components/EntryPossibilitiesModal';
 import { useOddsManager } from './hooks/useOddsManager';
+import { calculateOpposingOdds, isWithinEntryWindow } from './services/strategy/engine';
 import {
   TelegramConfig,
   getStoredTelegramConfig,
@@ -23,12 +25,16 @@ import {
   formatWicketAlert,
   formatResultAlert,
   formatScoreboardDigest,
+  formatFirstEntryAlert,
+  formatSecondEntryAlert,
 } from './services/telegramService';
 import {
   migrateLocalStorageToSupabase,
   fetchMatchesFromSupabase,
   syncMatchToSupabase,
   checkAndRecordMatchConclusionInDb,
+  checkAndRecordEntrySignalInDb,
+  fetchRecordedFirstEntriesFromDb,
 } from './services/supabaseSyncService';
 import {
   Radio,
@@ -39,6 +45,7 @@ import {
   Info,
   Zap,
   Send,
+  Target,
 } from 'lucide-react';
 
 export default function App() {
@@ -66,6 +73,11 @@ export default function App() {
   const [isInspectorModalOpen, setIsInspectorModalOpen] = useState<boolean>(false);
   const [isTelegramModalOpen, setIsTelegramModalOpen] = useState<boolean>(false);
   const [isOddsDiagnosticOpen, setIsOddsDiagnosticOpen] = useState<boolean>(false);
+  const [isEntryRadarOpen, setIsEntryRadarOpen] = useState<boolean>(false);
+
+  // Strategy Entry Tracking (ball 0.0 to match end)
+  const [recordedFirstEntries, setRecordedFirstEntries] = useState<Set<string>>(new Set());
+  const firstEntryWicketsAnchorRef = useRef<Record<string, number>>({});
 
   // Phase 5 Routing: Dedicated Match Analysis View
   const [activeAnalysisMatchId, setActiveAnalysisMatchId] = useState<string | null>(() => {
@@ -258,6 +270,39 @@ export default function App() {
     [countryCode, soundEnabled, telegramConfig]
   );
 
+  // Real-time Entry Opportunities Count for Navbar Radar Badge
+  const entryOpportunitiesCount = useMemo(() => {
+    let count = 0;
+    const liveMatches = matches.filter(
+      (m) => m.status === 'live' || (m.status !== 'completed' && (m.team1Score || m.team2Score))
+    );
+    for (const m of liveMatches) {
+      const oddsState = oddsByMatchId[m.id];
+      const decimalOdds =
+        oddsState?.odds?.bookmaker?.decimalBack ??
+        oddsState?.odds?.bookmaker?.decimalLay ??
+        null;
+      const opposingOdds = decimalOdds ? calculateOpposingOdds(decimalOdds) : null;
+      const activeScore = m.team2Score || m.team1Score;
+      const currentInnings = m.team2Score ? 2 : 1;
+      const currentOver = activeScore ? activeScore.overs : 0;
+      const inWindow = isWithinEntryWindow(currentInnings, currentOver);
+
+      // First entry criteria: [1.85, 2.00] in window
+      if (decimalOdds !== null && decimalOdds >= 1.85 && decimalOdds <= 2.0 && inWindow) {
+        count++;
+        continue;
+      }
+
+      // Second entry criteria: STRICT REQUIREMENT: MUST HAVE 1ST ENTRY
+      const hasFirst = recordedFirstEntries.has(m.id);
+      if (hasFirst && opposingOdds && opposingOdds < 1.65 && inWindow) {
+        count++;
+      }
+    }
+    return count;
+  }, [matches, oddsByMatchId, recordedFirstEntries]);
+
   // Initial load: Migrate local data, populate from Supabase, then fetch fresh feed
   useEffect(() => {
     // 1. Migrate any existing local data
@@ -270,9 +315,127 @@ export default function App() {
       }
     }).catch(() => {});
 
-    // 3. Initiate live streaming / polling
+    // 3. Hydrate strategy recorded 1st entries from Supabase
+    fetchRecordedFirstEntriesFromDb().then((entries) => {
+      if (entries.size > 0) {
+        setRecordedFirstEntries((prev) => new Set([...prev, ...entries]));
+      }
+    }).catch(() => {});
+
+    // 4. Initiate live streaming / polling
     loadMatches(false);
   }, [loadMatches]);
+
+  // Live Evaluation of Strategy Entries from Ball 0.0 to Match End (with strict 1st -> 2nd entry rule)
+  useEffect(() => {
+    const liveMatches = matches.filter(
+      (m) => m.status === 'live' || (m.status !== 'completed' && (m.team1Score || m.team2Score))
+    );
+
+    for (const m of liveMatches) {
+      const oddsState = oddsByMatchId[m.id];
+      const decimalOdds =
+        oddsState?.odds?.bookmaker?.decimalBack ??
+        oddsState?.odds?.bookmaker?.decimalLay ??
+        null;
+      const favoriteTeam =
+        oddsState?.odds?.favoriteTeamName ||
+        oddsState?.odds?.favoriteTeamKey ||
+        m.team1.shortName;
+      const activeScore = m.team2Score || m.team1Score;
+      const currentInnings = m.team2Score ? 2 : 1;
+      const currentOver = activeScore ? activeScore.overs : 0;
+      const currentRuns = activeScore ? activeScore.runs : 0;
+      const currentWickets = activeScore ? activeScore.wickets : 0;
+      const opposingOdds = decimalOdds ? calculateOpposingOdds(decimalOdds) : null;
+      const inWindow = isWithinEntryWindow(currentInnings, currentOver);
+
+      if (decimalOdds === null) continue;
+
+      // 1. Evaluate First Entry: [1.85, 2.00] within window
+      if (decimalOdds >= 1.85 && decimalOdds <= 2.0 && inWindow) {
+        if (!recordedFirstEntries.has(m.id)) {
+          checkAndRecordEntrySignalInDb(m.id, 'FIRST_ENTRY', {
+            team1: m.team1.shortName,
+            team2: m.team2.shortName,
+            measuredTeam: favoriteTeam,
+            decimalOdds,
+            over: currentOver,
+            innings: currentInnings,
+            score: `${currentRuns}/${currentWickets}`,
+            rule: 'First Entry: Odds in [1.85, 2.00] within window',
+          }).then((allowed) => {
+            if (allowed) {
+              setRecordedFirstEntries((prev) => new Set(prev).add(m.id));
+              firstEntryWicketsAnchorRef.current[m.id] = currentWickets;
+
+              if (
+                telegramConfig.enabled &&
+                telegramConfig.botToken &&
+                telegramConfig.chatId &&
+                telegramConfig.notifyStrategyEntries !== false
+              ) {
+                const alertMsg = formatFirstEntryAlert({
+                  match: m,
+                  targetTeamName: favoriteTeam,
+                  decimalOdds,
+                  currentOver,
+                  currentInnings,
+                  runs: currentRuns,
+                  wickets: currentWickets,
+                  crr: m.currentRunRate,
+                });
+                sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertMsg);
+              }
+            }
+          });
+        }
+      }
+
+      // 2. Evaluate Second Entry: STRICT DEPENDENCY ON FIRST ENTRY
+      // "without the first entry you should not send the 2nd entry message."
+      const hasFirstEntry = recordedFirstEntries.has(m.id);
+      if (hasFirstEntry) {
+        const anchorWkts = firstEntryWicketsAnchorRef.current[m.id] ?? 0;
+        const wicketFellSince1st = currentWickets > anchorWkts;
+
+        if (wicketFellSince1st && opposingOdds && opposingOdds < 1.65 && inWindow) {
+          checkAndRecordEntrySignalInDb(m.id, 'SECOND_ENTRY', {
+            team1: m.team1.shortName,
+            team2: m.team2.shortName,
+            measuredTeam: favoriteTeam,
+            decimalOdds,
+            opposingOdds,
+            over: currentOver,
+            innings: currentInnings,
+            score: `${currentRuns}/${currentWickets}`,
+            rule: 'Second Entry: Confirmed wicket fell after 1st entry, opposing odds < 1.65 within window',
+          }).then((allowed) => {
+            if (allowed) {
+              if (
+                telegramConfig.enabled &&
+                telegramConfig.botToken &&
+                telegramConfig.chatId &&
+                telegramConfig.notifyStrategyEntries !== false
+              ) {
+                const alertMsg = formatSecondEntryAlert({
+                  match: m,
+                  measuredTeamName: favoriteTeam,
+                  opposingOdds,
+                  currentOver,
+                  currentInnings,
+                  runs: currentRuns,
+                  wickets: currentWickets,
+                  anchorWickets: anchorWkts,
+                });
+                sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertMsg);
+              }
+            }
+          });
+        }
+      }
+    }
+  }, [matches, oddsByMatchId, recordedFirstEntries, telegramConfig]);
 
   // Active 1-Second Continuous Live Engine with accurate countdown
   useEffect(() => {
@@ -383,6 +546,16 @@ export default function App() {
           isRefreshing={isGlobalRefreshing}
           totalRecordsReceived={totalRecordsReceived}
         />
+
+        {/* Live Entry Radar & Opportunities Modal */}
+        <EntryPossibilitiesModal
+          isOpen={isEntryRadarOpen}
+          onClose={() => setIsEntryRadarOpen(false)}
+          matches={matches}
+          oddsByMatchId={oddsByMatchId}
+          onSelectMatch={navigateToAnalysis}
+          recordedFirstEntries={recordedFirstEntries}
+        />
       </div>
     );
   }
@@ -408,6 +581,8 @@ export default function App() {
         onOpenScriptModal={() => setIsScriptModalOpen(true)}
         onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
         onOpenTelegramModal={() => setIsTelegramModalOpen(true)}
+        onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
+        entryOpportunitiesCount={entryOpportunitiesCount}
         isTelegramActive={telegramConfig.enabled && !!telegramConfig.botToken && !!telegramConfig.chatId}
         lastUpdated={lastUpdated}
         isSseActive={true}
@@ -662,6 +837,16 @@ export default function App() {
         onRefreshMatch={refreshMatchOdds}
         isRefreshing={isGlobalRefreshing}
         totalRecordsReceived={totalRecordsReceived}
+      />
+
+      {/* Live Entry Radar & Possibilities Modal */}
+      <EntryPossibilitiesModal
+        isOpen={isEntryRadarOpen}
+        onClose={() => setIsEntryRadarOpen(false)}
+        matches={matches}
+        oddsByMatchId={oddsByMatchId}
+        onSelectMatch={navigateToAnalysis}
+        recordedFirstEntries={recordedFirstEntries}
       />
     </div>
   );

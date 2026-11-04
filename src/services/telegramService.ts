@@ -10,6 +10,7 @@ export interface TelegramConfig {
   notifyPeriodicDigest: boolean;
   digestIntervalMinutes: number;
   notifyOverCompletion?: boolean;
+  notifyStrategyEntries?: boolean;
 }
 
 export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
@@ -22,6 +23,7 @@ export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
   notifyPeriodicDigest: true,
   digestIntervalMinutes: 3,
   notifyOverCompletion: true,
+  notifyStrategyEntries: true,
 };
 
 const STORAGE_KEY = 'crex_telegram_bot_config_v2';
@@ -377,4 +379,98 @@ export async function testOverCompletionAlert(
 
   return sendTelegramMessage(botToken, chatId, message);
 }
+
+/**
+ * Formats a verified First Entry Opportunity alert
+ * Qualifying criteria: Odds in [1.85, 2.00], Window: 1st inn <= 10.0 ov, 2nd inn <= 6.0 ov
+ */
+export function formatFirstEntryAlert(params: {
+  match: ParsedCricketMatch;
+  targetTeamName: string;
+  decimalOdds: number;
+  currentOver: number;
+  currentInnings: number;
+  runs: number;
+  wickets: number;
+  crr?: number;
+}): string {
+  const {
+    match,
+    targetTeamName,
+    decimalOdds,
+    currentOver,
+    currentInnings,
+    runs,
+    wickets,
+    crr,
+  } = params;
+
+  const t1 = match.team1?.shortName || match.team1?.name || 'T1';
+  const t2 = match.team2?.shortName || match.team2?.name || 'T2';
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  let text = `🎯 <b>FIRST ENTRY OPPORTUNITY DETECTED!</b> 🎯\n\n`;
+  text += `🏏 <b>${t1} vs ${t2}</b> · <i>${match.format}</i>\n`;
+  text += `───────────────────\n`;
+  text += `🔹 <b>Target Team:</b> <b>${targetTeamName}</b>\n`;
+  text += `💰 <b>Qualifying Odds:</b> <b>${decimalOdds.toFixed(2)}</b> (Range: 1.85 - 2.00)\n`;
+  text += `⏱ <b>Over:</b> <b>${currentOver} ov</b> (Inn ${currentInnings})\n`;
+  text += `📊 <b>Current Score:</b> <b>${runs}/${wickets}</b>`;
+  if (crr !== undefined) text += ` (CRR: ${crr.toFixed(2)})`;
+  text += `\n`;
+  text += `🎯 <b>Bookset Target:</b> <code>1.45 - 1.55</code>\n`;
+  text += `───────────────────\n`;
+  text += `⚡ <i>1st Entry Window: Inn 1 &lt;= 10.0 ov | Inn 2 &lt;= 6.0 ov</i>\n`;
+  text += `⏰ <i>Detected at ${timeStr}</i>`;
+
+  return text;
+}
+
+/**
+ * Formats a verified Second Entry Opportunity alert
+ * STRICT REQUIREMENT: Only dispatched if First Entry was confirmed earlier,
+ * followed by a confirmed wicket, opposing team odds < 1.65, and within window.
+ */
+export function formatSecondEntryAlert(params: {
+  match: ParsedCricketMatch;
+  measuredTeamName: string;
+  opposingOdds: number;
+  currentOver: number;
+  currentInnings: number;
+  runs: number;
+  wickets: number;
+  anchorWickets: number;
+}): string {
+  const {
+    match,
+    measuredTeamName,
+    opposingOdds,
+    currentOver,
+    currentInnings,
+    runs,
+    wickets,
+    anchorWickets,
+  } = params;
+
+  const t1 = match.team1?.shortName || match.team1?.name || 'T1';
+  const t2 = match.team2?.shortName || match.team2?.name || 'T2';
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  let text = `🚀 <b>SECOND ENTRY OPPORTUNITY (CONFIRMED)!</b> 🚀\n\n`;
+  text += `🏏 <b>${t1} vs ${t2}</b> · <i>${match.format}</i>\n`;
+  text += `───────────────────\n`;
+  text += `✅ <b>Prerequisite Met:</b> First Entry previously established\n`;
+  text += `💥 <b>Trigger:</b> Confirmed wicket fell (${anchorWickets} ➔ ${wickets} wkts)\n`;
+  text += `🔹 <b>Measured Team:</b> <b>${measuredTeamName}</b>\n`;
+  text += `💰 <b>Opposing Odds:</b> <b>${opposingOdds.toFixed(2)}</b> (Strictly &lt; 1.65)\n`;
+  text += `⏱ <b>Over:</b> <b>${currentOver} ov</b> (Inn ${currentInnings})\n`;
+  text += `📊 <b>Current Score:</b> <b>${runs}/${wickets}</b>\n`;
+  text += `🎯 <b>Bookset / Exit:</b> Opposing Odds reach &gt;= 1.85\n`;
+  text += `───────────────────\n`;
+  text += `⚡ <i>Zero-compromise rule: 2nd entry only fires after verified 1st entry</i>\n`;
+  text += `⏰ <i>Detected at ${timeStr}</i>`;
+
+  return text;
+}
+
 

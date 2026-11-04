@@ -818,6 +818,26 @@ app.get(['/api/odds', '/api/v3/getSV3'], async (req, res) => {
 
     const data = await upstreamRes.json();
     serverOddsCache.set(key, { data, timestamp: Date.now() });
+
+    // Asynchronously record tick into match_odds_ticks table
+    if (serverSupabase && data) {
+      const rawRate = typeof data.s === 'string' ? data.s : typeof data.r === 'string' ? data.r : null;
+      (async () => {
+        try {
+          await serverSupabase.from('match_odds_ticks').insert({
+            match_id: key,
+            odds_key: key,
+            favorite_team: data.B || data.sd || null,
+            raw_rate_string: rawRate,
+            session_data: data.S ? { raw_sessions: data.S } : null,
+            created_at: new Date().toISOString(),
+          });
+        } catch {
+          // Non-blocking
+        }
+      })();
+    }
+
     return data;
   })();
 

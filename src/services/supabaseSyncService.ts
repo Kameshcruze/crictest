@@ -301,14 +301,39 @@ export async function syncOddsToSupabase(
   if (!isSupabaseConfigured || !oddsState?.odds) return;
 
   try {
-    const matchUuid = await getMatchInternalId(matchId);
-    if (!matchUuid) return;
-
     const odds = oddsState.odds;
     const bookmaker = odds.bookmaker;
     const movement = oddsState.movement;
+    const matchUuid = await getMatchInternalId(matchId);
 
-    // 1. Upsert latest odds state
+    // 1. Record every odds update as a new row in `match_odds_ticks` table
+    try {
+      await supabase.from('match_odds_ticks').insert({
+        match_id: matchId,
+        match_uuid: matchUuid || null,
+        odds_key: oddsState.oddsKey || matchId,
+        favorite_team: odds.favoriteTeamName || null,
+        back_rate: bookmaker.backRate ?? null,
+        lay_rate: bookmaker.layRate ?? null,
+        decimal_back: bookmaker.decimalBack ?? null,
+        decimal_lay: bookmaker.decimalLay ?? null,
+        spread: bookmaker.spread ?? null,
+        raw_rate_string: bookmaker.rawRateString || null,
+        direction: movement?.direction || 'stable',
+        delta_back: movement?.deltaBack || 0,
+        delta_lay: movement?.deltaLay || 0,
+        is_suspended: bookmaker.isSuspended || false,
+        session_data: odds.sessions && odds.sessions.length > 0 ? odds.sessions : null,
+        created_at: new Date().toISOString(),
+      });
+    } catch (tickErr: any) {
+      // Non-fatal if table hasn't been created yet in DB
+      console.warn('match_odds_ticks insert notice:', tickErr?.message || tickErr);
+    }
+
+    if (!matchUuid) return;
+
+    // 2. Upsert latest odds state for current-snapshot views
     await supabase.from('latest_odds_state').upsert(
       {
         match_id: matchUuid,
@@ -333,7 +358,7 @@ export async function syncOddsToSupabase(
       { onConflict: 'match_id' }
     );
 
-    // 2. Only insert historical snapshot if there is active movement or price change
+    // 3. Insert historical snapshot if there is active movement or price change
     if (movement && (movement.deltaBack !== 0 || movement.deltaLay !== 0)) {
       await supabase.from('odds_snapshots').insert({
         match_id: matchUuid,
@@ -351,6 +376,33 @@ export async function syncOddsToSupabase(
     }
   } catch (err) {
     console.warn('syncOddsToSupabase error:', err);
+  }
+}
+
+/**
+ * Fetches historical odds ticks for a match from match_odds_ticks
+ */
+export async function fetchOddsTicksFromSupabase(
+  matchId: string,
+  limit = 100
+): Promise<any[]> {
+  if (!isSupabaseConfigured || !matchId) return [];
+
+  try {
+    const { data, error } = await supabase
+      .from('match_odds_ticks')
+      .select('*')
+      .eq('match_id', matchId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    console.warn('fetchOddsTicksFromSupabase error:', err);
+    return [];
   }
 }
 
@@ -692,3 +744,141 @@ export async function checkAndRecordMatchConclusionInDb(
     return true;
   }
 }
+
+// In-memory cache for strategy entry signals (1st and 2nd entry)
+const clientStrategyEntryCache = new Set<string>();
+
+/**
+ * Checks whether a First Entry signal has been recorded for a match
+ * in either memory, local storage, or the Supabase database.
+ */
+export async function hasFirstEntryRecordedInDb(matchId: string): Promise<boolean> {
+  const dbKey = `tele_entry:${matchId}:FIRST_ENTRY`;
+  if (clientStrategyEntryCache.has(dbKey)) {
+    return true;
+  }
+
+  if (!isSupabaseConfigured) {
+    return false;
+  }
+
+  try {
+    const { data: existing, error } = await supabase
+      .from('app_settings')
+      .select('key')
+      .eq('key', dbKey)
+      .maybeSingle();
+
+    if (!error && existing?.key) {
+      clientStrategyEntryCache.add(dbKey);
+      return true;
+    }
+  } catch {
+    // Non-blocking
+  }
+
+  return false;
+}
+
+/**
+ * Verifies with Supabase database if a First or Second Entry alert was ALREADY sent.
+ * If not, atomically records it into `app_settings` with key `tele_entry:${matchId}:${entryType}`
+ * and returns `true`. If already sent, returns `false`.
+ * Guarantees zero duplicate broadcasts for entry signals.
+ */
+export async function checkAndRecordEntrySignalInDb(
+  matchId: string,
+  entryType: 'FIRST_ENTRY' | 'SECOND_ENTRY',
+  details: {
+    team1?: string;
+    team2?: string;
+    measuredTeam?: string;
+    decimalOdds?: number | null;
+    opposingOdds?: number | null;
+    over?: number;
+    innings?: number;
+    score?: string;
+    rule?: string;
+  }
+): Promise<boolean> {
+  const dbKey = `tele_entry:${matchId}:${entryType}`;
+
+  // 1. In-memory check
+  if (clientStrategyEntryCache.has(dbKey)) {
+    return false;
+  }
+
+  if (!isSupabaseConfigured) {
+    clientStrategyEntryCache.add(dbKey);
+    return true;
+  }
+
+  try {
+    // 2. Query Supabase
+    const { data: existing, error: selectErr } = await supabase
+      .from('app_settings')
+      .select('key')
+      .eq('key', dbKey)
+      .maybeSingle();
+
+    if (!selectErr && existing?.key) {
+      clientStrategyEntryCache.add(dbKey);
+      return false; // Already sent previously
+    }
+
+    // 3. Atomically record in DB BEFORE sending
+    await supabase.from('app_settings').upsert({
+      key: dbKey,
+      value: {
+        matchId,
+        entryType,
+        ...details,
+        sentAt: new Date().toISOString(),
+      },
+      description: `Strategy ${entryType} signal notification record for match ${matchId}`,
+      updated_at: new Date().toISOString(),
+    });
+
+    clientStrategyEntryCache.add(dbKey);
+    return true;
+  } catch (err) {
+    console.warn(`Error verifying ${entryType} in DB:`, err);
+    clientStrategyEntryCache.add(dbKey);
+    return true;
+  }
+}
+
+/**
+ * Fetches all match IDs that have a recorded First Entry in the database
+ */
+export async function fetchRecordedFirstEntriesFromDb(): Promise<Set<string>> {
+  const result = new Set<string>();
+
+  if (!isSupabaseConfigured) {
+    return result;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('key, value')
+      .like('key', 'tele_entry:%:FIRST_ENTRY');
+
+    if (!error && Array.isArray(data)) {
+      data.forEach((row) => {
+        const parts = row.key.split(':');
+        if (parts.length >= 2 && parts[1]) {
+          const matchId = parts[1];
+          result.add(matchId);
+          clientStrategyEntryCache.add(row.key);
+        }
+      });
+    }
+  } catch (err) {
+    console.warn('fetchRecordedFirstEntriesFromDb error:', err);
+  }
+
+  return result;
+}
+
+

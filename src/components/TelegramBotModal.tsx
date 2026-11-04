@@ -18,6 +18,7 @@ import {
   Settings,
   HelpCircle,
   Zap,
+  Target,
 } from 'lucide-react';
 import {
   TelegramConfig,
@@ -50,6 +51,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   const [notifyWickets, setNotifyWickets] = useState<boolean>(config.notifyWickets ?? true);
   const [notifyResults, setNotifyResults] = useState<boolean>(config.notifyResults ?? true);
   const [notifyOverCompletion, setNotifyOverCompletion] = useState<boolean>(config.notifyOverCompletion ?? true);
+  const [notifyStrategyEntries, setNotifyStrategyEntries] = useState<boolean>(config.notifyStrategyEntries ?? true);
   const [notifyPeriodicDigest, setNotifyPeriodicDigest] = useState<boolean>(config.notifyPeriodicDigest ?? true);
   const [digestIntervalMinutes, setDigestIntervalMinutes] = useState<number>(config.digestIntervalMinutes || 3);
 
@@ -68,6 +70,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
     if (config.chatId) setChatId(config.chatId);
     setEnabled(config.enabled ?? true);
     setNotifyOverCompletion(config.notifyOverCompletion ?? true);
+    setNotifyStrategyEntries(config.notifyStrategyEntries ?? true);
   }, [config]);
 
   if (!isOpen) return null;
@@ -80,6 +83,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
       notifyWickets,
       notifyResults,
       notifyOverCompletion,
+      notifyStrategyEntries,
       notifyBoundaries: false,
       notifyPeriodicDigest,
       digestIntervalMinutes,
@@ -762,6 +766,25 @@ setInterval(pollMatches, 2000);
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-800">
+                  {/* Strategy Entry Opportunities Alert (First & Second Entry) */}
+                  <label className="flex items-start gap-2.5 p-3 rounded-lg bg-emerald-950/30 border border-emerald-500/40 cursor-pointer hover:border-emerald-500/70 transition-colors sm:col-span-2">
+                    <input
+                      type="checkbox"
+                      checked={notifyStrategyEntries}
+                      onChange={(e) => setNotifyStrategyEntries(e.target.checked)}
+                      className="mt-0.5 rounded text-emerald-500 focus:ring-0 bg-slate-800 border-slate-700"
+                    />
+                    <div>
+                      <div className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                        <Target className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>🎯 Trading Strategy Entry Alerts (1st & 2nd Entry Signals)</span>
+                      </div>
+                      <p className="text-[11px] text-slate-300 mt-0.5">
+                        Broadcasts verified <b>First Entry</b> signals when odds hit <code>[1.85, 2.00]</code> within window (1st Inn &le; 10.0 ov, 2nd Inn &le; 6.0 ov). Strictly requires First Entry before <b>Second Entry</b> alerts can ever be sent (after confirmed wicket + opposing odds &lt; 1.65). Verified in DB to eliminate duplicates.
+                      </p>
+                    </div>
+                  </label>
+
                   {/* Over-by-Over Completion Alert (Verified in DB) */}
                   <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-900/70 border border-amber-500/30 cursor-pointer hover:border-amber-500/60 transition-colors sm:col-span-2">
                     <input
