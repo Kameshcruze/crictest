@@ -544,7 +544,7 @@ setInterval(pollMatches, 2000);
                 </div>
 
                 <p className="text-xs text-slate-400">
-                  We built a special <code>/api/cron</code> endpoint into your app. Any free cron ping service (like <b>cron-job.org</b> or <b>UptimeRobot</b>) can call this URL every 1 minute. Each call checks Crex scores and immediately broadcasts live updates and wickets to your Telegram group.
+                  We built a special <code>/api/cron</code> endpoint into your app. Note that the preview domain (<code>ais-dev-...</code>) is behind Google sandbox authentication. For 100% autonomous 24/7 delivery without any sandbox authentication or local machine running, <b>Method 2 (Cloudflare Worker)</b> is recommended!
                 </p>
 
                 {/* Webhook URL Input */}
