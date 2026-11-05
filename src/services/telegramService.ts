@@ -1,4 +1,5 @@
 import { ParsedCricketMatch } from '../types/cricket';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 
 export interface TelegramConfig {
   botToken: string;
@@ -52,7 +53,6 @@ export function getStoredTelegramConfig(): TelegramConfig {
  */
 export async function fetchTelegramConfigFromSupabase(): Promise<TelegramConfig | null> {
   try {
-    const { supabase, isSupabaseConfigured } = await import('./supabaseClient');
     if (!isSupabaseConfigured) return null;
 
     const { data, error } = await supabase
@@ -79,7 +79,6 @@ export async function fetchTelegramConfigFromSupabase(): Promise<TelegramConfig 
 
 async function persistConfigToSupabase(config: TelegramConfig): Promise<void> {
   try {
-    const { supabase, isSupabaseConfigured } = await import('./supabaseClient');
     if (!isSupabaseConfigured) return;
     const { error } = await supabase.from('app_settings').upsert({
       key: 'telegram_config',
