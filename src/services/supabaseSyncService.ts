@@ -8,7 +8,7 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { ParsedCricketMatch, TeamInfo, ParsedInningsScore } from '../types/cricket';
 import { MatchOddsState, ParsedMatchOdds } from '../types/odds';
-import { StrategySignal, TradePosition } from './strategy/types';
+import { StrategySignal, TradePosition, StrategyTradeRecord } from './strategy/types';
 import { TelegramConfig, DEFAULT_TELEGRAM_CONFIG } from './telegramService';
 
 // In-memory cache for UUID mappings to minimize database roundtrips
@@ -476,6 +476,88 @@ export async function syncTradePositionToSupabase(position: TradePosition): Prom
     );
   } catch (err) {
     console.warn('syncTradePositionToSupabase error:', err);
+  }
+}
+
+/**
+ * Persists an entry or exit to the dedicated `strategy_trades` table in Supabase.
+ * Atomically records entry/exit metrics and holds trade state without duplicate records.
+ */
+export async function syncStrategyTradeToDb(trade: StrategyTradeRecord): Promise<void> {
+  if (!isSupabaseConfigured || !trade.matchId) return;
+
+  try {
+    await supabase.from('strategy_trades').upsert(
+      {
+        match_id: trade.matchId,
+        match_name: trade.matchName || null,
+        series_name: trade.seriesName || null,
+        booking_team: trade.bookingTeam,
+        batting_team: trade.battingTeam,
+        bowling_team: trade.bowlingTeam,
+        entry_type: trade.entryType,
+        innings: trade.innings,
+        entry_over: trade.entryOver,
+        entry_paise: trade.entryPaise,
+        entry_decimal: trade.entryDecimal,
+        entry_wickets: trade.entryWickets,
+        entry_time: trade.entryTime ? new Date(trade.entryTime).toISOString() : new Date().toISOString(),
+        exit_over: trade.exitOver ?? null,
+        exit_paise: trade.exitPaise ?? null,
+        exit_decimal: trade.exitDecimal ?? null,
+        exit_time: trade.exitTime ? new Date(trade.exitTime).toISOString() : null,
+        exit_reason: trade.exitReason ?? null,
+        status: trade.status,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'match_id,entry_type' }
+    );
+  } catch (err) {
+    console.warn('syncStrategyTradeToDb error:', err);
+  }
+}
+
+/**
+ * Fetches recorded trades from `strategy_trades` table in Supabase.
+ */
+export async function fetchStrategyTradesFromDb(matchId?: string): Promise<StrategyTradeRecord[]> {
+  if (!isSupabaseConfigured) return [];
+
+  try {
+    let query = supabase.from('strategy_trades').select('*');
+    if (matchId) {
+      query = query.eq('match_id', matchId);
+    }
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error || !data) return [];
+
+    return data.map((row: any): StrategyTradeRecord => ({
+      id: row.id,
+      matchId: row.match_id,
+      matchName: row.match_name,
+      seriesName: row.series_name,
+      bookingTeam: row.booking_team,
+      battingTeam: row.batting_team,
+      bowlingTeam: row.bowling_team,
+      entryType: row.entry_type,
+      innings: row.innings,
+      entryOver: Number(row.entry_over),
+      entryPaise: Number(row.entry_paise),
+      entryDecimal: Number(row.entry_decimal),
+      entryWickets: Number(row.entry_wickets || 0),
+      entryTime: new Date(row.entry_time),
+      exitOver: row.exit_over ? Number(row.exit_over) : undefined,
+      exitPaise: row.exit_paise ? Number(row.exit_paise) : undefined,
+      exitDecimal: row.exit_decimal ? Number(row.exit_decimal) : undefined,
+      exitTime: row.exit_time ? new Date(row.exit_time) : undefined,
+      exitReason: row.exit_reason,
+      status: row.status,
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at),
+    }));
+  } catch (err) {
+    console.warn('fetchStrategyTradesFromDb error:', err);
+    return [];
   }
 }
 

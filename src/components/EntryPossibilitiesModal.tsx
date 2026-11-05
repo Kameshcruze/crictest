@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState } from '../types/odds';
-import { calculateOpposingOdds, isWithinEntryWindow } from '../services/strategy/engine';
+import { calculateOpposingOdds, isWithinEntryWindow, detectTeamInControl } from '../services/strategy/engine';
 
 export interface EntryOpportunity {
   matchId: string;
@@ -95,6 +95,9 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
         null;
       const opposingOdds = decimalOdds ? calculateOpposingOdds(decimalOdds) : null;
       const inWindow = isWithinEntryWindow(currentInnings, currentOver);
+      const controlInfo = detectTeamInControl(match, oddsState);
+      const isBattingInControl = controlInfo.teamInControl === 'BATTING';
+      const isDisqualifiedByWickets = wickets >= 3 && !recordedFirstEntries.has(match.id);
 
       // Check if First Entry was recorded in DB or historical ticks for this match
       const hasFirstEntryRecorded =
@@ -104,8 +107,9 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
           return val !== null && val >= 1.85 && val <= 2.0;
         }) ?? false);
 
-      // 1. Evaluate First Entry: [1.85, 2.00] within window
+      // 1. Evaluate First Entry: Batting team in control, [1.85, 2.00] within window, < 3 wickets
       const firstEntryQualified =
+        !isDisqualifiedByWickets &&
         decimalOdds !== null &&
         decimalOdds >= 1.85 &&
         decimalOdds <= 2.0 &&
@@ -116,25 +120,27 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       let secondEntryQualified = false;
       let secondEntryLockedReason: string | undefined;
 
-      if (!hasFirstEntryRecorded && !firstEntryQualified) {
+      if (isDisqualifiedByWickets) {
+        secondEntryLockedReason = `Match skipped: ${wickets} wickets fell before entry (limit < 3).`;
+      } else if (!hasFirstEntryRecorded && !firstEntryQualified) {
         secondEntryLockedReason = 'Locked: First Entry must appear and be recorded before 2nd entry can unlock.';
       } else if (!inWindow) {
         secondEntryLockedReason = `Window closed: Over ${currentOver} > ${currentInnings === 1 ? '10.0' : '6.0'} ov.`;
       } else if (!opposingOdds || opposingOdds >= 1.65) {
-        secondEntryLockedReason = `Waiting: Opposing odds must drop below 1.65 (Currently: ${opposingOdds ? opposingOdds.toFixed(2) : 'N/A'}).`;
+        secondEntryLockedReason = `Waiting: Opposing odds must drop below 1.65 / 65 paise (Currently: ${opposingOdds ? opposingOdds.toFixed(2) : 'N/A'}).`;
       } else {
-        // Opposing odds < 1.65 and within window and has first entry
         secondEntryQualified = true;
       }
 
       // Add to Opportunities list
       const teamName =
+        controlInfo.controlTeamName ||
         oddsState?.odds?.favoriteTeamName ||
         oddsState?.odds?.favoriteTeamKey ||
         match.team1.shortName;
       const windowLimitOver = currentInnings === 1 ? 10.0 : 6.0;
 
-      if (firstEntryQualified) {
+      if (firstEntryQualified && !hasFirstEntryRecorded) {
         oppList.push({
           matchId: match.id,
           match,
@@ -147,8 +153,8 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
           runs,
           wickets,
           crr,
-          explanation: `Odds ${decimalOdds!.toFixed(2)} are in optimal 1st entry range [1.85 - 2.00] at over ${currentOver}.`,
-          booksetTarget: '1.45 - 1.55',
+          explanation: `Odds ${decimalOdds!.toFixed(2)} are in optimal 1st entry range [1.85 - 2.00] with batting team in control at over ${currentOver}.`,
+          booksetTarget: '45 - 55 Paise (1.45 - 1.55)',
           windowLimitOver,
           timestamp: new Date(),
         });
@@ -167,8 +173,8 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
           runs,
           wickets,
           crr,
-          explanation: `Opposing odds ${opposingOdds.toFixed(2)} are below 1.65 with verified prior 1st entry.`,
-          booksetTarget: 'Opposing Odds >= 1.85',
+          explanation: `Opposing odds ${opposingOdds.toFixed(2)} are below 1.65 / 65 paise after confirmed wicket with verified prior 1st entry.`,
+          booksetTarget: 'Opposing Odds >= 85 Paise (1.85)',
           windowLimitOver,
           timestamp: new Date(),
         });
@@ -178,7 +184,11 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       let distanceToFirstEntry = '';
       let statusSummary = '';
 
-      if (firstEntryQualified) {
+      if (isDisqualifiedByWickets) {
+        statusSummary = `⚠️ Skipped: ${wickets} wickets before entry (>= 3 limit)`;
+      } else if (hasFirstEntryRecorded) {
+        statusSummary = '🛡️ 1st Entry Active (Holding state - Bookset target 45-55)';
+      } else if (firstEntryQualified) {
         statusSummary = '🎯 1st Entry Ready NOW';
       } else if (secondEntryQualified) {
         statusSummary = '🚀 2nd Entry Ready NOW';
@@ -443,24 +453,27 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                 <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
                   <div className="flex items-center gap-1.5 text-emerald-400 font-semibold text-xs mb-1">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>First Entry Criteria</span>
+                    <span>Booking Team & 1st Entry</span>
                   </div>
                   <ul className="text-[11px] text-slate-400 space-y-1">
-                    <li>• Decimal Odds in qualifying range: <strong className="text-slate-200">1.85 to 2.00</strong></li>
+                    <li>• Boundary: 4 with <strong className="text-slate-200">&ge; 11 paise</strong> | 6 with <strong className="text-slate-200">&ge; 18 paise</strong></li>
+                    <li>• Flip Formula: (100 - Pprev) + (100 - Pcurr) when bowling in control</li>
+                    <li>• Wicket Filter: &lt; 3 wickets before entry (&ge; 3 skips match)</li>
                     <li>• Over Window: 1st Innings &le; 10.0 ov | 2nd Innings &le; 6.0 ov</li>
-                    <li>• Exit target: First Bookset at 1.45 - 1.55</li>
+                    <li>• 1st Entry Odds: &ge; 85 paise (1.85+) | Bookset at 45 to 55 paise</li>
                   </ul>
                 </div>
 
                 <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
                   <div className="flex items-center gap-1.5 text-indigo-400 font-semibold text-xs mb-1">
                     <Lock className="w-3.5 h-3.5" />
-                    <span>Second Entry (Strict Lock)</span>
+                    <span>Second Entry & Bookset</span>
                   </div>
                   <ul className="text-[11px] text-slate-400 space-y-1">
-                    <li>• <strong className="text-amber-300">Mandatory Prerequisite:</strong> 1st entry must have occurred</li>
-                    <li>• Confirmed wicket fell strictly after 1st entry</li>
-                    <li>• Opposing team odds strictly &lt; 1.65</li>
+                    <li>• <strong className="text-amber-300">Mandatory:</strong> Wicket fell strictly after 1st entry</li>
+                    <li>• Opposite team odds strictly &lt; 65 paise (decimal &lt; 1.65)</li>
+                    <li>• Combined Bookset for both entries: Opposite team &ge; 85 paise (1.85+)</li>
+                    <li>• Held State: Once entry fires, it is held without duplicate spam</li>
                   </ul>
                 </div>
               </div>

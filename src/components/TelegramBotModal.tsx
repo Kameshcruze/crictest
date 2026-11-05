@@ -6,17 +6,12 @@ import {
   AlertCircle,
   Copy,
   Check,
-  ShieldAlert,
   Flame,
   Clock,
   Radio,
   Eye,
   EyeOff,
-  ExternalLink,
-  Code2,
-  BookOpen,
   Settings,
-  HelpCircle,
   Zap,
   Target,
 } from 'lucide-react';
@@ -44,15 +39,15 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   onSaveConfig,
   matches,
 }) => {
-  const [activeTab, setActiveTab] = useState<'always-on' | 'control' | 'guide' | 'scripts'>('always-on');
+  const [activeTab, setActiveTab] = useState<'always-on' | 'control'>('always-on');
   const [botToken, setBotToken] = useState<string>(config.botToken || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ');
   const [chatId, setChatId] = useState<string>(config.chatId || '-1003980667930');
-  const [enabled, setEnabled] = useState<boolean>(config.enabled ?? true);
-  const [notifyWickets, setNotifyWickets] = useState<boolean>(config.notifyWickets ?? true);
-  const [notifyResults, setNotifyResults] = useState<boolean>(config.notifyResults ?? true);
-  const [notifyOverCompletion, setNotifyOverCompletion] = useState<boolean>(config.notifyOverCompletion ?? true);
-  const [notifyStrategyEntries, setNotifyStrategyEntries] = useState<boolean>(config.notifyStrategyEntries ?? true);
-  const [notifyPeriodicDigest, setNotifyPeriodicDigest] = useState<boolean>(config.notifyPeriodicDigest ?? true);
+  const [enabled, setEnabled] = useState<boolean>(config.enabled ?? false);
+  const [notifyWickets, setNotifyWickets] = useState<boolean>(config.notifyWickets ?? false);
+  const [notifyResults, setNotifyResults] = useState<boolean>(config.notifyResults ?? false);
+  const [notifyOverCompletion, setNotifyOverCompletion] = useState<boolean>(config.notifyOverCompletion ?? false);
+  const [notifyStrategyEntries, setNotifyStrategyEntries] = useState<boolean>(config.notifyStrategyEntries ?? false);
+  const [notifyPeriodicDigest, setNotifyPeriodicDigest] = useState<boolean>(config.notifyPeriodicDigest ?? false);
   const [digestIntervalMinutes, setDigestIntervalMinutes] = useState<number>(config.digestIntervalMinutes || 3);
 
   const [showToken, setShowToken] = useState<boolean>(false);
@@ -68,9 +63,12 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   React.useEffect(() => {
     if (config.botToken) setBotToken(config.botToken);
     if (config.chatId) setChatId(config.chatId);
-    setEnabled(config.enabled ?? true);
-    setNotifyOverCompletion(config.notifyOverCompletion ?? true);
-    setNotifyStrategyEntries(config.notifyStrategyEntries ?? true);
+    setEnabled(config.enabled ?? false);
+    setNotifyWickets(config.notifyWickets ?? false);
+    setNotifyResults(config.notifyResults ?? false);
+    setNotifyOverCompletion(config.notifyOverCompletion ?? false);
+    setNotifyStrategyEntries(config.notifyStrategyEntries ?? false);
+    setNotifyPeriodicDigest(config.notifyPeriodicDigest ?? false);
   }, [config]);
 
   if (!isOpen) return null;
@@ -263,137 +261,6 @@ async function checkAndBroadcast() {
 }
 `;
 
-  const pythonScript = `#!/usr/bin/env python3
-"""
-24/7 Crex Live Cricket Score Telegram Bot
-Run on VPS / Railway / Render / Local PC:
-pip install requests
-python telegram_cricket_bot.py
-"""
-
-import time
-import requests
-
-BOT_TOKEN = "${botToken || 'YOUR_TELEGRAM_BOT_TOKEN'}"
-CHAT_ID = "${chatId || 'YOUR_TELEGRAM_CHAT_ID'}"
-API_URL = "https://api.goscorer.com/api/v2/getTopMatches"
-
-last_scores = {}
-
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=8)
-        return r.json().get("ok", False)
-    except Exception as e:
-        print(f"Error sending message: {e}")
-        return False
-
-def check_live_cricket():
-    global last_scores
-    try:
-        t = int(time.time() * 1000)
-        res = requests.post(
-            f"{API_URL}?_t={t}",
-            json={"cc": "IN", "_t": t},
-            headers={"Content-Type": "application/json", "Cache-Control": "no-cache"},
-            timeout=5
-        )
-        if not res.ok:
-            return
-
-        data = res.json()
-        for match_id, m in data.items():
-            team1 = m.get("t1Sname") or m.get("b") or "Team1"
-            team2 = m.get("t2Sname") or m.get("c") or "Team2"
-            score1 = m.get("j", "")
-            score2 = m.get("k", "")
-            status_text = m.get("res") or m.get("soResult") or m.get("a") or "Live"
-
-            current_sig = f"{score1}-{score2}-{status_text}"
-            prev_sig = last_scores.get(match_id)
-
-            if prev_sig and prev_sig != current_sig:
-                # Score changed!
-                msg = (
-                    f"🏏 <b>{team1} vs {team2}</b>\\n"
-                    f"📊 Score: {score1 or 'Yet to bat'} | {score2 or 'Yet to bat'}\\n"
-                    f"⚡ {status_text}"
-                )
-                print(f"Broadcasting update for {team1} vs {team2}")
-                send_telegram(msg)
-
-            last_scores[match_id] = current_sig
-    except Exception as err:
-        print(f"Sync error: {err}")
-
-if __name__ == "__main__":
-    print(f"Starting 24/7 Cricket Telegram Bot to chat {CHAT_ID}...")
-    send_telegram("🚀 <b>24/7 Crex Cricket Telegram Bot Started!</b>")
-    while True:
-        check_live_cricket()
-        time.sleep(2) # Checks every 2 seconds
-`;
-
-  const nodeScript = `// 24/7 Crex Cricket Telegram Bot (Node.js)
-// Run with: node bot.js
-const BOT_TOKEN = "${botToken || 'YOUR_TELEGRAM_BOT_TOKEN'}";
-const CHAT_ID = "${chatId || 'YOUR_TELEGRAM_CHAT_ID'}";
-
-let lastScores = {};
-
-async function sendTelegram(text) {
-  try {
-    const res = await fetch(\`https://api.telegram.org/bot\${BOT_TOKEN}/sendMessage\`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text,
-        parse_mode: "HTML",
-        disable_web_page_preview: true
-      })
-    });
-    return res.ok;
-  } catch (e) {
-    console.error("Telegram send error:", e.message);
-  }
-}
-
-async function pollMatches() {
-  try {
-    const now = Date.now();
-    const res = await fetch(\`https://api.goscorer.com/api/v2/getTopMatches?_t=\${now}\`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cc: "IN", _t: now })
-    });
-    if (!res.ok) return;
-
-    const matches = await res.json();
-    for (const [id, m] of Object.entries(matches)) {
-      const sig = \`\${m.j || ''}-\${m.k || ''}-\${m.res || ''}\`;
-      if (lastScores[id] && lastScores[id] !== sig && (m.j || m.k)) {
-        const msg = \`🏏 <b>Live Cricket Update</b>\\n🔹 <b>Score:</b> \${m.j || '—'} | \${m.k || '—'}\\n⚡ <i>\${m.res || m.soResult || 'Live'}</i>\`;
-        await sendTelegram(msg);
-      }
-      lastScores[id] = sig;
-    }
-  } catch (err) {
-    console.error("Poll error:", err.message);
-  }
-}
-
-console.log("Crex Telegram Bot running every 2 seconds...");
-setInterval(pollMatches, 2000);
-`;
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
       <div className="relative w-full max-w-3xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -456,30 +323,6 @@ setInterval(pollMatches, 2000);
             <Settings className="w-4 h-4" />
             <span>Bot Controller & Alerts</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('guide')}
-            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 whitespace-nowrap transition-colors ${
-              activeTab === 'guide'
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-            <span>Bot Setup Guide</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('scripts')}
-            className={`flex items-center gap-2 py-3 px-3 text-xs font-semibold border-b-2 whitespace-nowrap transition-colors ${
-              activeTab === 'scripts'
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Code2 className="w-4 h-4" />
-            <span>Standalone Daemons</span>
-          </button>
         </div>
 
         {/* Status notification banner */}
@@ -513,40 +356,8 @@ setInterval(pollMatches, 2000);
         <div className="p-5 overflow-y-auto space-y-6">
           {activeTab === 'always-on' && (
             <div className="space-y-6">
-              {/* Why it was stopping explanation card */}
-              <div className="p-4 rounded-xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-emerald-950/40 border border-emerald-500/30 text-xs space-y-2">
-                <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm">
-                  <Zap className="w-4 h-4 text-amber-400 animate-bounce" />
-                  <span>How to make Telegram updates post 24/7 without opening the website</span>
-                </div>
-                <p className="text-slate-300 leading-relaxed">
-                  Web hosting platforms (Cloud Run, Vercel) are <b>serverless / scale-to-zero</b>: when you close your browser tab, the container pauses CPU execution to save resources.
-                </p>
-                <p className="text-emerald-200/90 font-medium">
-                  To keep scores and wickets posting around the clock 24 hours a day even when your PC or phone is turned off, use either <b>Method 1 (Free 1-Minute Webhook)</b> or <b>Method 2 (Free Cloudflare Worker)</b> below!
-                </p>
-              </div>
-
-              {/* Method 1: Automated 24/7 Webhook Ping */}
-              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 font-bold text-xs flex items-center justify-center">
-                      1
-                    </span>
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-white">
-                      Method 1: Free Automated Webhook (Recommended · 60 Seconds Setup)
-                    </h3>
-                  </div>
-                  <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                    100% Free · No Computer Needed
-                  </span>
-                </div>
-
-                <p className="text-xs text-slate-400">
-                  We built a special <code>/api/cron</code> endpoint into your app. Note that the preview domain (<code>ais-dev-...</code>) is behind Google sandbox authentication. For 100% autonomous 24/7 delivery without any sandbox authentication or local machine running, <b>Method 2 (Cloudflare Worker)</b> is recommended!
-                </p>
-
+              {/* Webhook Endpoint */}
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
                 {/* Webhook URL Input */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-slate-300">
@@ -577,18 +388,6 @@ setInterval(pollMatches, 2000);
                       <span>{isTestingCron ? 'Triggering...' : 'Test /api/cron Now'}</span>
                     </button>
                   </div>
-                </div>
-
-                {/* 3 Step Setup on cron-job.org */}
-                <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 space-y-2 text-xs text-slate-300">
-                  <p className="font-bold text-slate-200">How to set up in 60 seconds (Free forever):</p>
-                  <ol className="list-decimal pl-5 space-y-1 text-slate-400">
-                    <li>Go to <a href="https://cron-job.org" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">cron-job.org</a> (sign up for free).</li>
-                    <li>Click <b>Create Cronjob</b> $\rightarrow$ Title: <code>Crex Cricket Telegram Bot</code>.</li>
-                    <li>In the <b>URL</b> field, paste the Webhook URL above: <code>{cronWebhookUrl}</code>.</li>
-                    <li>Set Schedule: <b>Every 1 minute</b>.</li>
-                    <li>Click <b>Create</b>. You are done! Your Telegram group will now receive match updates 24/7 non-stop!</li>
-                  </ol>
                 </div>
               </div>
 
@@ -640,14 +439,7 @@ setInterval(pollMatches, 2000);
                       <label className="text-xs font-medium text-slate-300">
                         Bot Token <span className="text-rose-400">*</span>
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab('guide')}
-                        className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1"
-                      >
-                        <HelpCircle className="w-3 h-3" />
-                        <span>How to get Bot Token?</span>
-                      </button>
+                      <span className="text-[11px] text-slate-400">From @BotFather</span>
                     </div>
                     <div className="relative">
                       <input
@@ -676,14 +468,7 @@ setInterval(pollMatches, 2000);
                       <label className="text-xs font-medium text-slate-300">
                         Group Chat ID <span className="text-rose-400">*</span>
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab('guide')}
-                        className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1"
-                      >
-                        <HelpCircle className="w-3 h-3" />
-                        <span>How to get Group ID?</span>
-                      </button>
+                      <span className="text-[11px] text-slate-400">Prefix -100... for groups</span>
                     </div>
                     <input
                       type="text"
@@ -884,141 +669,6 @@ setInterval(pollMatches, 2000);
             </div>
           )}
 
-          {activeTab === 'guide' && (
-            <div className="space-y-4 text-xs text-slate-300">
-              <div className="p-4 rounded-xl bg-blue-950/20 border border-blue-500/30 text-blue-200">
-                <p className="font-semibold text-sm mb-1 text-blue-100">
-                  How to Connect Telegram Bot to your Group (5 Minutes)
-                </p>
-                <p className="text-xs text-blue-300/90 leading-relaxed">
-                  Follow these simple steps on your Telegram app. You will get a Bot Token from Telegram&apos;s official <code>@BotFather</code> and your group&apos;s Chat ID.
-                </p>
-              </div>
-
-              {/* Step 1 */}
-              <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-blue-500/20 text-blue-400 font-bold text-xs flex items-center justify-center">
-                    1
-                  </span>
-                  <h4 className="font-bold text-slate-200">Create the Bot with @BotFather</h4>
-                </div>
-                <div className="pl-7 space-y-1 text-slate-400">
-                  <p>• In Telegram search bar, search for <b>@BotFather</b> (with verified blue tick).</p>
-                  <p>• Start the chat and send: <code className="text-emerald-400 bg-slate-900 px-1.5 py-0.5 rounded">/newbot</code></p>
-                  <p>• Enter a display name for your bot (e.g. <i>Crex Live Scorer</i>).</p>
-                  <p>• Enter a username ending in &quot;bot&quot; (e.g. <i>my_cricket_live_bot</i>).</p>
-                  <p>• BotFather will reply with your <b>HTTP API Token</b> (looks like: <code>789123456:AAFlkXb12...</code>). Copy this token!</p>
-                </div>
-              </div>
-
-              {/* Step 2 */}
-              <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-blue-500/20 text-blue-400 font-bold text-xs flex items-center justify-center">
-                    2
-                  </span>
-                  <h4 className="font-bold text-slate-200">Add the Bot to your Telegram Group</h4>
-                </div>
-                <div className="pl-7 space-y-1 text-slate-400">
-                  <p>• Open or create the Telegram group where you want scores sent.</p>
-                  <p>• Tap Group Name &gt; <b>Add Members</b> &gt; search for your bot&apos;s username &gt; add it.</p>
-                  <p>• <b>Important:</b> Promote your bot to <b>Admin</b> (or enable &quot;Send Messages&quot; permission) so it has rights to broadcast.</p>
-                </div>
-              </div>
-
-              {/* Step 3 */}
-              <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-blue-500/20 text-blue-400 font-bold text-xs flex items-center justify-center">
-                    3
-                  </span>
-                  <h4 className="font-bold text-slate-200">Get your Group&apos;s Chat ID</h4>
-                </div>
-                <div className="pl-7 space-y-2 text-slate-400">
-                  <p>Telegram groups have a unique numeric ID starting with <code className="text-amber-400 bg-slate-900 px-1 py-0.5 rounded">-100...</code>. Here are two quick ways to get it:</p>
-                  
-                  <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <p className="font-semibold text-slate-200">Method A (Fastest - 30 seconds):</p>
-                    <p>1. Add <b>@RawDataBot</b> to your group.</p>
-                    <p>2. It will post a JSON message. Look for <code className="text-emerald-400">&quot;chat&quot;: &#123; &quot;id&quot;: -100xxxxxxxxxx &#125;</code>.</p>
-                    <p>3. Copy that number (including the minus sign) and remove @RawDataBot.</p>
-                  </div>
-
-                  <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <p className="font-semibold text-slate-200">Method B (Via Web Browser):</p>
-                    <p>1. Send any test message like &quot;hello&quot; in the group.</p>
-                    <p>2. In your browser, open: <br/><code className="text-blue-400 break-all">https://api.telegram.org/bot&lt;YOUR_BOT_TOKEN&gt;/getUpdates</code></p>
-                    <p>3. Search for <code className="text-emerald-400">&quot;chat&quot;:&#123;&quot;id&quot;:-100...</code> and copy that number.</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Step 4 */}
-              <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-blue-500/20 text-blue-400 font-bold text-xs flex items-center justify-center">
-                    4
-                  </span>
-                  <h4 className="font-bold text-slate-200">Paste Credentials & Click &quot;Test Connection&quot;</h4>
-                </div>
-                <div className="pl-7 space-y-1 text-slate-400">
-                  <p>• Switch back to the <b>Bot Controller</b> tab above.</p>
-                  <p>• Paste your <b>Bot Token</b> and <b>Group Chat ID</b>.</p>
-                  <p>• Click <b>Test Connection</b>. You will immediately see a test message appear in your Telegram group!</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'scripts' && (
-            <div className="space-y-4">
-              <div className="p-3 rounded-xl bg-slate-950/50 border border-slate-800 text-xs text-slate-400">
-                <p className="font-semibold text-slate-200 mb-1">
-                  Run 24/7 in the Cloud (Without keeping browser open)
-                </p>
-                <p>
-                  You can deploy these standalone scripts on any free server (Railway, Render, VPS, or local machine) so that matches are checked and broadcasted to Telegram around the clock.
-                </p>
-              </div>
-
-              {/* Python Script */}
-              <div className="border border-slate-800 rounded-xl overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-2 bg-slate-950 border-b border-slate-800 text-xs">
-                  <span className="font-bold text-slate-300">Python 24/7 Bot (telegram_cricket_bot.py)</span>
-                  <button
-                    type="button"
-                    onClick={() => copyToClipboard(pythonScript, 'python')}
-                    className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
-                  >
-                    {copiedScript === 'python' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedScript === 'python' ? 'Copied' : 'Copy Python Script'}</span>
-                  </button>
-                </div>
-                <pre className="p-3 bg-slate-950/90 text-slate-300 text-[11px] font-mono overflow-x-auto max-h-56">
-                  {pythonScript}
-                </pre>
-              </div>
-
-              {/* Node.js Script */}
-              <div className="border border-slate-800 rounded-xl overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-2 bg-slate-950 border-b border-slate-800 text-xs">
-                  <span className="font-bold text-slate-300">Node.js Bot (telegram_bot.js)</span>
-                  <button
-                    type="button"
-                    onClick={() => copyToClipboard(nodeScript, 'node')}
-                    className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
-                  >
-                    {copiedScript === 'node' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedScript === 'node' ? 'Copied' : 'Copy Node Script'}</span>
-                  </button>
-                </div>
-                <pre className="p-3 bg-slate-950/90 text-slate-300 text-[11px] font-mono overflow-x-auto max-h-56">
-                  {nodeScript}
-                </pre>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Modal Footer */}

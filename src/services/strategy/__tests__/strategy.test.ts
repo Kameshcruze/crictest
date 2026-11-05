@@ -11,6 +11,8 @@ import {
   CricketStrategyEngine,
   calculateOpposingOdds,
   isWithinEntryWindow,
+  calculatePaiseChange,
+  detectTeamInControl,
 } from '../index';
 
 describe('Cricket Trading Strategy Engine - Boundary & Rules Suite', () => {
@@ -591,4 +593,251 @@ describe('Cricket Trading Strategy Engine - Boundary & Rules Suite', () => {
       assert.match(rejectSignal.explanation, /exceed the maximum entry threshold of 2.00/);
     });
   });
+
+  // =========================================================================
+  // 11. REFINED ABNORMAL ACTIVITY FORMULA & BOOKING TEAM STRATEGY SUITE
+  // =========================================================================
+  describe('Refined Abnormal Activity Formula & Booking Team Suite', () => {
+    it('Flip formula: Bowling at 80 paise -> Batting at 95 paise calculates to 25 paise', () => {
+      // User specified example:
+      // "before the 4 ball if the bowling team was in control with 80 paisa, after hitting 4
+      // the point changes to 95 with batting team in control then the diference should be calculated as
+      // (100-80)+(100-95) so the value will be 25 which is confirmation."
+      const result = calculatePaiseChange('BOWLING', 80, 'BATTING', 95);
+      assert.equal(result.delta, 25);
+      assert.equal(result.qualifiesBattingControl, true);
+      assert.match(result.formula, /\(100 - 80\) \+ \(100 - 95\) = 20 \+ 5 = 25 paise/);
+
+      // 25 paise >= 11 on Four -> qualifies!
+      const fourSignal = engine.evaluateAbnormalActivity({
+        matchId: 'MATCH_FLIP_01',
+        boundaryType: 'FOUR',
+        oddsMovement: result.delta,
+        currentInnings: 1,
+        currentOver: 2.4,
+        measuredTeam: 'Adelaide Strikers Women',
+        decimalOdds: 1.95,
+        customFormulaExplanation: result.formula,
+      });
+      assert.equal(fourSignal.status, 'PASS');
+      assert.match(fourSignal.explanation, /QUALIFIED: FOUR change of 25 paise/);
+    });
+
+    it('Same control: Batting at 90 paise to Batting at 78 paise calculates absolute difference of 12 paise', () => {
+      const result = calculatePaiseChange('BATTING', 90, 'BATTING', 78);
+      assert.equal(result.delta, 12);
+      assert.equal(result.qualifiesBattingControl, true);
+
+      // 12 paise >= 11 on Four -> passes
+      const fourSignal = engine.evaluateAbnormalActivity({
+        matchId: 'MATCH_SAME_01',
+        boundaryType: 'FOUR',
+        oddsMovement: result.delta,
+        currentInnings: 1,
+        currentOver: 3.1,
+        measuredTeam: 'Adelaide Strikers Women',
+        decimalOdds: 1.78,
+      });
+      assert.equal(fourSignal.status, 'PASS');
+
+      // 12 paise < 18 on Six -> fails
+      const sixSignal = engine.evaluateAbnormalActivity({
+        matchId: 'MATCH_SAME_01',
+        boundaryType: 'SIX',
+        oddsMovement: result.delta,
+        currentInnings: 1,
+        currentOver: 3.2,
+        measuredTeam: 'Adelaide Strikers Women',
+        decimalOdds: 1.78,
+      });
+      assert.equal(sixSignal.status, 'FAIL');
+    });
+
+    it('Wicket safety filter: skips match if >= 3 wickets before entry', () => {
+      const signal = engine.evaluateFirstEntry({
+        matchId: 'MATCH_3WKT_01',
+        decimalOdds: 1.90,
+        currentInnings: 1,
+        currentOver: 4.0,
+        currentWickets: 3, // 3 wickets
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+
+      assert.equal(signal.status, 'FAIL');
+      assert.equal(signal.signalType, 'DISQUALIFIED_WICKET_LIMIT');
+      assert.match(signal.explanation, /SKIPPED MATCH: 3 wickets have fallen before entry/);
+
+      const state = engine.getState('MATCH_3WKT_01');
+      assert.equal(state.stage, 'DISQUALIFIED_3_WICKETS');
+    });
+
+    it('Hold State: First entry is held and duplicate signals are not emitted', () => {
+      const matchId = 'MATCH_HOLD_01';
+      // Record entry
+      engine.recordEntry(matchId, 'FIRST_ENTRY', 1.88, 1, 4.2, 1, new Date());
+      const state = engine.getState(matchId);
+
+      assert.equal(state.stage, 'ACTIVE_FIRST_ENTRY');
+      assert.equal(state.firstEntryPosition.status, 'RECORDED_ENTRY');
+      assert.ok(state.firstEntryTrade, 'Trade record should be created');
+      assert.equal(state.firstEntryTrade?.status, 'ACTIVE');
+      assert.equal(state.firstEntryTrade?.entryDecimal, 1.88);
+
+      // First bookset triggers at 1.50 (in [1.45, 1.55] / 45-55 paise)
+      const booksetSignal = engine.evaluateFirstBookset({
+        matchId,
+        decimalOdds: 1.50,
+        currentInnings: 1,
+        currentOver: 7.0,
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+      assert.equal(booksetSignal.status, 'PASS');
+
+      // Record exit closes trade
+      engine.recordExit(matchId, 'FIRST_ENTRY', 1.50, 7.0, new Date(), 'FIRST_BOOKSET_45_55');
+      assert.equal(state.stage, 'FIRST_BOOKSET_COMPLETED');
+      assert.equal(state.firstEntryTrade?.status, 'BOOKSET_COMPLETED');
+      assert.equal(state.firstEntryTrade?.exitReason, 'FIRST_BOOKSET_45_55');
+    });
+
+    it('Full cycle with second entry and full bookset at >= 85 paise', () => {
+      const matchId = 'MATCH_SECOND_CYCLE_01';
+      // 1. Establish First Entry at 1 wicket
+      engine.recordEntry(matchId, 'FIRST_ENTRY', 1.90, 1, 3.5, 1, new Date());
+
+      // 2. Wicket falls (1 -> 2 wickets), opposite team drops < 1.65 (e.g. 1.60)
+      const secondSignal = engine.evaluateSecondEntry({
+        matchId,
+        opposingTeamOdds: 1.60,
+        currentWickets: 2,
+        currentInnings: 1,
+        currentOver: 4.1,
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+      assert.equal(secondSignal.status, 'PASS');
+
+      // Record second entry
+      engine.recordEntry(matchId, 'SECOND_ENTRY', 1.60, 1, 4.1, 2, new Date());
+      const state = engine.getState(matchId);
+      assert.equal(state.stage, 'ACTIVE_SECOND_ENTRY');
+      assert.equal(state.secondEntryTrade?.status, 'ACTIVE');
+
+      // 3. Opposite team odds reach >= 1.85 (e.g. 1.88) -> Full Bookset
+      const fullBooksetSignal = engine.evaluateSecondBookset({
+        matchId,
+        opposingTeamOdds: 1.88,
+        currentInnings: 1,
+        currentOver: 8.0,
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+      assert.equal(fullBooksetSignal.status, 'PASS');
+
+      // Record full exit
+      engine.recordExit(matchId, 'SECOND_ENTRY', 1.88, 8.0, new Date(), 'FULL_BOOKSET_OPPOSING_85');
+      assert.equal(state.stage, 'FULL_BOOKSET_COMPLETED');
+      assert.equal(state.secondEntryTrade?.status, 'BOOKSET_COMPLETED');
+      assert.equal(state.firstEntryTrade?.status, 'BOOKSET_COMPLETED');
+    });
+
+    it('Exact User Sequence: 1st boundary confirms booking team, 2nd boundary confirms entry at 79 paise, waits until crossing 85 with batting in control', () => {
+      const matchId = 'MATCH_USER_FLOW_79_85';
+
+      const mockMatch = (overs: number, runs: number): any => ({
+        id: matchId,
+        format: 'T20',
+        status: 'live',
+        team1: { key: 'ADS-W', name: 'Adelaide Strikers Women', shortName: 'ADS-W' },
+        team2: { key: 'BH-W', name: 'Brisbane Heat Women', shortName: 'BH-W' },
+        team1Score: { runs, wickets: 0, overs, completedOvers: Math.floor(overs), ballsInOver: 1 },
+      });
+
+      const mockOdds = (favoriteKey: string, favoriteName: string, backRate: number): any => ({
+        matchId,
+        oddsKey: matchId,
+        status: 'success',
+        recordsCount: 1,
+        odds: {
+          matchKey: matchId,
+          favoriteTeamKey: favoriteKey,
+          favoriteTeamName: favoriteName,
+          bookmaker: {
+            rawRateString: `${backRate}+1`,
+            backRate,
+            layRate: backRate + 1,
+            decimalBack: Number((1 + backRate / 100).toFixed(2)),
+            decimalLay: Number((1 + (backRate + 1) / 100).toFixed(2)),
+            spread: 1,
+            isSuspended: false,
+          },
+          raw: {
+            F: `^${favoriteKey}`,
+            R: `${backRate}+1`,
+          },
+        },
+      });
+
+      // 1. Initial State: Bowling (BH-W) in control at 80 paise
+      engine.evaluateMatch(mockMatch(1.0, 10), mockOdds('BH-W', 'Brisbane Heat Women', 80));
+      let state = engine.getState(matchId);
+      assert.equal(state.stage, 'WAITING_FOR_CONFIRMATION');
+
+      // 2. Boundary 1: Hits 4, odds flip to Batting (ADS-W) at 95 paise (Delta: (100-80)+(100-95) = 25 >= 11)
+      const tick1Signals = engine.evaluateMatch(
+        mockMatch(1.1, 14),
+        mockOdds('ADS-W', 'Adelaide Strikers Women', 95),
+        { type: 'FOUR', oddsMovement: 25 }
+      );
+      state = engine.getState(matchId);
+      assert.equal(state.stage, 'CONFIRMED_BOOKING_TEAM');
+      assert.equal(state.bookingTeamName, 'Adelaide Strikers Women');
+      assert.ok(
+        tick1Signals.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED'),
+        'Booking team confirmed signal emitted'
+      );
+      // Verify NO entry trade has been recorded yet
+      assert.notEqual(state.firstEntryPosition.status, 'RECORDED_ENTRY');
+      assert.equal(state.firstEntryTrade, null);
+
+      // 3. Boundary 2: Hits another 4 with 12 paise change, but current odds are 79 paise (< 85)
+      const tick2Signals = engine.evaluateMatch(
+        mockMatch(1.5, 20),
+        mockOdds('ADS-W', 'Adelaide Strikers Women', 79),
+        { type: 'FOUR', oddsMovement: 12 }
+      );
+      state = engine.getState(matchId);
+      // Stage must transition to CONFIRMED_PENDING_85!
+      assert.equal(state.stage, 'CONFIRMED_PENDING_85');
+      assert.equal(state.pending85, true);
+      assert.ok(
+        tick2Signals.some((s) => s.signalType === 'ENTRY_CONFIRMED_WAITING_85'),
+        'Entry confirmed waiting 85 signal emitted'
+      );
+      // Still NO entry until 85 is crossed
+      assert.notEqual(state.firstEntryPosition.status, 'RECORDED_ENTRY');
+      assert.equal(state.firstEntryTrade, null);
+
+      // 4. Live odds still below 85 (e.g. 82 paise) -> still waiting
+      engine.evaluateMatch(mockMatch(2.0, 24), mockOdds('ADS-W', 'Adelaide Strikers Women', 82));
+      state = engine.getState(matchId);
+      assert.equal(state.stage, 'CONFIRMED_PENDING_85');
+      assert.notEqual(state.firstEntryPosition.status, 'RECORDED_ENTRY');
+      assert.equal(state.firstEntryTrade, null);
+
+      // 5. Live odds cross 85 paise with Batting (ADS-W) in control -> ENTRY TRIGGERS!
+      const tick4Signals = engine.evaluateMatch(
+        mockMatch(2.3, 27),
+        mockOdds('ADS-W', 'Adelaide Strikers Women', 86)
+      );
+      state = engine.getState(matchId);
+      assert.equal(state.stage, 'ACTIVE_FIRST_ENTRY');
+      assert.equal(state.firstEntryPosition.status, 'RECORDED_ENTRY');
+      assert.equal(state.firstEntryTrade?.status, 'ACTIVE');
+      assert.equal(state.firstEntryTrade?.entryPaise, 86);
+      assert.ok(
+        tick4Signals.some((s) => s.signalType === 'FIRST_ENTRY_TRIGGER'),
+        'First entry trigger signal emitted when crossing 85'
+      );
+    });
+  });
 });
+

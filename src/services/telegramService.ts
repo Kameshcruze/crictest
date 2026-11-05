@@ -16,17 +16,17 @@ export interface TelegramConfig {
 export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
   botToken: '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ',
   chatId: '-1003980667930',
-  enabled: true,
-  notifyWickets: true,
-  notifyResults: true,
+  enabled: false,
+  notifyWickets: false,
+  notifyResults: false,
   notifyBoundaries: false,
-  notifyPeriodicDigest: true,
+  notifyPeriodicDigest: false,
   digestIntervalMinutes: 3,
-  notifyOverCompletion: true,
-  notifyStrategyEntries: true,
+  notifyOverCompletion: false,
+  notifyStrategyEntries: false,
 };
 
-const STORAGE_KEY = 'crex_telegram_bot_config_v2';
+const STORAGE_KEY = 'crex_telegram_bot_config_v3';
 let cachedTelegramConfig: TelegramConfig | null = null;
 
 export function getStoredTelegramConfig(): TelegramConfig {

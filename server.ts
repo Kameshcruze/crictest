@@ -84,11 +84,11 @@ let activeTelegramConfig: {
 } = {
   botToken: DEFAULT_TELEGRAM_BOT_TOKEN,
   chatId: DEFAULT_TELEGRAM_CHAT_ID,
-  enabled: true,
-  notifyWickets: true,
-  notifyResults: true,
-  notifyOverCompletion: true,
-  notifyPeriodicDigest: true,
+  enabled: false,
+  notifyWickets: false,
+  notifyResults: false,
+  notifyOverCompletion: false,
+  notifyPeriodicDigest: false,
   digestIntervalMinutes: 3,
 };
 
@@ -288,7 +288,20 @@ const backendScoresSnapshot: Record<
 > = {};
 
 const finishedNotifiedMatches = new Set<string>();
+const notifiedWickets = new Set<string>();
 let lastDigestTimestamp = Date.now();
+
+function resolveTeamName(key?: string, fallbackName?: string): string {
+  if (fallbackName && fallbackName.trim() && fallbackName !== key && fallbackName.length > 2) {
+    return fallbackName.trim();
+  }
+  const teamsMap = matchStore.mapping?.teams as Record<string, any> | undefined;
+  if (key && teamsMap && teamsMap[key]) {
+    const t = teamsMap[key];
+    return t.sname || t.name || t.sn || t.fn || fallbackName || key;
+  }
+  return fallbackName || key || 'Team';
+}
 
 function parseScore(raw?: string) {
   if (!raw || typeof raw !== 'string') {
@@ -356,6 +369,10 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
     hasChange = true;
   }
 
+  // Preserve existing score strings if an incoming poll item has transient empty scores
+  if (!item.j && existing?.j) item.j = existing.j;
+  if (!item.k && existing?.k) item.k = existing.k;
+
   // Ensure latest item properties overwrite existing while preserving auxiliary metadata
   matchStore.matches[id] = { ...(existing || {}), ...item };
 
@@ -363,8 +380,8 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
   const prev = backendScoresSnapshot[id];
   const curScore1 = parseScore(item.j);
   const curScore2 = parseScore(item.k);
-  const team1Name = item.t1Sname || item.b || 'Team 1';
-  const team2Name = item.t2Sname || item.c || 'Team 2';
+  const team1Name = resolveTeamName(item.b, item.t1Sname || item.t1Name);
+  const team2Name = resolveTeamName(item.c, item.t2Sname || item.t2Name);
   const format = item.fo || 'Match';
 
   // Check for match conclusion
@@ -377,13 +394,18 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
     resText.includes('drawn') ||
     resText.includes('tied');
 
-  if (prev) {
-    // 1. Check for wicket in innings 1
+  if (prev && !isFinished && !resText.includes('break')) {
+    // 1. Check for wicket in innings 1 (Strictly deduplicated per match and wicket count)
+    const wicketKey1 = `${id}-inn1-w${curScore1.wickets}`;
     if (
+      activeTelegramConfig.enabled &&
       activeTelegramConfig.notifyWickets &&
+      curScore1.wickets > 0 &&
       curScore1.wickets > prev.wickets1 &&
+      !notifiedWickets.has(wicketKey1) &&
       (item.j || '').includes('/')
     ) {
+      notifiedWickets.add(wicketKey1);
       const wicketMsg =
         `🚨 <b>WICKET FALLS!</b> 🚨\n\n` +
         `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
@@ -393,12 +415,17 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
       sendTelegramBroadcast(wicketMsg);
     }
 
-    // 2. Check for wicket in innings 2
+    // 2. Check for wicket in innings 2 (Strictly deduplicated per match and wicket count)
+    const wicketKey2 = `${id}-inn2-w${curScore2.wickets}`;
     if (
+      activeTelegramConfig.enabled &&
       activeTelegramConfig.notifyWickets &&
+      curScore2.wickets > 0 &&
       curScore2.wickets > prev.wickets2 &&
+      !notifiedWickets.has(wicketKey2) &&
       (item.k || '').includes('/')
     ) {
+      notifiedWickets.add(wicketKey2);
       const wicketMsg =
         `🚨 <b>WICKET FALLS!</b> 🚨\n\n` +
         `🏏 <b>${team1Name} vs ${team2Name}</b> (${format})\n` +
@@ -821,13 +848,25 @@ app.get(['/api/odds', '/api/v3/getSV3'], async (req, res) => {
 
     // Asynchronously record tick into match_odds_ticks table
     if (serverSupabase && data) {
-      const rawRate = typeof data.s === 'string' ? data.s : typeof data.r === 'string' ? data.r : null;
+      const rawRate =
+        typeof data.R === 'string'
+          ? data.R
+          : typeof data.r === 'string'
+          ? data.r
+          : typeof data.s === 'string'
+          ? data.s
+          : null;
+      const favTeam =
+        typeof data.F === 'string'
+          ? data.F.replace(/^\^/, '')
+          : data.B || data.sd || null;
+
       (async () => {
         try {
           await serverSupabase.from('match_odds_ticks').insert({
             match_id: key,
             odds_key: key,
-            favorite_team: data.B || data.sd || null,
+            favorite_team: favTeam,
             raw_rate_string: rawRate,
             session_data: data.S ? { raw_sessions: data.S } : null,
             created_at: new Date().toISOString(),

@@ -35,6 +35,7 @@ import {
   checkAndRecordMatchConclusionInDb,
   checkAndRecordEntrySignalInDb,
   fetchRecordedFirstEntriesFromDb,
+  syncStrategyTradeToDb,
 } from './services/supabaseSyncService';
 import {
   Radio,
@@ -352,8 +353,12 @@ export default function App() {
 
       if (decimalOdds === null) continue;
 
-      // 1. Evaluate First Entry: [1.85, 2.00] within window
-      if (decimalOdds >= 1.85 && decimalOdds <= 2.0 && inWindow) {
+      // 0. Pre-entry wicket safety check: < 3 wickets required
+      const isDisqualifiedByWickets = currentWickets >= 3 && !recordedFirstEntries.has(m.id);
+      if (isDisqualifiedByWickets) continue;
+
+      // 1. Evaluate First Entry: [1.85, 2.00] within window and < 3 wickets
+      if (decimalOdds >= 1.85 && decimalOdds <= 2.0 && inWindow && currentWickets < 3) {
         if (!recordedFirstEntries.has(m.id)) {
           checkAndRecordEntrySignalInDb(m.id, 'FIRST_ENTRY', {
             team1: m.team1.shortName,
@@ -363,11 +368,32 @@ export default function App() {
             over: currentOver,
             innings: currentInnings,
             score: `${currentRuns}/${currentWickets}`,
-            rule: 'First Entry: Odds in [1.85, 2.00] within window',
+            rule: 'First Entry: Odds in [1.85, 2.00] within window with < 3 wickets',
           }).then((allowed) => {
             if (allowed) {
               setRecordedFirstEntries((prev) => new Set(prev).add(m.id));
               firstEntryWicketsAnchorRef.current[m.id] = currentWickets;
+
+              // Persist into dedicated strategy_trades database table
+              syncStrategyTradeToDb({
+                id: `${m.id}-FIRST_ENTRY-${Date.now()}`,
+                matchId: m.id,
+                matchName: `${m.team1.shortName} vs ${m.team2.shortName}`,
+                seriesName: m.seriesName,
+                bookingTeam: favoriteTeam,
+                battingTeam: m.team2Score ? m.team2.shortName : m.team1.shortName,
+                bowlingTeam: m.team2Score ? m.team1.shortName : m.team2.shortName,
+                entryType: 'FIRST_ENTRY',
+                innings: currentInnings,
+                entryOver: currentOver,
+                entryPaise: Math.round((decimalOdds - 1) * 100),
+                entryDecimal: decimalOdds,
+                entryWickets: currentWickets,
+                entryTime: new Date(),
+                status: 'ACTIVE',
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              });
 
               if (
                 telegramConfig.enabled &&
@@ -409,9 +435,30 @@ export default function App() {
             over: currentOver,
             innings: currentInnings,
             score: `${currentRuns}/${currentWickets}`,
-            rule: 'Second Entry: Confirmed wicket fell after 1st entry, opposing odds < 1.65 within window',
+            rule: 'Second Entry: Confirmed wicket fell after 1st entry, opposing odds < 1.65 / 65 paise within window',
           }).then((allowed) => {
             if (allowed) {
+              // Persist second entry to dedicated strategy_trades database table
+              syncStrategyTradeToDb({
+                id: `${m.id}-SECOND_ENTRY-${Date.now()}`,
+                matchId: m.id,
+                matchName: `${m.team1.shortName} vs ${m.team2.shortName}`,
+                seriesName: m.seriesName,
+                bookingTeam: favoriteTeam,
+                battingTeam: m.team2Score ? m.team2.shortName : m.team1.shortName,
+                bowlingTeam: m.team2Score ? m.team1.shortName : m.team2.shortName,
+                entryType: 'SECOND_ENTRY',
+                innings: currentInnings,
+                entryOver: currentOver,
+                entryPaise: Math.round((opposingOdds - 1) * 100),
+                entryDecimal: opposingOdds,
+                entryWickets: currentWickets,
+                entryTime: new Date(),
+                status: 'ACTIVE',
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              });
+
               if (
                 telegramConfig.enabled &&
                 telegramConfig.botToken &&

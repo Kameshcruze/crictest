@@ -1,134 +1,106 @@
 /**
- * Strategy Configuration & Ambiguity Specifications (Phase 6)
+ * Strategy Configuration & Thresholds
  *
- * All thresholds, boundary definitions, and measurement configurations are
- * declared here so that rules remain explicit and decoupled from UI components.
+ * Rules:
+ * 1. Booking Team Confirmation: Batting team in control hits 4 (>= 11 paise) or 6 (>= 18 paise).
+ *    Flip formula: (100 - Pprev) + (100 - Pcurr) when bowling was in control.
+ * 2. Wicket safety filter: If 3 or more wickets fall before entry, match is skipped.
+ * 3. Over limits: 1st Innings <= 10.0 ov; 2nd Innings <= 6.0 ov.
+ * 4. First Entry: Batting team in control, 4 (>= 11 paise) or 6 (>= 18 paise), current paise >= 85 (or held till >= 85).
+ * 5. First Bookset: Batting team paise reaches 45 to 55 paise (decimal 1.45 - 1.55).
+ * 6. Second Entry: Confirmed wicket before first bookset, opposite team odds < 65 paise (decimal < 1.65).
+ * 7. Combined Bookset: Opposite team odds >= 85 paise (decimal >= 1.85).
  */
 
 export interface StrategyConfig {
-  /** Abnormal Activity Rule Configurations */
+  /** Abnormal Activity on Boundary Rules */
   abnormalActivity: {
-    /** Minimum odds movement on a Four boundary. Must be >= 0.11. Movement of <= 0.10 fails. */
-    fourMinMovement: number;
-    /** Minimum odds movement on a Six boundary. Must be >= 0.18. Movement of <= 0.17 fails. */
-    sixMinMovement: number;
-    /**
-     * Ambiguity Isolation:
-     * Crex API directly quotes the market favorite team rate. This config specifies
-     * which team's decimal odds movement is measured during a boundary event.
-     * Options: 'favorite' (default, directly quoted) | 'batting' | 'bowling'.
-     */
-    measuredTeamTarget: 'favorite' | 'batting' | 'bowling';
+    /** Minimum paise change on a Four boundary. Must be >= 11 paise (<= 10 fails). */
+    fourMinMovement: number; // 0.11 or 11 paise
+    /** Minimum paise change on a Six boundary. Must be >= 18 paise (<= 17 fails). */
+    sixMinMovement: number;  // 0.18 or 18 paise
+    /** Minimum paise change in integer paise */
+    fourMinPaise: number; // 11
+    sixMinPaise: number;  // 18
+  };
+
+  /** Pre-entry Wicket Safety Filter */
+  wicketFilter: {
+    /** If wickets >= 3 before first entry, skip/disqualify the match entirely */
+    maxAllowedWicketsBeforeEntry: number; // 3 (>= 3 skips)
   };
 
   /** First Entry Rule Configurations */
   firstEntry: {
-    /** Minimum qualifying entry decimal odds (inclusive). Lower boundary: 1.85 */
-    minOdds: number;
-    /** Maximum qualifying entry decimal odds (inclusive). Upper boundary: 2.00 */
-    maxOdds: number;
-    /** First bookset exit target lower bound (inclusive): 1.45 */
-    booksetTargetMin: number;
-    /** First bookset exit target upper bound (inclusive): 1.55 */
-    booksetTargetMax: number;
+    /** Minimum qualifying entry paise (>= 85 paise, decimal >= 1.85) */
+    minPaise: number; // 85
+    minOdds: number;  // 1.85
+    maxOdds: number;  // 2.00
+    /** First bookset exit target range: 45 to 55 paise (decimal 1.45 - 1.55) */
+    booksetTargetMinPaise: number; // 45
+    booksetTargetMaxPaise: number; // 55
+    booksetTargetMin: number;      // 1.45
+    booksetTargetMax: number;      // 1.55
   };
 
   /** Second Entry Rule Configurations */
   secondEntry: {
-    /** Requires confirmed wicket strictly after first entry is established */
+    /** Requires confirmed wicket strictly after first entry */
     requiresConfirmedWicket: boolean;
     /**
-     * Opposing-team odds threshold for second-entry candidate.
-     * Rule: Must be strictly below 1.65 (< 1.65). 1.65 and 1.66 do NOT qualify.
+     * Opposing-team odds threshold for second entry.
+     * Rule: Must be strictly below 65 paise / decimal 1.65 (< 65 / < 1.65).
      */
-    maxOpposingOddsExclusive: number;
+    maxOpposingPaiseExclusive: number; // 65
+    maxOpposingOddsExclusive: number;  // 1.65
     /**
-     * Opposing-team odds threshold for second-entry bookset.
-     * Rule: Must reach 1.85 or higher (>= 1.85). 1.84 does NOT qualify.
+     * Combined bookset exit for both 1st and 2nd entries:
+     * Rule: Opposite team odds must reach 85 paise or higher (>= 85 / >= 1.85).
      */
-    minBooksetOpposingOddsInclusive: number;
-    /**
-     * Ambiguity Isolation:
-     * How opposing-team odds are derived when the odds API quotes the primary team.
-     * 'complementary': Uses standard 2-way exchange probability: 1 / (1 - 1 / favoriteOdds).
-     * 'direct_if_available': Uses direct opposing rate if both teams are quoted in raw payload.
-     */
-    opposingOddsDerivation: 'complementary' | 'direct_if_available';
+    minBooksetOpposingPaiseInclusive: number; // 85
+    minBooksetOpposingOddsInclusive: number;  // 1.85
   };
 
   /** Entry Windows */
   entryWindows: {
     /** First innings: Evaluate new entries during the first 10 overs (0.0 to 10.0 overs) */
-    firstInningsMaxOver: number;
+    firstInningsMaxOver: number; // 10.0
     /** Second innings: Evaluate new entries during the first 6 overs (0.0 to 6.0 overs) */
-    secondInningsMaxOver: number;
+    secondInningsMaxOver: number; // 6.0
     /** Existing positions continue monitoring exit/bookset conditions after entry window closes */
     continueMonitoringExitsAfterWindowCloses: boolean;
   };
-
-  /** Documented Ambiguities & Clarification Notes */
-  ambiguities: {
-    issueId: string;
-    topic: string;
-    description: string;
-    currentResolution: string;
-    clarificationNeededFromUser: string;
-  }[];
 }
 
 export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   abnormalActivity: {
-    fourMinMovement: 0.11, // >= 0.11 qualifies; <= 0.10 does not
-    sixMinMovement: 0.18,  // >= 0.18 qualifies; <= 0.17 does not
-    measuredTeamTarget: 'favorite',
+    fourMinMovement: 0.11,
+    sixMinMovement: 0.18,
+    fourMinPaise: 11,
+    sixMinPaise: 18,
+  },
+  wicketFilter: {
+    maxAllowedWicketsBeforeEntry: 3,
   },
   firstEntry: {
+    minPaise: 85,
     minOdds: 1.85,
     maxOdds: 2.00,
+    booksetTargetMinPaise: 45,
+    booksetTargetMaxPaise: 55,
     booksetTargetMin: 1.45,
     booksetTargetMax: 1.55,
   },
   secondEntry: {
     requiresConfirmedWicket: true,
-    maxOpposingOddsExclusive: 1.65, // < 1.65 qualifies; 1.65 and 1.66 fail
-    minBooksetOpposingOddsInclusive: 1.85, // >= 1.85 qualifies; 1.84 fails
-    opposingOddsDerivation: 'complementary',
+    maxOpposingPaiseExclusive: 65,
+    maxOpposingOddsExclusive: 1.65,
+    minBooksetOpposingPaiseInclusive: 85,
+    minBooksetOpposingOddsInclusive: 1.85,
   },
   entryWindows: {
     firstInningsMaxOver: 10.0,
     secondInningsMaxOver: 6.0,
     continueMonitoringExitsAfterWindowCloses: true,
   },
-  ambiguities: [
-    {
-      issueId: 'AMB-01-TEAM-ODDS-MEASUREMENT',
-      topic: 'Boundary Odds Movement Team Target',
-      description:
-        'The Crex / Goscorer API (getSV3) returns bookmaker odds for the current favorite team (e.g., ^O or ^R). When a Four or Six occurs, the odds shift could be measured on the favorite team, the batting team, or the bowling team.',
-      currentResolution:
-        'Configured to measure the favorite team (measuredTeamTarget = "favorite"), whose odds are continuously quoted in decimalBack/decimalLay. If batting team equals favorite, movement directly reflects batting team firming. Absolute delta magnitude is evaluated.',
-      clarificationNeededFromUser:
-        'Should abnormal activity always measure the batting team odds specifically (even if underdogs), or the current market favorite team odds?',
-    },
-    {
-      issueId: 'AMB-02-OPPOSING-ODDS-DERIVATION',
-      topic: 'Opposing-Team Odds Calculation',
-      description:
-        'Second-entry rule requires evaluating opposing-team odds (below 1.65, and bookset at 1.85+). When the API returns single-sided odds for Team A (e.g. Back 1.90), Team B odds are not always explicitly quoted in a separate field.',
-      currentResolution:
-        'Derived using the standard exchange 2-way complementary formula: OpposingOdds = 1 / (1 - 1 / FavoriteOdds) rounded to 2 decimal places (e.g., Favorite at 2.60 -> Opposing at 1.63). If direct dual rates are available, direct rates take precedence.',
-      clarificationNeededFromUser:
-        'Does your trading venue provide separate explicit opposing-team prices, or should we continue computing opposing odds using the standard 2-way complement formula?',
-    },
-    {
-      issueId: 'AMB-03-BOOKSET-TARGET-DIRECTION',
-      topic: 'First Bookset Target Range vs Single Threshold',
-      description:
-        'First bookset target range is 1.45 to 1.55. In trading, once odds shorten into or below 1.55 down to 1.45, exit is active.',
-      currentResolution:
-        'Evaluated as inclusive range [1.45, 1.55]. If odds shorten to within 1.45 - 1.55 (or reach <= 1.55 down to 1.45), FIRST_BOOKSET_TARGET signals PASS.',
-      clarificationNeededFromUser:
-        'If odds gap below 1.45 (e.g. 1.40 after a wicket), should bookset still trigger as an exit, or does it strictly require landing between 1.45 and 1.55?',
-    },
-  ],
 };
