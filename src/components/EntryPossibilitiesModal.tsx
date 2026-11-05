@@ -15,7 +15,12 @@ import {
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState } from '../types/odds';
-import { calculateOpposingOdds, isWithinEntryWindow, detectTeamInControl } from '../services/strategy/engine';
+import {
+  strategyEngine,
+  calculateOpposingOdds,
+  isWithinEntryWindow,
+  detectTeamInControl,
+} from '../services/strategy/engine';
 
 export interface EntryOpportunity {
   matchId: string;
@@ -97,23 +102,25 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       const inWindow = isWithinEntryWindow(currentInnings, currentOver);
       const controlInfo = detectTeamInControl(match, oddsState);
       const isBattingInControl = controlInfo.teamInControl === 'BATTING';
-      const isDisqualifiedByWickets = wickets >= 3 && !recordedFirstEntries.has(match.id);
+      const engineState = strategyEngine.getState(match.id);
+      const isDisqualifiedByWickets = wickets >= 3 && !recordedFirstEntries.has(match.id) && engineState.stage !== 'ACTIVE_FIRST_ENTRY';
 
-      // Check if First Entry was recorded in DB or historical ticks for this match
+      // Check if First Entry was recorded in DB or actively held by strategy engine
       const hasFirstEntryRecorded =
         recordedFirstEntries.has(match.id) ||
-        (oddsState?.history?.some((h) => {
-          const val = h.decimalBack ?? h.decimalLay;
-          return val !== null && val >= 1.85 && val <= 2.0;
-        }) ?? false);
+        engineState.stage === 'ACTIVE_FIRST_ENTRY' ||
+        engineState.stage === 'FIRST_BOOKSET_COMPLETED' ||
+        engineState.firstEntryPosition.status === 'RECORDED_ENTRY';
 
-      // 1. Evaluate First Entry: Batting team in control, [1.85, 2.00] within window, < 3 wickets
+      // Booking Team is strictly the batting team of that innings
+      const bookingTeamDisplay = engineState.bookingTeamName || controlInfo.battingTeamName;
+
+      // 1. Evaluate First Entry: 2nd boundary confirmed with batting in control and odds >= 85 paise
       const firstEntryQualified =
         !isDisqualifiedByWickets &&
-        decimalOdds !== null &&
-        decimalOdds >= 1.85 &&
-        decimalOdds <= 2.0 &&
-        inWindow;
+        inWindow &&
+        (engineState.stage === 'ACTIVE_FIRST_ENTRY' ||
+          (engineState.stage === 'CONFIRMED_PENDING_85' && decimalOdds !== null && decimalOdds >= 1.85 && isBattingInControl));
 
       // 2. Evaluate Second Entry: STRICT RULE
       // "without the first entry you should not send the 2nd entry message."
@@ -133,11 +140,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       }
 
       // Add to Opportunities list
-      const teamName =
-        controlInfo.controlTeamName ||
-        oddsState?.odds?.favoriteTeamName ||
-        oddsState?.odds?.favoriteTeamKey ||
-        match.team1.shortName;
+      const teamName = bookingTeamDisplay;
       const windowLimitOver = currentInnings === 1 ? 10.0 : 6.0;
 
       if (firstEntryQualified && !hasFirstEntryRecorded) {
@@ -153,7 +156,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
           runs,
           wickets,
           crr,
-          explanation: `Odds ${decimalOdds!.toFixed(2)} are in optimal 1st entry range [1.85 - 2.00] with batting team in control at over ${currentOver}.`,
+          explanation: `Booking team ${teamName} (Batting) confirmed via 2 boundaries. Odds ${decimalOdds!.toFixed(2)} are in optimal 1st entry range >= 1.85 / 85 paise.`,
           booksetTarget: '45 - 55 Paise (1.45 - 1.55)',
           windowLimitOver,
           timestamp: new Date(),
@@ -173,7 +176,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
           runs,
           wickets,
           crr,
-          explanation: `Opposing odds ${opposingOdds.toFixed(2)} are below 1.65 / 65 paise after confirmed wicket with verified prior 1st entry.`,
+          explanation: `Opposing odds ${opposingOdds.toFixed(2)} are below 1.65 / 65 paise after confirmed wicket with verified prior 1st entry on ${teamName}.`,
           booksetTarget: 'Opposing Odds >= 85 Paise (1.85)',
           windowLimitOver,
           timestamp: new Date(),
@@ -184,10 +187,16 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       let distanceToFirstEntry = '';
       let statusSummary = '';
 
-      if (isDisqualifiedByWickets) {
+      if (isDisqualifiedByWickets || engineState.stage === 'DISQUALIFIED_3_WICKETS') {
         statusSummary = `⚠️ Skipped: ${wickets} wickets before entry (>= 3 limit)`;
-      } else if (hasFirstEntryRecorded) {
-        statusSummary = '🛡️ 1st Entry Active (Holding state - Bookset target 45-55)';
+      } else if (hasFirstEntryRecorded || engineState.stage === 'ACTIVE_FIRST_ENTRY') {
+        statusSummary = `🛡️ 1st Entry Active on ${bookingTeamDisplay} (Holding state - Bookset target 45-55)`;
+      } else if (engineState.stage === 'CONFIRMED_PENDING_85') {
+        statusSummary = `⏳ 2nd Boundary Confirmed: Waiting for ${bookingTeamDisplay} to cross 85p in control`;
+      } else if (engineState.stage === 'CONFIRMED_BOOKING_TEAM') {
+        statusSummary = `🎯 Booking Confirmed: ${bookingTeamDisplay} (Waiting for 2nd boundary 4 >= 11p or 6 >= 18p)`;
+      } else if (engineState.stage === 'WAITING_FOR_CONFIRMATION') {
+        statusSummary = `⏳ Waiting for Booking Team: ${controlInfo.battingTeamName} must hit 4 (>= 11p) or 6 (>= 18p) in control`;
       } else if (firstEntryQualified) {
         statusSummary = '🎯 1st Entry Ready NOW';
       } else if (secondEntryQualified) {
@@ -195,15 +204,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       } else if (!inWindow) {
         statusSummary = `Window passed (${currentOver} ov > ${windowLimitOver} ov limit)`;
       } else if (decimalOdds !== null) {
-        if (decimalOdds < 1.85) {
-          const delta = (1.85 - decimalOdds).toFixed(2);
-          distanceToFirstEntry = `Needs +${delta} to reach 1.85`;
-          statusSummary = `Waiting: Odds ${decimalOdds.toFixed(2)} below 1.85 (${distanceToFirstEntry})`;
-        } else if (decimalOdds > 2.0) {
-          const delta = (decimalOdds - 2.0).toFixed(2);
-          distanceToFirstEntry = `Needs -${delta} to drop into 2.00`;
-          statusSummary = `Waiting: Odds ${decimalOdds.toFixed(2)} above 2.00 (${distanceToFirstEntry})`;
-        }
+        statusSummary = `Monitoring ball-by-ball odds & boundary shifts on ${controlInfo.battingTeamName}...`;
       } else {
         statusSummary = 'Connecting to real-time odds feed...';
       }

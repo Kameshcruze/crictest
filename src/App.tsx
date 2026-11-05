@@ -16,7 +16,7 @@ import { OddsDiagnosticModal } from './components/OddsDiagnosticModal';
 import { MatchAnalysisPage } from './components/MatchAnalysisPage';
 import { EntryPossibilitiesModal } from './components/EntryPossibilitiesModal';
 import { useOddsManager } from './hooks/useOddsManager';
-import { calculateOpposingOdds, isWithinEntryWindow } from './services/strategy/engine';
+import { strategyEngine, calculateOpposingOdds, isWithinEntryWindow } from './services/strategy/engine';
 import {
   TelegramConfig,
   getStoredTelegramConfig,
@@ -327,7 +327,7 @@ export default function App() {
     loadMatches(false);
   }, [loadMatches]);
 
-  // Live Evaluation of Strategy Entries from Ball 0.0 to Match End (with strict 1st -> 2nd entry rule)
+  // Live Evaluation using Strategy Engine (Booking Team Confirmed ONLY via Boundary 4 >= 11p or 6 >= 18p with Batting in Control)
   useEffect(() => {
     const liveMatches = matches.filter(
       (m) => m.status === 'live' || (m.status !== 'completed' && (m.team1Score || m.team2Score))
@@ -335,151 +335,75 @@ export default function App() {
 
     for (const m of liveMatches) {
       const oddsState = oddsByMatchId[m.id];
-      const decimalOdds =
-        oddsState?.odds?.bookmaker?.decimalBack ??
-        oddsState?.odds?.bookmaker?.decimalLay ??
-        null;
-      const favoriteTeam =
-        oddsState?.odds?.favoriteTeamName ||
-        oddsState?.odds?.favoriteTeamKey ||
-        m.team1.shortName;
-      const activeScore = m.team2Score || m.team1Score;
-      const currentInnings = m.team2Score ? 2 : 1;
-      const currentOver = activeScore ? activeScore.overs : 0;
-      const currentRuns = activeScore ? activeScore.runs : 0;
-      const currentWickets = activeScore ? activeScore.wickets : 0;
-      const opposingOdds = decimalOdds ? calculateOpposingOdds(decimalOdds) : null;
-      const inWindow = isWithinEntryWindow(currentInnings, currentOver);
+      if (!oddsState) continue;
 
-      if (decimalOdds === null) continue;
+      // Evaluate match strictly using strategyEngine (guarantees booking team is batting team confirmed via boundary surge)
+      strategyEngine.evaluateMatch(m, oddsState);
+      const state = strategyEngine.getState(m.id);
 
-      // 0. Pre-entry wicket safety check: < 3 wickets required
-      const isDisqualifiedByWickets = currentWickets >= 3 && !recordedFirstEntries.has(m.id);
-      if (isDisqualifiedByWickets) continue;
+      // 1. Sync First Entry Trade if newly triggered and established
+      if (
+        (state.stage === 'ACTIVE_FIRST_ENTRY' || state.stage === 'FIRST_BOOKSET_COMPLETED') &&
+        state.firstEntryTrade &&
+        !recordedFirstEntries.has(m.id)
+      ) {
+        setRecordedFirstEntries((prev) => new Set(prev).add(m.id));
+        firstEntryWicketsAnchorRef.current[m.id] = state.firstEntryTrade.entryWickets;
 
-      // 1. Evaluate First Entry: [1.85, 2.00] within window and < 3 wickets
-      if (decimalOdds >= 1.85 && decimalOdds <= 2.0 && inWindow && currentWickets < 3) {
-        if (!recordedFirstEntries.has(m.id)) {
-          checkAndRecordEntrySignalInDb(m.id, 'FIRST_ENTRY', {
-            team1: m.team1.shortName,
-            team2: m.team2.shortName,
-            measuredTeam: favoriteTeam,
-            decimalOdds,
-            over: currentOver,
-            innings: currentInnings,
-            score: `${currentRuns}/${currentWickets}`,
-            rule: 'First Entry: Odds in [1.85, 2.00] within window with < 3 wickets',
-          }).then((allowed) => {
-            if (allowed) {
-              setRecordedFirstEntries((prev) => new Set(prev).add(m.id));
-              firstEntryWicketsAnchorRef.current[m.id] = currentWickets;
+        // Persist to dedicated strategy_trades database table
+        syncStrategyTradeToDb(state.firstEntryTrade);
 
-              // Persist into dedicated strategy_trades database table
-              syncStrategyTradeToDb({
-                id: `${m.id}-FIRST_ENTRY-${Date.now()}`,
-                matchId: m.id,
-                matchName: `${m.team1.shortName} vs ${m.team2.shortName}`,
-                seriesName: m.seriesName,
-                bookingTeam: favoriteTeam,
-                battingTeam: m.team2Score ? m.team2.shortName : m.team1.shortName,
-                bowlingTeam: m.team2Score ? m.team1.shortName : m.team2.shortName,
-                entryType: 'FIRST_ENTRY',
-                innings: currentInnings,
-                entryOver: currentOver,
-                entryPaise: Math.round((decimalOdds - 1) * 100),
-                entryDecimal: decimalOdds,
-                entryWickets: currentWickets,
-                entryTime: new Date(),
-                status: 'ACTIVE',
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              });
+        // Record signal deduplication in DB
+        checkAndRecordEntrySignalInDb(m.id, 'FIRST_ENTRY', {
+          team1: m.team1.shortName,
+          team2: m.team2.shortName,
+          measuredTeam: state.bookingTeamName || state.firstEntryTrade.bookingTeam,
+          decimalOdds: state.firstEntryTrade.entryDecimal,
+          over: state.firstEntryTrade.entryOver,
+          innings: state.firstEntryTrade.innings,
+          score: `${m.team2Score?.runs || m.team1Score?.runs || 0}/${state.firstEntryTrade.entryWickets}`,
+          rule: 'First Entry: 1st boundary confirmed booking team + 2nd boundary confirmed entry >= 85 paise',
+        });
 
-              if (
-                telegramConfig.enabled &&
-                telegramConfig.botToken &&
-                telegramConfig.chatId &&
-                telegramConfig.notifyStrategyEntries !== false
-              ) {
-                const alertMsg = formatFirstEntryAlert({
-                  match: m,
-                  targetTeamName: favoriteTeam,
-                  decimalOdds,
-                  currentOver,
-                  currentInnings,
-                  runs: currentRuns,
-                  wickets: currentWickets,
-                  crr: m.currentRunRate,
-                });
-                sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertMsg);
-              }
-            }
+        // Optional Telegram notification
+        if (
+          telegramConfig.enabled &&
+          telegramConfig.botToken &&
+          telegramConfig.chatId &&
+          telegramConfig.notifyStrategyEntries
+        ) {
+          const alertMsg = formatFirstEntryAlert({
+            match: m,
+            targetTeamName: state.bookingTeamName || state.firstEntryTrade.bookingTeam,
+            decimalOdds: state.firstEntryTrade.entryDecimal,
+            currentOver: state.firstEntryTrade.entryOver,
+            currentInnings: state.firstEntryTrade.innings,
+            runs: m.team2Score?.runs || m.team1Score?.runs || 0,
+            wickets: state.firstEntryTrade.entryWickets,
+            crr: m.currentRunRate,
           });
+          sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertMsg);
         }
       }
 
-      // 2. Evaluate Second Entry: STRICT DEPENDENCY ON FIRST ENTRY
-      // "without the first entry you should not send the 2nd entry message."
-      const hasFirstEntry = recordedFirstEntries.has(m.id);
-      if (hasFirstEntry) {
-        const anchorWkts = firstEntryWicketsAnchorRef.current[m.id] ?? 0;
-        const wicketFellSince1st = currentWickets > anchorWkts;
+      // 2. Sync Second Entry Trade if newly triggered
+      if (
+        (state.stage === 'ACTIVE_SECOND_ENTRY' || state.stage === 'FULL_BOOKSET_COMPLETED') &&
+        state.secondEntryTrade &&
+        state.secondEntryPosition.status === 'RECORDED_ENTRY'
+      ) {
+        syncStrategyTradeToDb(state.secondEntryTrade);
+      }
 
-        if (wicketFellSince1st && opposingOdds && opposingOdds < 1.65 && inWindow) {
-          checkAndRecordEntrySignalInDb(m.id, 'SECOND_ENTRY', {
-            team1: m.team1.shortName,
-            team2: m.team2.shortName,
-            measuredTeam: favoriteTeam,
-            decimalOdds,
-            opposingOdds,
-            over: currentOver,
-            innings: currentInnings,
-            score: `${currentRuns}/${currentWickets}`,
-            rule: 'Second Entry: Confirmed wicket fell after 1st entry, opposing odds < 1.65 / 65 paise within window',
-          }).then((allowed) => {
-            if (allowed) {
-              // Persist second entry to dedicated strategy_trades database table
-              syncStrategyTradeToDb({
-                id: `${m.id}-SECOND_ENTRY-${Date.now()}`,
-                matchId: m.id,
-                matchName: `${m.team1.shortName} vs ${m.team2.shortName}`,
-                seriesName: m.seriesName,
-                bookingTeam: favoriteTeam,
-                battingTeam: m.team2Score ? m.team2.shortName : m.team1.shortName,
-                bowlingTeam: m.team2Score ? m.team1.shortName : m.team2.shortName,
-                entryType: 'SECOND_ENTRY',
-                innings: currentInnings,
-                entryOver: currentOver,
-                entryPaise: Math.round((opposingOdds - 1) * 100),
-                entryDecimal: opposingOdds,
-                entryWickets: currentWickets,
-                entryTime: new Date(),
-                status: 'ACTIVE',
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              });
+      // 3. Sync First Bookset Exit if completed
+      if (state.stage === 'FIRST_BOOKSET_COMPLETED' && state.firstEntryTrade?.exitTime) {
+        syncStrategyTradeToDb(state.firstEntryTrade);
+      }
 
-              if (
-                telegramConfig.enabled &&
-                telegramConfig.botToken &&
-                telegramConfig.chatId &&
-                telegramConfig.notifyStrategyEntries !== false
-              ) {
-                const alertMsg = formatSecondEntryAlert({
-                  match: m,
-                  measuredTeamName: favoriteTeam,
-                  opposingOdds,
-                  currentOver,
-                  currentInnings,
-                  runs: currentRuns,
-                  wickets: currentWickets,
-                  anchorWickets: anchorWkts,
-                });
-                sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertMsg);
-              }
-            }
-          });
-        }
+      // 4. Sync Full Combined Bookset Exit if completed
+      if (state.stage === 'FULL_BOOKSET_COMPLETED') {
+        if (state.firstEntryTrade) syncStrategyTradeToDb(state.firstEntryTrade);
+        if (state.secondEntryTrade) syncStrategyTradeToDb(state.secondEntryTrade);
       }
     }
   }, [matches, oddsByMatchId, recordedFirstEntries, telegramConfig]);
