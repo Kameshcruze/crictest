@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   fetchCrexTopMatches,
   playAlertSound,
+  isAllowedTournament,
 } from './services/cricketApi';
 import { ParsedCricketMatch, RawApiResponse } from './types/cricket';
 import { Navbar } from './components/Navbar';
@@ -36,6 +37,7 @@ import {
   checkAndRecordEntrySignalInDb,
   fetchRecordedFirstEntriesFromDb,
   syncStrategyTradeToDb,
+  fetchStrategyTradesFromDb,
 } from './services/supabaseSyncService';
 import {
   Radio,
@@ -79,6 +81,48 @@ export default function App() {
   // Strategy Entry Tracking (ball 0.0 to match end)
   const [recordedFirstEntries, setRecordedFirstEntries] = useState<Set<string>>(new Set());
   const firstEntryWicketsAnchorRef = useRef<Record<string, number>>({});
+
+  // Rehydrate persisted trades from Supabase strategy_trades on mount
+  useEffect(() => {
+    fetchStrategyTradesFromDb().then((trades) => {
+      if (trades && trades.length > 0) {
+        const matchIds = new Set<string>();
+        for (const t of trades) {
+          matchIds.add(t.matchId);
+          const state = strategyEngine.getState(t.matchId);
+          if (t.entryType === 'FIRST_ENTRY') {
+            state.firstEntryTrade = t;
+            state.bookingTeamName = t.bookingTeam;
+            if (t.status === 'ACTIVE') {
+              state.stage = 'ACTIVE_FIRST_ENTRY';
+              state.firstEntryPosition.status = 'RECORDED_ENTRY';
+              state.firstEntryPosition.entryOdds = t.entryDecimal;
+              state.firstEntryPosition.entryOver = t.entryOver;
+              state.firstEntryPosition.entryInnings = t.innings;
+              state.firstEntryPosition.entryWickets = t.entryWickets;
+              state.firstEntryPosition.entryTimestamp = t.entryTime;
+            } else if (t.status === 'BOOKSET_COMPLETED') {
+              state.stage = 'FIRST_BOOKSET_COMPLETED';
+              state.firstEntryPosition.status = 'RECORDED_EXIT';
+              state.firstEntryPosition.exitOdds = t.exitDecimal;
+              state.firstEntryPosition.exitOver = t.exitOver;
+              state.firstEntryPosition.exitTimestamp = t.exitTime;
+            }
+          } else if (t.entryType === 'SECOND_ENTRY') {
+            state.secondEntryTrade = t;
+            if (t.status === 'ACTIVE') {
+              state.stage = 'ACTIVE_SECOND_ENTRY';
+              state.secondEntryPosition.status = 'RECORDED_ENTRY';
+            } else if (t.status === 'BOOKSET_COMPLETED') {
+              state.stage = 'FULL_BOOKSET_COMPLETED';
+              state.secondEntryPosition.status = 'RECORDED_EXIT';
+            }
+          }
+        }
+        setRecordedFirstEntries(matchIds);
+      }
+    }).catch(() => {});
+  }, []);
 
   // Phase 5 Routing: Dedicated Match Analysis View
   const [activeAnalysisMatchId, setActiveAnalysisMatchId] = useState<string | null>(() => {
@@ -251,11 +295,12 @@ export default function App() {
           }
         }
 
-        // Always create a new array reference to guarantee React state updates
-        setMatches([...result.matches]);
+        // Strictly filter to WBBL 2026 and Abu Dhabi T10 2026 matches only
+        const allowedMatches = result.matches.filter(isAllowedTournament);
+        setMatches([...allowedMatches]);
 
-        // Asynchronously sync live matches to Supabase
-        result.matches.forEach((m) => {
+        // Asynchronously sync live matches to Local PostgreSQL (only allowed tournaments)
+        allowedMatches.forEach((m) => {
           if (m.status === 'live' || m.status === 'completed') {
             syncMatchToSupabase(m).catch(() => {});
           }

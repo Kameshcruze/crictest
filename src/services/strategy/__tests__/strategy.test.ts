@@ -838,6 +838,103 @@ describe('Cricket Trading Strategy Engine - Boundary & Rules Suite', () => {
         'First entry trigger signal emitted when crossing 85'
       );
     });
+
+    it('Zero Flickering: First entry holds PASS status even when odds fluctuate below 85 paise', () => {
+      const engine = new CricketStrategyEngine();
+      const matchId = 'MATCH_ZERO_FLICKER';
+
+      // 1. Establish First Entry at 88 paise (1.88)
+      engine.recordEntry(matchId, 'FIRST_ENTRY', 1.88, 1, 3.2, 1, new Date());
+      const state = engine.getState(matchId);
+      assert.equal(state.stage, 'ACTIVE_FIRST_ENTRY');
+      assert.equal(state.firstEntryPosition.status, 'RECORDED_ENTRY');
+
+      // 2. Odds drop below 85 paise: 80 paise (1.80)
+      const sig80 = engine.evaluateFirstEntry({
+        matchId,
+        decimalOdds: 1.80,
+        currentInnings: 1,
+        currentOver: 4.0,
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+      assert.equal(sig80.status, 'PASS', 'Must hold PASS at 80 paise');
+      assert.ok(sig80.explanation.includes('HELD'), 'Must explain position is active and held');
+
+      // 3. Odds drop further: 65 paise (1.65)
+      const sig65 = engine.evaluateFirstEntry({
+        matchId,
+        decimalOdds: 1.65,
+        currentInnings: 1,
+        currentOver: 5.1,
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+      assert.equal(sig65.status, 'PASS', 'Must hold PASS at 65 paise');
+
+      // 4. Odds reach First Bookset range: 50 paise (1.50)
+      const sig50 = engine.evaluateFirstEntry({
+        matchId,
+        decimalOdds: 1.50,
+        currentInnings: 1,
+        currentOver: 6.2,
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+      assert.equal(sig50.status, 'PASS', 'Must hold PASS at 50 paise');
+
+      // 5. Exit bookset
+      engine.recordExit(matchId, 'FIRST_ENTRY', 1.50, 6.2, new Date(), 'FIRST_BOOKSET_45_55');
+      assert.equal(state.stage, 'FIRST_BOOKSET_COMPLETED');
+
+      // 6. After exit, first entry evaluation stays PASS (Completed)
+      const sigPost = engine.evaluateFirstEntry({
+        matchId,
+        decimalOdds: 1.48,
+        currentInnings: 1,
+        currentOver: 7.0,
+        measuredTeam: 'Adelaide Strikers Women',
+      });
+      assert.equal(sigPost.status, 'PASS');
+      assert.ok(sigPost.explanation.includes('COMPLETED'));
+    });
+
+    it('Trade Listeners: Dispatches onTrade on recordEntry and recordExit for automatic DB sync', () => {
+      const engine = new CricketStrategyEngine();
+      const matchId = 'MATCH_LISTENER_TEST';
+      const receivedTrades: any[] = [];
+
+      const unsubscribe = engine.onTrade((trade) => {
+        receivedTrades.push({ ...trade });
+      });
+
+      // 1. Record Entry
+      engine.recordEntry(
+        matchId,
+        'FIRST_ENTRY',
+        1.92,
+        1,
+        4.0,
+        1,
+        new Date(),
+        'Booking Team',
+        'Bat Team',
+        'Bowl Team',
+        'Bat vs Bowl',
+        'Premier League'
+      );
+
+      assert.equal(receivedTrades.length, 1);
+      assert.equal(receivedTrades[0].entryType, 'FIRST_ENTRY');
+      assert.equal(receivedTrades[0].entryPaise, 92);
+      assert.equal(receivedTrades[0].matchName, 'Bat vs Bowl');
+      assert.equal(receivedTrades[0].status, 'ACTIVE');
+
+      // 2. Record Exit
+      engine.recordExit(matchId, 'FIRST_ENTRY', 1.50, 7.1, new Date(), 'FIRST_BOOKSET_45_55');
+      assert.equal(receivedTrades.length, 2);
+      assert.equal(receivedTrades[1].status, 'BOOKSET_COMPLETED');
+      assert.equal(receivedTrades[1].exitPaise, 50);
+
+      unsubscribe();
+    });
   });
 });
 

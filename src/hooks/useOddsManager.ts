@@ -196,6 +196,17 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
 
       setOddsByMatchId((prev) => {
         const existing = prev[cleanId];
+        // If we already have valid odds, retain them seamlessly and don't wipe to error status
+        if (existing?.odds) {
+          return {
+            ...prev,
+            [cleanId]: {
+              ...existing,
+              error: errorMessage,
+            },
+          };
+        }
+
         return {
           ...prev,
           [cleanId]: {
@@ -203,7 +214,7 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
             oddsKey: cleanId,
             maskedKey: maskOddsKey(cleanId),
             status: 'error',
-            odds: existing?.odds || null,
+            odds: null,
             error: errorMessage,
             recordsCount: existing?.recordsCount || 0,
             lastUpdated: existing?.lastUpdated,

@@ -9,6 +9,7 @@ import {
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState } from '../types/odds';
 import { KNOWN_TEAMS } from '../data/cricketMapping';
+import { parseInningsScore } from '../services/cricketApi';
 
 interface MatchCardProps {
   match: ParsedCricketMatch;
@@ -50,11 +51,39 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
       ? oddsState.odds.speechNames[match.team2.key].slice(0, 4).toUpperCase()
       : match.team2.shortName;
 
+  // Live sub-second score resolution: overlay raw ball-by-ball score from getSV3 if newer
+  const rawJ = typeof oddsState?.odds?.raw?.j === 'string' ? oddsState.odds.raw.j : undefined;
+  const rawK = typeof oddsState?.odds?.raw?.k === 'string' ? oddsState.odds.raw.k : undefined;
+
+  const team1Score = React.useMemo(() => {
+    if (rawJ) {
+      const parsed = parseInningsScore(rawJ, 1);
+      if (parsed) {
+        if (!match.team1Score || parsed.totalBalls >= match.team1Score.totalBalls) {
+          return { ...parsed, teamCode: team1Short };
+        }
+      }
+    }
+    return match.team1Score;
+  }, [rawJ, match.team1Score, team1Short]);
+
+  const team2Score = React.useMemo(() => {
+    if (rawK) {
+      const parsed = parseInningsScore(rawK, 2);
+      if (parsed) {
+        if (!match.team2Score || parsed.totalBalls >= match.team2Score.totalBalls) {
+          return { ...parsed, teamCode: team2Short };
+        }
+      }
+    }
+    return match.team2Score;
+  }, [rawK, match.team2Score, team2Short]);
+
   const [isScoreFlashing, setIsScoreFlashing] = React.useState(false);
   const prevScoreStringRef = React.useRef<string>('');
 
   React.useEffect(() => {
-    const scoreKey = `${match.team1Score?.runs || 0}/${match.team1Score?.wickets || 0}(${match.team1Score?.overs || 0})-${match.team2Score?.runs || 0}/${match.team2Score?.wickets || 0}(${match.team2Score?.overs || 0})-${match.resultText || ''}`;
+    const scoreKey = `${team1Score?.runs || 0}/${team1Score?.wickets || 0}(${team1Score?.overs || 0})-${team2Score?.runs || 0}/${team2Score?.wickets || 0}(${team2Score?.overs || 0})-${match.resultText || ''}`;
     if (prevScoreStringRef.current && prevScoreStringRef.current !== scoreKey) {
       setIsScoreFlashing(true);
       const timer = setTimeout(() => setIsScoreFlashing(false), 1200);
@@ -62,12 +91,12 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
     }
     prevScoreStringRef.current = scoreKey;
   }, [
-    match.team1Score?.runs,
-    match.team1Score?.wickets,
-    match.team1Score?.overs,
-    match.team2Score?.runs,
-    match.team2Score?.wickets,
-    match.team2Score?.overs,
+    team1Score?.runs,
+    team1Score?.wickets,
+    team1Score?.overs,
+    team2Score?.runs,
+    team2Score?.wickets,
+    team2Score?.overs,
     match.resultText,
   ]);
 
@@ -84,8 +113,8 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
 
   const copyMatchSummary = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const s1 = match.team1Score ? `${match.team1Score.runs}/${match.team1Score.wickets} (${match.team1Score.overs} ov)` : '';
-    const s2 = match.team2Score ? `${match.team2Score.runs}/${match.team2Score.wickets} (${match.team2Score.overs} ov)` : '';
+    const s1 = team1Score ? `${team1Score.runs}/${team1Score.wickets} (${team1Score.overs} ov)` : '';
+    const s2 = team2Score ? `${team2Score.runs}/${team2Score.wickets} (${team2Score.overs} ov)` : '';
     const text = `${team1Name} vs ${team2Name}\n${s1 ? `${team1Short}: ${s1}\n` : ''}${s2 ? `${team2Short}: ${s2}\n` : ''}${match.resultText || match.statusLabel}\n${match.seriesName}`;
     navigator.clipboard.writeText(text);
   };
@@ -93,15 +122,15 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
   // Crex style live status text
   const getLiveEquation = () => {
     // If team 2 is actively chasing, display runs needed in balls remaining (Crex style)
-    if (isLive && match.target && match.team2Score && match.team2Score.totalBalls > 0) {
-      const needed = Math.max(0, match.target - match.team2Score.runs);
+    if (isLive && match.target && team2Score && team2Score.totalBalls > 0) {
+      const needed = Math.max(0, match.target - team2Score.runs);
       let maxOvers = 20;
       if (match.format.includes('ODI') || match.format.includes('List A')) maxOvers = 50;
       if (match.format.includes('T20')) maxOvers = 20;
       if (match.format.includes('Test') || match.format.includes('First Class')) maxOvers = 0;
 
       if (maxOvers > 0) {
-        const remainingBalls = Math.max(0, maxOvers * 6 - match.team2Score.totalBalls);
+        const remainingBalls = Math.max(0, maxOvers * 6 - team2Score.totalBalls);
         return `${needed} runs needed in ${remainingBalls} balls`;
       }
       return `Target: ${match.target} runs`;
@@ -110,15 +139,15 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
     if (match.resultText) return match.resultText;
     if (match.statusLabel && match.statusLabel !== 'Live') return match.statusLabel;
 
-    if (match.target && match.team2Score) {
-      const needed = Math.max(0, match.target - match.team2Score.runs);
+    if (match.target && team2Score) {
+      const needed = Math.max(0, match.target - team2Score.runs);
       let maxOvers = 20;
       if (match.format.includes('ODI') || match.format.includes('List A')) maxOvers = 50;
       if (match.format.includes('T20')) maxOvers = 20;
       if (match.format.includes('Test') || match.format.includes('First Class')) maxOvers = 0;
 
       if (maxOvers > 0) {
-        const remainingBalls = Math.max(0, maxOvers * 6 - match.team2Score.totalBalls);
+        const remainingBalls = Math.max(0, maxOvers * 6 - team2Score.totalBalls);
         return `${needed} runs needed in ${remainingBalls} balls`;
       }
       return `Target: ${match.target} runs`;
@@ -214,15 +243,15 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
 
             {/* Team 1 Score */}
             <div className="text-right shrink-0 flex items-center gap-1.5">
-              {match.team1Score ? (
+              {team1Score ? (
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-base sm:text-lg font-bold font-mono-numbers text-white">
-                    {match.team1Score.wickets > 0
-                      ? `${match.team1Score.runs}-${match.team1Score.wickets}`
-                      : `${match.team1Score.runs}`}
+                    {team1Score.wickets > 0
+                      ? `${team1Score.runs}-${team1Score.wickets}`
+                      : `${team1Score.runs}`}
                   </span>
                   <span className="text-xs text-slate-400 font-mono-numbers">
-                    {match.team1Score.overs}
+                    {team1Score.overs}
                   </span>
                 </div>
               ) : (
@@ -273,15 +302,15 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
 
             {/* Team 2 Score */}
             <div className="text-right shrink-0 flex items-center gap-1.5">
-              {match.team2Score ? (
+              {team2Score ? (
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-base sm:text-lg font-bold font-mono-numbers text-white">
-                    {match.team2Score.wickets > 0
-                      ? `${match.team2Score.runs}-${match.team2Score.wickets}`
-                      : `${match.team2Score.runs}`}
+                    {team2Score.wickets > 0
+                      ? `${team2Score.runs}-${team2Score.wickets}`
+                      : `${team2Score.runs}`}
                   </span>
                   <span className="text-xs text-slate-400 font-mono-numbers">
-                    {match.team2Score.overs}
+                    {team2Score.overs}
                   </span>
                 </div>
               ) : (

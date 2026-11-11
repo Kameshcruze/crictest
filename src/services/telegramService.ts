@@ -1,5 +1,4 @@
 import { ParsedCricketMatch } from '../types/cricket';
-import { supabase, isSupabaseConfigured } from './supabaseClient';
 
 export interface TelegramConfig {
   botToken: string;
@@ -49,22 +48,17 @@ export function getStoredTelegramConfig(): TelegramConfig {
 }
 
 /**
- * Loads telegram configuration from Supabase app_settings
+ * Loads telegram configuration from PostgreSQL app_settings
  */
 export async function fetchTelegramConfigFromSupabase(): Promise<TelegramConfig | null> {
   try {
-    if (!isSupabaseConfigured) return null;
-
-    const { data, error } = await supabase
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'telegram_config')
-      .maybeSingle();
-
-    if (!error && data?.value) {
+    const res = await fetch('/api/db/telegram-config');
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json?.data) {
       cachedTelegramConfig = {
         ...DEFAULT_TELEGRAM_CONFIG,
-        ...(data.value as Partial<TelegramConfig>),
+        ...(json.data as Partial<TelegramConfig>),
       };
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(cachedTelegramConfig));
@@ -79,14 +73,11 @@ export async function fetchTelegramConfigFromSupabase(): Promise<TelegramConfig 
 
 async function persistConfigToSupabase(config: TelegramConfig): Promise<void> {
   try {
-    if (!isSupabaseConfigured) return;
-    const { error } = await supabase.from('app_settings').upsert({
-      key: 'telegram_config',
-      value: config,
-      description: 'Telegram Bot automated live feed dispatch configuration',
-      updated_at: new Date().toISOString(),
+    await fetch('/api/db/telegram-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
     });
-    if (error) console.warn('Supabase telegram config save warning:', error.message);
   } catch {
     // Non-blocking
   }

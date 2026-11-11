@@ -230,9 +230,12 @@ export function detectTeamInControl(
   };
 }
 
+export type TradeListener = (trade: StrategyTradeRecord) => void;
+
 export class CricketStrategyEngine {
   private config: StrategyConfig;
   private matchStates: Map<string, MatchStrategyState> = new Map();
+  private tradeListeners: Set<TradeListener> = new Set();
 
   constructor(config: Partial<StrategyConfig> = {}) {
     this.config = {
@@ -259,6 +262,27 @@ export class CricketStrategyEngine {
         ...config.entryWindows,
       },
     };
+  }
+
+  /**
+   * Registers a callback invoked whenever any trade entry or exit is recorded.
+   */
+  public onTrade(listener: TradeListener): () => void {
+    this.tradeListeners.add(listener);
+    return () => this.tradeListeners.delete(listener);
+  }
+
+  /**
+   * Dispatches trade updates to all registered listeners.
+   */
+  public notifyTrade(trade: StrategyTradeRecord): void {
+    for (const listener of this.tradeListeners) {
+      try {
+        listener(trade);
+      } catch (err) {
+        console.warn('Error in tradeListener:', err);
+      }
+    }
   }
 
   public getConfig(): StrategyConfig {
@@ -339,7 +363,9 @@ export class CricketStrategyEngine {
     timestamp: Date = new Date(),
     bookingTeam = 'Booking Team',
     battingTeam = 'Batting Team',
-    bowlingTeam = 'Bowling Team'
+    bowlingTeam = 'Bowling Team',
+    matchName?: string,
+    seriesName?: string
   ): TradePosition {
     const state = this.getState(matchId);
     const targetPos =
@@ -357,6 +383,8 @@ export class CricketStrategyEngine {
     const tradeRecord: StrategyTradeRecord = {
       id: `${matchId}-${positionType}-${Date.now()}`,
       matchId,
+      matchName,
+      seriesName,
       bookingTeam: state.bookingTeamName || bookingTeam,
       battingTeam,
       bowlingTeam,
@@ -382,6 +410,7 @@ export class CricketStrategyEngine {
     }
 
     state.lastUpdated = new Date();
+    this.notifyTrade(tradeRecord);
     return { ...targetPos };
   }
 
@@ -416,6 +445,7 @@ export class CricketStrategyEngine {
       state.firstEntryTrade.status = 'BOOKSET_COMPLETED';
       state.firstEntryTrade.updatedAt = timestamp;
       state.stage = 'FIRST_BOOKSET_COMPLETED';
+      this.notifyTrade(state.firstEntryTrade);
     }
 
     if (positionType === 'SECOND_ENTRY' && state.secondEntryTrade) {
@@ -427,6 +457,7 @@ export class CricketStrategyEngine {
       state.secondEntryTrade.status = 'BOOKSET_COMPLETED';
       state.secondEntryTrade.updatedAt = timestamp;
       state.stage = 'FULL_BOOKSET_COMPLETED';
+      this.notifyTrade(state.secondEntryTrade);
 
       // Also close first entry trade if still active
       if (state.firstEntryTrade && state.firstEntryTrade.status === 'ACTIVE') {
@@ -437,6 +468,7 @@ export class CricketStrategyEngine {
         state.firstEntryTrade.exitReason = 'FULL_BOOKSET_OPPOSING_85';
         state.firstEntryTrade.status = 'BOOKSET_COMPLETED';
         state.firstEntryTrade.updatedAt = timestamp;
+        this.notifyTrade(state.firstEntryTrade);
       }
     }
 
@@ -631,6 +663,132 @@ export class CricketStrategyEngine {
         ruleEvaluated,
         status: 'DATA UNAVAILABLE',
         explanation: 'Active odds are currently unavailable or suspended.',
+      };
+    }
+
+    // 1. If First Entry is already active or recorded, HOLD strictly in PASS status without flickering!
+    if (
+      state.stage === 'ACTIVE_FIRST_ENTRY' ||
+      state.firstEntryPosition.status === 'RECORDED_ENTRY'
+    ) {
+      const entryPaise =
+        state.firstEntryTrade?.entryPaise ??
+        (state.firstEntryPosition.entryOdds
+          ? Math.round((state.firstEntryPosition.entryOdds - 1) * 100)
+          : 85);
+      const entryDecimal =
+        state.firstEntryTrade?.entryDecimal ?? state.firstEntryPosition.entryOdds ?? 1.85;
+      const currentPaiseVal = decimalOdds ? Math.round((decimalOdds - 1) * 100) : null;
+
+      const heldSignal: StrategySignal = {
+        id: `${matchId}-FIRST_ENTRY_HELD-${Date.now()}`,
+        signalType: 'FIRST_ENTRY_CANDIDATE',
+        matchId,
+        timestamp,
+        currentInnings,
+        currentOver,
+        ballNumber,
+        relevantOdds: {
+          measuredTeam,
+          decimalOdds,
+          currentPaise: currentPaiseVal,
+        },
+        ruleEvaluated: `First Entry (Held): Entered at ${entryPaise} paise (${entryDecimal.toFixed(2)}). Holding until Bookset Target (45-55 paise) or wicket hedge.`,
+        status: 'PASS',
+        explanation: `FIRST ENTRY ACTIVE & HELD: Position entered at ${entryPaise} paise (${entryDecimal.toFixed(2)} decimal). Currently holding position (Current: ${currentPaiseVal !== null ? `${currentPaiseVal} paise / ` : ''}${decimalOdds ? decimalOdds.toFixed(2) : '—'}). Monitoring for First Bookset at 45-55 paise. Zero flickering below 85 paise.`,
+        metadata: {
+          held: true,
+          entryPaise,
+          entryDecimal,
+          currentPaise: currentPaiseVal,
+        },
+      };
+
+      const heldDedupeKey = `${matchId}-FIRST_ENTRY_HELD-${currentInnings}-${currentOver}`;
+      if (!state.processedEventKeys.has(heldDedupeKey)) {
+        state.processedEventKeys.add(heldDedupeKey);
+        state.signalsHistory.unshift(heldSignal);
+        if (state.signalsHistory.length > 200) state.signalsHistory.pop();
+      }
+      return heldSignal;
+    }
+
+    // 2. If First Bookset is completed, hold as PASS (Bookset Secured)
+    if (state.stage === 'FIRST_BOOKSET_COMPLETED') {
+      const exitPaise = state.firstEntryTrade?.exitPaise ?? 50;
+      const exitDecimal = state.firstEntryTrade?.exitDecimal ?? 1.50;
+      return {
+        id: `${matchId}-FIRST_ENTRY_COMPLETED-${Date.now()}`,
+        signalType: 'FIRST_ENTRY_CANDIDATE',
+        matchId,
+        timestamp,
+        currentInnings,
+        currentOver,
+        ballNumber,
+        relevantOdds: {
+          measuredTeam,
+          decimalOdds,
+        },
+        ruleEvaluated: `First Entry: Completed via Bookset at ${exitPaise} paise (${exitDecimal.toFixed(2)})`,
+        status: 'PASS',
+        explanation: `FIRST ENTRY COMPLETED: Bookset reached and secured at ${exitPaise} paise (${exitDecimal.toFixed(2)}). Position safely closed.`,
+        metadata: {
+          completed: true,
+          exitPaise,
+          exitDecimal,
+        },
+      };
+    }
+
+    // 3. If Candidate confirmed and waiting for 85 paise, hold as PASS (Candidate Confirmed - Awaiting 85)
+    if (state.stage === 'CONFIRMED_PENDING_85') {
+      const currentPaiseVal = decimalOdds ? Math.round((decimalOdds - 1) * 100) : null;
+      return {
+        id: `${matchId}-CONFIRMED_PENDING_85-${Date.now()}`,
+        signalType: 'FIRST_ENTRY_CANDIDATE',
+        matchId,
+        timestamp,
+        currentInnings,
+        currentOver,
+        ballNumber,
+        relevantOdds: {
+          measuredTeam,
+          decimalOdds,
+          currentPaise: currentPaiseVal,
+        },
+        ruleEvaluated: 'First Entry Candidate: Confirmed by 2 boundaries, waiting for live odds >= 85 paise',
+        status: 'PASS',
+        explanation: `CANDIDATE CONFIRMED (AWAITING 85 PAISE): 2nd boundary confirmed entry. Current odds: ${currentPaiseVal !== null ? `${currentPaiseVal} paise` : `${decimalOdds?.toFixed(2)}`}. Holding candidate state; will enter automatically when odds cross >= 85 paise.`,
+        metadata: {
+          pending85: true,
+          currentPaise: currentPaiseVal,
+        },
+      };
+    }
+
+    // 4. If Booking team confirmed and waiting for 2nd boundary, hold as PASS
+    if (state.stage === 'CONFIRMED_BOOKING_TEAM') {
+      const currentPaiseVal = decimalOdds ? Math.round((decimalOdds - 1) * 100) : null;
+      return {
+        id: `${matchId}-CONFIRMED_BOOKING_TEAM-${Date.now()}`,
+        signalType: 'FIRST_ENTRY_CANDIDATE',
+        matchId,
+        timestamp,
+        currentInnings,
+        currentOver,
+        ballNumber,
+        relevantOdds: {
+          measuredTeam,
+          decimalOdds,
+          currentPaise: currentPaiseVal,
+        },
+        ruleEvaluated: 'Booking Team Confirmed: Awaiting 2nd boundary shift to confirm entry',
+        status: 'PASS',
+        explanation: `BOOKING TEAM CONFIRMED: ${state.bookingTeamName || measuredTeam} confirmed via 1st boundary. Awaiting 2nd boundary with batting in control to qualify entry.`,
+        metadata: {
+          bookingTeamConfirmed: true,
+          currentPaise: currentPaiseVal,
+        },
       };
     }
 
@@ -1327,6 +1485,9 @@ export class CricketStrategyEngine {
           // If current odds >= 85 paise: Enter immediately!
           state.stage = 'ACTIVE_FIRST_ENTRY';
           state.pending85 = false;
+          const matchTitle = match.matchTitlePrefix
+            ? `${match.team1.shortName} vs ${match.team2.shortName}`
+            : `${match.team1.name || match.team1.shortName} vs ${match.team2.name || match.team2.shortName}`;
           this.recordEntry(
             matchId,
             'FIRST_ENTRY',
@@ -1337,7 +1498,9 @@ export class CricketStrategyEngine {
             new Date(),
             state.bookingTeamName || controlInfo.battingTeamName,
             controlInfo.battingTeamName,
-            controlInfo.bowlingTeamName
+            controlInfo.bowlingTeamName,
+            matchTitle,
+            match.seriesName
           );
 
           const triggerSignal: StrategySignal = {
@@ -1364,6 +1527,12 @@ export class CricketStrategyEngine {
           // If current odds < 85 paise (e.g. 79 paise): Wait for it to cross 85 with batting in control!
           state.stage = 'CONFIRMED_PENDING_85';
           state.pending85 = true;
+          state.firstEntryPosition.status = 'CANDIDATE_DETECTED';
+          state.firstEntryPosition.entryOdds = decimalOdds ?? 1 + currentPaise / 100;
+          state.firstEntryPosition.entryOver = currentOver;
+          state.firstEntryPosition.entryInnings = currentInnings;
+          state.firstEntryPosition.entryWickets = currentWickets;
+          state.firstEntryPosition.entryTimestamp = new Date();
 
           const waitingKey = `${matchId}-ENTRY_CONFIRMED_WAITING_85-${currentInnings}-${currentOver}.${currentBalls}`;
           if (!state.processedEventKeys.has(waitingKey)) {
@@ -1405,6 +1574,9 @@ export class CricketStrategyEngine {
       state.stage = 'ACTIVE_FIRST_ENTRY';
       state.pending85 = false;
 
+      const matchTitle = match.matchTitlePrefix
+        ? `${match.team1.shortName} vs ${match.team2.shortName}`
+        : `${match.team1.name || match.team1.shortName} vs ${match.team2.name || match.team2.shortName}`;
       this.recordEntry(
         matchId,
         'FIRST_ENTRY',
@@ -1415,7 +1587,9 @@ export class CricketStrategyEngine {
         new Date(),
         state.bookingTeamName || controlInfo.battingTeamName,
         controlInfo.battingTeamName,
-        controlInfo.bowlingTeamName
+        controlInfo.bowlingTeamName,
+        matchTitle,
+        match.seriesName
       );
 
       const triggerSignal: StrategySignal = {

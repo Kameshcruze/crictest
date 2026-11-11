@@ -12,7 +12,7 @@ interface FilterBarProps {
   totalCount: number;
 }
 
-const FORMAT_OPTIONS = ['All', 'T20', 'ODI', 'Test', 'First Class'];
+const FORMAT_OPTIONS = ['All', 'T10', 'T20'];
 
 export const FilterBar: React.FC<FilterBarProps> = ({
   activeTab,

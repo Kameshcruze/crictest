@@ -299,11 +299,49 @@ export interface FetchResult {
   matchCount: number;
 }
 
+/**
+ * Strict Tournament Filter:
+ * Only allows matches belonging to:
+ * 1. WBBL - Women's Big Bash League 2026 (series key 2KG / ^2KG)
+ * 2. Abu Dhabi T10 2026 (series key 2IO / ^2IO)
+ */
+export function isAllowedTournament(match: {
+  seriesName?: string;
+  seriesKey?: string;
+  format?: string;
+  matchTitlePrefix?: string;
+  raw?: any;
+}): boolean {
+  const rawQ = String(match.seriesKey || match.raw?.q || '').replace(/^\^/, '').toUpperCase();
+  const sName = String(match.seriesName || match.raw?.sfullname || match.raw?.sname || '').toLowerCase();
+  const fName = String(match.matchTitlePrefix || match.raw?.fName || '').toLowerCase();
+  const fmt = String(match.format || match.raw?.fo || '').toLowerCase();
+  const combined = `${sName} ${fName} ${fmt}`.toLowerCase();
+
+  // 1. WBBL - Women's Big Bash League 2026
+  const isWbbl =
+    rawQ === '2KG' ||
+    combined.includes('wbbl') ||
+    combined.includes('big bash');
+
+  // 2. Abu Dhabi T10 2026
+  const isAbuDhabiT10 =
+    rawQ === '2IO' ||
+    (combined.includes('abu dhabi') && (combined.includes('t10') || combined.includes('t-10'))) ||
+    combined.includes('abudhabi t10');
+
+  return isWbbl || isAbuDhabiT10;
+}
+
 export function parseMatchesMap(rawData: RawApiResponse): ParsedCricketMatch[] {
   const matches: ParsedCricketMatch[] = [];
   for (const [id, rawMatch] of Object.entries(rawData)) {
     if (rawMatch && typeof rawMatch === 'object' && rawMatch.b && rawMatch.c) {
-      matches.push(transformCrexMatch(id, rawMatch));
+      const parsed = transformCrexMatch(id, rawMatch);
+      // Strictly restrict matches to WBBL 2026 and Abu Dhabi T10 2026 only
+      if (isAllowedTournament(parsed)) {
+        matches.push(parsed);
+      }
     }
   }
 
@@ -457,12 +495,16 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
   }
 
   if (freshUpdates) {
-    // Merge new updates into combined pool
+    // Merge new updates into combined pool only if allowed tournament
     for (const [id, m] of Object.entries(freshUpdates)) {
-      combinedMatchesPool[id] = {
-        ...(combinedMatchesPool[id] || {}),
-        ...(m as any),
-      };
+      if (isAllowedTournament({ raw: m })) {
+        combinedMatchesPool[id] = {
+          ...(combinedMatchesPool[id] || {}),
+          ...(m as any),
+        };
+      } else {
+        delete combinedMatchesPool[id];
+      }
     }
   }
 

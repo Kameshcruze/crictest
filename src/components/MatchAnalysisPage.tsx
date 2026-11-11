@@ -23,6 +23,7 @@ import {
   X,
   PlayCircle,
   RotateCcw,
+  Database,
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState, OddsTick } from '../types/odds';
@@ -37,6 +38,7 @@ import {
   syncStrategySignalToSupabase,
   syncTradePositionToSupabase,
   loadMatchStrategyFromSupabase,
+  syncStrategyTradeToDb,
 } from '../services/supabaseSyncService';
 
 interface MatchAnalysisPageProps {
@@ -185,11 +187,47 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     return strategyEngine.getState(matchId);
   }, [matchId, evaluationTick]);
 
-  // Requirement 6: Load persisted trade positions and historical signals from Supabase on mount
+  // Requirement 6: Load persisted trade positions, historical signals, and dedicated strategy trades from Supabase on mount
   useEffect(() => {
     if (!matchId) return;
-    loadMatchStrategyFromSupabase(matchId).then(({ positions, signals }) => {
+    loadMatchStrategyFromSupabase(matchId).then(({ positions, signals, trades }) => {
       const state = strategyEngine.getState(matchId);
+      
+      // Rehydrate persisted trades from Supabase strategy_trades table
+      if (trades && trades.length > 0) {
+        const firstTrade = trades.find((t) => t.entryType === 'FIRST_ENTRY');
+        if (firstTrade) {
+          state.firstEntryTrade = firstTrade;
+          state.bookingTeamName = firstTrade.bookingTeam;
+          if (firstTrade.status === 'ACTIVE') {
+            state.stage = 'ACTIVE_FIRST_ENTRY';
+            state.firstEntryPosition.status = 'RECORDED_ENTRY';
+            state.firstEntryPosition.entryOdds = firstTrade.entryDecimal;
+            state.firstEntryPosition.entryOver = firstTrade.entryOver;
+            state.firstEntryPosition.entryInnings = firstTrade.innings;
+            state.firstEntryPosition.entryWickets = firstTrade.entryWickets;
+            state.firstEntryPosition.entryTimestamp = firstTrade.entryTime;
+          } else if (firstTrade.status === 'BOOKSET_COMPLETED') {
+            state.stage = 'FIRST_BOOKSET_COMPLETED';
+            state.firstEntryPosition.status = 'RECORDED_EXIT';
+            state.firstEntryPosition.exitOdds = firstTrade.exitDecimal;
+            state.firstEntryPosition.exitOver = firstTrade.exitOver;
+            state.firstEntryPosition.exitTimestamp = firstTrade.exitTime;
+          }
+        }
+        const secondTrade = trades.find((t) => t.entryType === 'SECOND_ENTRY');
+        if (secondTrade) {
+          state.secondEntryTrade = secondTrade;
+          if (secondTrade.status === 'ACTIVE') {
+            state.stage = 'ACTIVE_SECOND_ENTRY';
+            state.secondEntryPosition.status = 'RECORDED_ENTRY';
+          } else if (secondTrade.status === 'BOOKSET_COMPLETED') {
+            state.stage = 'FULL_BOOKSET_COMPLETED';
+            state.secondEntryPosition.status = 'RECORDED_EXIT';
+          }
+        }
+      }
+
       positions.forEach((pos) => {
         if (pos.positionType === 'FIRST_ENTRY' && pos.status !== 'NONE') {
           state.firstEntryPosition = { ...state.firstEntryPosition, ...pos };
@@ -214,6 +252,16 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
         syncStrategySignalToSupabase(sig).catch(() => {});
       });
     }
+
+    // Ensure active trade is saved in DB if newly created
+    const state = strategyEngine.getState(matchId);
+    if (state.firstEntryTrade && (state.stage === 'ACTIVE_FIRST_ENTRY' || state.stage === 'FIRST_BOOKSET_COMPLETED')) {
+      syncStrategyTradeToDb(state.firstEntryTrade).catch(() => {});
+    }
+    if (state.secondEntryTrade && (state.stage === 'ACTIVE_SECOND_ENTRY' || state.stage === 'FULL_BOOKSET_COMPLETED')) {
+      syncStrategyTradeToDb(state.secondEntryTrade).catch(() => {});
+    }
+
     setEvaluationTick((prev) => prev + 1);
   }, [
     match?.id,
@@ -305,15 +353,31 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     const currentInnings = match.team2Score ? 2 : 1;
     const currentOver = activeScore ? activeScore.overs : 0;
     const currentWickets = activeScore ? activeScore.wickets : 0;
+    const matchTitle = match.matchTitlePrefix
+      ? `${match.team1.shortName} vs ${match.team2.shortName}`
+      : `${match.team1.name || match.team1.shortName} vs ${match.team2.name || match.team2.shortName}`;
+    const battingName = currentInnings === 2 ? match.team2.shortName || match.team2.name : match.team1.shortName || match.team1.name;
+    const bowlingName = currentInnings === 2 ? match.team1.shortName || match.team1.name : match.team2.shortName || match.team2.name;
+
     const pos = strategyEngine.recordEntry(
       matchId,
       'FIRST_ENTRY',
       bookmaker.decimalBack,
       currentInnings,
       currentOver,
-      currentWickets
+      currentWickets,
+      new Date(),
+      strategyState.bookingTeamName || battingName,
+      battingName,
+      bowlingName,
+      matchTitle,
+      match.seriesName
     );
     syncTradePositionToSupabase(pos).catch(() => {});
+    const state = strategyEngine.getState(matchId);
+    if (state.firstEntryTrade) {
+      syncStrategyTradeToDb(state.firstEntryTrade).catch(() => {});
+    }
     setEvaluationTick((prev) => prev + 1);
   };
 
@@ -322,6 +386,10 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     const currentOver = activeScore ? activeScore.overs : 0;
     const pos = strategyEngine.recordExit(matchId, 'FIRST_ENTRY', bookmaker.decimalLay, currentOver);
     syncTradePositionToSupabase(pos).catch(() => {});
+    const state = strategyEngine.getState(matchId);
+    if (state.firstEntryTrade) {
+      syncStrategyTradeToDb(state.firstEntryTrade).catch(() => {});
+    }
     setEvaluationTick((prev) => prev + 1);
   };
 
@@ -330,15 +398,31 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     const currentInnings = match.team2Score ? 2 : 1;
     const currentOver = activeScore ? activeScore.overs : 0;
     const currentWickets = activeScore ? activeScore.wickets : 0;
+    const matchTitle = match.matchTitlePrefix
+      ? `${match.team1.shortName} vs ${match.team2.shortName}`
+      : `${match.team1.name || match.team1.shortName} vs ${match.team2.name || match.team2.shortName}`;
+    const battingName = currentInnings === 2 ? match.team2.shortName || match.team2.name : match.team1.shortName || match.team1.name;
+    const bowlingName = currentInnings === 2 ? match.team1.shortName || match.team1.name : match.team2.shortName || match.team2.name;
+
     const pos = strategyEngine.recordEntry(
       matchId,
       'SECOND_ENTRY',
       opposingOdds,
       currentInnings,
       currentOver,
-      currentWickets
+      currentWickets,
+      new Date(),
+      strategyState.bookingTeamName || battingName,
+      battingName,
+      bowlingName,
+      matchTitle,
+      match.seriesName
     );
     syncTradePositionToSupabase(pos).catch(() => {});
+    const state = strategyEngine.getState(matchId);
+    if (state.secondEntryTrade) {
+      syncStrategyTradeToDb(state.secondEntryTrade).catch(() => {});
+    }
     setEvaluationTick((prev) => prev + 1);
   };
 
@@ -952,17 +1036,41 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {renderStatusBadge(firstEntrySignal?.status)}
+                    {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
+                    strategyState.stage === 'ACTIVE_FIRST_ENTRY' ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-950/90 text-emerald-300 border border-emerald-600 shadow-sm shadow-emerald-950">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        <span>ENTERED (HELD)</span>
+                      </span>
+                    ) : strategyState.stage === 'FIRST_BOOKSET_COMPLETED' ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-950/90 text-emerald-300 border border-emerald-600">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        <span>BOOKSET SECURED</span>
+                      </span>
+                    ) : strategyState.stage === 'CONFIRMED_PENDING_85' ||
+                      strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED' ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-950/90 text-blue-300 border border-blue-600">
+                        <Clock className="w-3 h-3 text-blue-400" />
+                        <span>CANDIDATE (HELD)</span>
+                      </span>
+                    ) : (
+                      renderStatusBadge(firstEntrySignal?.status)
+                    )}
                     <span
                       className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                        strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
-                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-600'
-                          : strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED'
+                        strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
+                        strategyState.stage === 'ACTIVE_FIRST_ENTRY'
+                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-600 font-bold'
+                          : strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED' ||
+                            strategyState.stage === 'CONFIRMED_PENDING_85'
                           ? 'bg-blue-950 text-blue-300 border border-blue-600'
                           : 'bg-slate-800 text-slate-400'
                       }`}
                     >
-                      {strategyState.firstEntryPosition.status}
+                      {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
+                      strategyState.stage === 'ACTIVE_FIRST_ENTRY'
+                        ? 'RECORDED_ENTRY'
+                        : strategyState.firstEntryPosition.status}
                     </span>
                   </div>
                 </div>
@@ -986,19 +1094,38 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   </div>
                   <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
                     <span className="text-slate-400 font-semibold">Engine Evaluation: </span>
-                    {firstEntrySignal?.explanation || 'Awaiting tick evaluation'}
+                    {strategyState.stage === 'ACTIVE_FIRST_ENTRY' ||
+                    strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
+                      ? `FIRST ENTRY ACTIVE & HELD: Position entered at ${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.85) - 1) * 100)} paise (${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds?.toFixed(2) ?? '1.85'}). Holding until Bookset Target (45-55 paise). Zero flickering.`
+                      : strategyState.stage === 'FIRST_BOOKSET_COMPLETED'
+                      ? `FIRST ENTRY COMPLETED: Secured via Bookset at ${strategyState.firstEntryTrade?.exitPaise ?? 50} paise. Position closed.`
+                      : strategyState.stage === 'CONFIRMED_PENDING_85'
+                      ? `CANDIDATE CONFIRMED (AWAITING 85 PAISE): 2nd boundary confirmed entry. Waiting for odds >= 85 paise to enter.`
+                      : firstEntrySignal?.explanation || 'Awaiting tick evaluation'}
                   </div>
                 </div>
               </div>
 
               {/* Action: Distinguish Candidate vs Recorded Trade */}
               <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-500">
-                  {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
-                    ? `Entered @ ${strategyState.firstEntryPosition.entryOdds} (${strategyState.firstEntryPosition.entryWickets} wkt)`
-                    : 'Candidate signal only (trade not recorded)'}
-                </span>
-                {strategyState.firstEntryPosition.status !== 'RECORDED_ENTRY' ? (
+                <div className="flex flex-col">
+                  <span className="text-[11px] text-slate-400 font-medium">
+                    {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
+                    strategyState.stage === 'ACTIVE_FIRST_ENTRY'
+                      ? `Entered @ ${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds} (${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.85) - 1) * 100)}p) • ${strategyState.firstEntryTrade?.entryWickets ?? strategyState.firstEntryPosition.entryWickets ?? 0} wkts`
+                      : strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED'
+                      ? 'Candidate signal qualified (awaiting 85p or manual entry)'
+                      : 'Candidate signal only (trade not recorded)'}
+                  </span>
+                  <span className="text-[10px] text-slate-500 flex items-center gap-1 mt-0.5">
+                    <Database className="w-2.5 h-2.5 text-emerald-400" />
+                    <span>
+                      {strategyState.firstEntryTrade ? 'Saved in Supabase strategy_trades' : 'Database Ready'}
+                    </span>
+                  </span>
+                </div>
+                {strategyState.firstEntryPosition.status !== 'RECORDED_ENTRY' &&
+                strategyState.stage !== 'ACTIVE_FIRST_ENTRY' ? (
                   <button
                     type="button"
                     onClick={handleRecordFirstEntry}
@@ -1008,7 +1135,10 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     Record 1st Entry
                   </button>
                 ) : (
-                  <span className="text-[11px] font-semibold text-emerald-400">Active Position</span>
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-800/80">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Active & Held</span>
+                  </span>
                 )}
               </div>
             </div>
