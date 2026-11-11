@@ -6,6 +6,8 @@ import {
   VolumeX,
   Send,
   Target,
+  ExternalLink,
+  Settings,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -114,22 +116,31 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </button>
 
-            {/* Telegram Bot Integration Button */}
+            {/* Direct Telegram Link Button */}
+            <a
+              href="https://t.me/my_cricket_tracker_bot"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow-sm shadow-blue-900/40 transition-colors"
+              title="Open Telegram Bot (@my_cricket_tracker_bot)"
+            >
+              <Send className="w-3.5 h-3.5 -rotate-12" />
+              <span>Telegram</span>
+              <ExternalLink className="w-3 h-3 opacity-70" />
+            </a>
+
+            {/* Telegram Configuration Settings */}
             <button
               type="button"
               onClick={onOpenTelegramModal}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm ${
+              className={`p-2 rounded-lg border transition-colors ${
                 isTelegramActive
-                  ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/40 ring-1 ring-blue-400/50'
-                  : 'bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-700'
+                  ? 'text-blue-300 bg-slate-800 border-blue-500/40 hover:bg-slate-700'
+                  : 'text-slate-400 bg-slate-800 border-slate-700 hover:text-slate-200'
               }`}
-              title="Connect Telegram Bot to broadcast live cricket updates to your group"
+              title="Configure Telegram Bot alerts & settings"
             >
-              <Send className="w-3.5 h-3.5 -rotate-12" />
-              <span>Telegram Bot</span>
-              {isTelegramActive && (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
-              )}
+              <Settings className="w-4 h-4" />
             </button>
           </div>
         </div>

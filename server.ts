@@ -9,16 +9,27 @@ dotenv.config();
 
 const { Pool } = pg;
 
-// Local PostgreSQL connection pool
-const DATABASE_URL =
-  process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/leadhunt';
-
-export const dbPool = new Pool({
-  connectionString: DATABASE_URL,
+// Local PostgreSQL connection pool configuration
+// Supports standard discrete variables (PGPASSWORD, PGUSER, etc.) or full DATABASE_URL
+const poolConfig: pg.PoolConfig = {
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 3000,
-});
+  connectionTimeoutMillis: 5000,
+};
+
+if (process.env.PGPASSWORD) {
+  poolConfig.user = process.env.PGUSER || 'postgres';
+  poolConfig.password = process.env.PGPASSWORD;
+  poolConfig.host = process.env.PGHOST || 'localhost';
+  poolConfig.port = Number(process.env.PGPORT) || 5432;
+  poolConfig.database = process.env.PGDATABASE || 'leadhunt';
+} else {
+  poolConfig.connectionString =
+    process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/leadhunt';
+}
+
+export const dbPool = new Pool(poolConfig);
+const DATABASE_URL = poolConfig.connectionString || `postgresql://${poolConfig.user || 'postgres'}:****@${poolConfig.host || 'localhost'}:${poolConfig.port || 5432}/${poolConfig.database || 'leadhunt'}`;
 
 // Database connection verification test on server startup
 async function testDbConnection() {

@@ -704,12 +704,22 @@ export default function App() {
             <span>Real-time updates every 1 second</span>
           </div>
           <div className="flex items-center gap-3">
+            <a
+              href="https://t.me/my_cricket_tracker_bot"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1 font-semibold"
+            >
+              <Send className="w-3 h-3 -rotate-12" />
+              <span>@my_cricket_tracker_bot</span>
+            </a>
+            <span>·</span>
             <button
               type="button"
-              onClick={() => setIsScriptModalOpen(true)}
+              onClick={() => setIsTelegramModalOpen(true)}
               className="hover:text-slate-300 transition-colors"
             >
-              Online Automation Scripts
+              Telegram Settings
             </button>
             <span>·</span>
             <button
@@ -718,15 +728,6 @@ export default function App() {
               className="hover:text-slate-300 transition-colors"
             >
               API Raw Inspector
-            </button>
-            <span>·</span>
-            <button
-              type="button"
-              onClick={() => setIsTelegramModalOpen(true)}
-              className="text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1 font-semibold"
-            >
-              <Send className="w-3 h-3 -rotate-12" />
-              <span>Telegram Bot</span>
             </button>
           </div>
         </div>
