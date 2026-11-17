@@ -4,8 +4,18 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { parseBookmakerRate, parseSessionMarkets } from './src/services/oddsApi';
+import { resolveTeam, resolveSeries, resolveVenue } from './src/data/cricketMapping';
 
 dotenv.config();
+
+/**
+ * Series Filter Configuration (Optional)
+ * Leave empty [] to track, save 1-second timeline ticks, and serve EVERY live match the server sees.
+ * To restrict to specific series, add names or keys here, e.g.:
+ *   const ALLOWED_SERIES_FILTER: string[] = ['WBBL', 'Big Bash', 'Abu Dhabi T10', '2KG', '2IO'];
+ */
+const ALLOWED_SERIES_FILTER: string[] = [];
 
 const { Pool } = pg;
 
@@ -31,43 +41,129 @@ if (process.env.PGPASSWORD) {
 export const dbPool = new Pool(poolConfig);
 const DATABASE_URL = poolConfig.connectionString || `postgresql://${poolConfig.user || 'postgres'}:****@${poolConfig.host || 'localhost'}:${poolConfig.port || 5432}/${poolConfig.database || 'leadhunt'}`;
 
-// Database connection verification test on server startup
-async function testDbConnection() {
+// Track timeline state across seconds and server restarts
+const finalizedTimelineMatches = new Set<string>();
+const startedTimelineMatches = new Set<string>();
+
+async function ensureTimelineSchema(client: pg.PoolClient) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS match_timeline_ticks (
+      id BIGSERIAL PRIMARY KEY,
+      match_id VARCHAR(64) NOT NULL,
+      series_name VARCHAR(256),
+      innings INT NOT NULL DEFAULT 1,
+      overs NUMERIC(5, 1) NOT NULL DEFAULT 0.0,
+      legal_ball_count INT NOT NULL DEFAULT 0,
+      runs INT NOT NULL DEFAULT 0,
+      wickets INT NOT NULL DEFAULT 0,
+      batting_team VARCHAR(128),
+      bowling_team VARCHAR(128),
+      favorite_team VARCHAR(128),
+      control VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+      back_rate NUMERIC(6, 2),
+      lay_rate NUMERIC(6, 2),
+      decimal_back NUMERIC(6, 2),
+      decimal_lay NUMERIC(6, 2),
+      control_team_odds NUMERIC(6, 2),
+      raw_rate_string VARCHAR(64),
+      session_data JSONB,
+      match_status VARCHAR(32) NOT NULL DEFAULT 'live',
+      result_text TEXT,
+      is_new_ball BOOLEAN NOT NULL DEFAULT false,
+      runs_on_ball INT NOT NULL DEFAULT 0,
+      score_fetched_at TIMESTAMPTZ,
+      odds_fetched_at TIMESTAMPTZ,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await client.query(`ALTER TABLE match_timeline_ticks ADD COLUMN IF NOT EXISTS score_fetched_at TIMESTAMPTZ;`);
+  await client.query(`ALTER TABLE match_timeline_ticks ADD COLUMN IF NOT EXISTS odds_fetched_at TIMESTAMPTZ;`);
+
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_match_timeline_ticks_match_recorded
+      ON match_timeline_ticks(match_id, recorded_at);
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_match_timeline_ticks_match_ball
+      ON match_timeline_ticks(match_id, legal_ball_count);
+  `);
+
+  // Seed sets from existing timeline rows so restarts don't duplicate completed rows
+  const completedRes = await client.query(
+    `SELECT DISTINCT match_id FROM match_timeline_ticks WHERE match_status = 'completed'`
+  );
+  for (const row of completedRes.rows) {
+    if (row.match_id) finalizedTimelineMatches.add(row.match_id);
+  }
+  const startedRes = await client.query(`SELECT DISTINCT match_id FROM match_timeline_ticks`);
+  for (const row of startedRes.rows) {
+    if (row.match_id) startedTimelineMatches.add(row.match_id);
+  }
+}
+
+let isDbAvailable = false;
+let dbSchemaReady = false;
+let hasLoggedDbOffline = false;
+
+function isDbConnectionError(err: any): boolean {
+  const code = String(err?.code || '');
+  const msg = String(err?.message || '');
+  return (
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    code === '57P01' ||
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('Connection terminated unexpectedly')
+  );
+}
+
+// Database connection verification test & schema initialization on server startup
+async function testDbConnection(isRetry = false) {
   try {
     const client = await dbPool.connect();
     const res = await client.query('SELECT NOW() as now, current_database() as db_name');
 
-    // Clean up any historical matches in database outside WBBL 2026 and Abu Dhabi T10 2026
-    await client.query(`
-      DELETE FROM matches
-      WHERE NOT (
-        series_key IN ('2KG', '^2KG', '2IO', '^2IO')
-        OR LOWER(COALESCE(series_name, '')) LIKE '%wbbl%'
-        OR LOWER(COALESCE(series_name, '')) LIKE '%big bash%'
-        OR (LOWER(COALESCE(series_name, '')) LIKE '%abu dhabi%' AND LOWER(COALESCE(series_name, '')) LIKE '%t10%')
-      )
-    `).catch(() => {});
+    if (!dbSchemaReady) {
+      await ensureTimelineSchema(client);
+      dbSchemaReady = true;
+    }
 
     client.release();
+    isDbAvailable = true;
+    hasLoggedDbOffline = false;
+
     const safeUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
     console.log(`\n======================================================`);
-    console.log(`[PostgreSQL] Connection SUCCESSFUL!`);
+    console.log(`[PostgreSQL] ${isRetry ? 'Reconnection' : 'Connection'} SUCCESSFUL!`);
     console.log(`[PostgreSQL] Connected to: "${res.rows[0].db_name}" (${safeUrl})`);
-    console.log(`[PostgreSQL] Filter Active: WBBL 2026 & Abu Dhabi T10 2026`);
+    console.log(`[PostgreSQL] Series Filter: ${ALLOWED_SERIES_FILTER.length === 0 ? 'ALL LIVE MATCHES' : ALLOWED_SERIES_FILTER.join(', ')}`);
+    console.log(`[PostgreSQL] Timeline Table: match_timeline_ticks READY`);
     console.log(`[PostgreSQL] Server Time: ${res.rows[0].now}`);
     console.log(`======================================================\n`);
   } catch (err: any) {
-    const safeUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
-    console.warn(`\n======================================================`);
-    console.warn(`[PostgreSQL] Connection Warning: Could not connect to local PostgreSQL`);
-    console.warn(`Target URL: ${safeUrl}`);
-    console.warn(`Reason: ${err.message}`);
-    console.warn(`Tip: Ensure PostgreSQL service is running on localhost:5432 and database "leadhunt" exists.`);
-    console.warn(`The application will continue running and auto-retry on incoming requests.`);
-    console.warn(`======================================================\n`);
+    isDbAvailable = false;
+    if (!hasLoggedDbOffline) {
+      hasLoggedDbOffline = true;
+      const safeUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
+      console.warn(`\n======================================================`);
+      console.warn(`[PostgreSQL] Connection Warning: Could not connect to local PostgreSQL`);
+      console.warn(`Target URL: ${safeUrl}`);
+      console.warn(`Reason: ${err.message}`);
+      console.warn(`Tip: Ensure PostgreSQL service is running on localhost:5432 and database "leadhunt" exists.`);
+      console.warn(`The application will continue running and auto-retry every 15s.`);
+      console.warn(`======================================================\n`);
+    }
   }
 }
-testDbConnection();
+testDbConnection(false);
+setInterval(() => {
+  if (!isDbAvailable) {
+    void testDbConnection(true);
+  }
+}, 15000);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -349,8 +445,10 @@ function parseScore(raw?: string) {
       runs: 0,
       wickets: 0,
       overs: '0',
+      oversDecimal: 0,
       completedOvers: 0,
       ballsInOver: 0,
+      legalBallCount: 0,
       isOverComplete: false,
       runRate: 0,
     };
@@ -361,8 +459,10 @@ function parseScore(raw?: string) {
       runs: 0,
       wickets: 0,
       overs: '0',
+      oversDecimal: 0,
       completedOvers: 0,
       ballsInOver: 0,
+      legalBallCount: 0,
       isOverComplete: false,
       runRate: 0,
     };
@@ -370,6 +470,7 @@ function parseScore(raw?: string) {
   const runs = parseInt(match[1], 10) || 0;
   const wickets = match[2] !== undefined ? parseInt(match[2], 10) : 0;
   const oversStr = match[3] || '0';
+  const oversDecimal = parseFloat(oversStr) || 0;
   const parts = oversStr.split('.');
   const completedOvers = parseInt(parts[0], 10) || 0;
   const ballsInOver = parts[1] !== undefined ? parseInt(parts[1], 10) : 0;
@@ -382,8 +483,10 @@ function parseScore(raw?: string) {
     runs,
     wickets,
     overs: oversStr,
+    oversDecimal,
     completedOvers,
     ballsInOver,
+    legalBallCount: totalBalls,
     isOverComplete,
     runRate,
   };
@@ -391,16 +494,18 @@ function parseScore(raw?: string) {
 
 let isGoscorerRunning = false;
 let isCrexRunning = false;
+let isLiveOddsRunning = false;
+let isTimelineLoopRunning = false;
 
 /**
- * Strict Tournament Filter:
- * Only permits:
- * 1. WBBL - Women's Big Bash League 2026 (series key 2KG / ^2KG)
- * 2. Abu Dhabi T10 2026 (series key 2IO / ^2IO)
- * All other matches are excluded from memory, UI, and database storage.
+ * Configurable Series Filter:
+ * If ALLOWED_SERIES_FILTER is empty [], permits EVERY live match the server sees.
+ * Otherwise only permits matches whose series key or name matches an entry in ALLOWED_SERIES_FILTER.
  */
 function isAllowedTournament(item: any, mapping?: { series?: any[] }): boolean {
   if (!item) return false;
+  if (ALLOWED_SERIES_FILTER.length === 0) return true;
+
   const rawQ = String(item.q || item.seriesKey || '').replace(/^\^/, '').toUpperCase();
   const seriesName = String(item.sfullname || item.sname || item.seriesName || '').toLowerCase();
   const fName = String(item.fName || item.matchTitlePrefix || '').toLowerCase();
@@ -419,21 +524,90 @@ function isAllowedTournament(item: any, mapping?: { series?: any[] }): boolean {
     }
   }
 
-  const combined = `${seriesName} ${mappedSeriesName} ${fName} ${fo}`.toLowerCase();
+  const combined = `${rawQ.toLowerCase()} ${seriesName} ${mappedSeriesName} ${fName} ${fo}`.toLowerCase();
+  return ALLOWED_SERIES_FILTER.some((entry) => {
+    const norm = entry.trim().toLowerCase();
+    return norm.length > 0 && combined.includes(norm);
+  });
+}
 
-  // 1. WBBL - Women's Big Bash League 2026
-  const isWbbl =
-    rawQ === '2KG' ||
-    combined.includes('wbbl') ||
-    combined.includes('big bash');
+// Per-match fetch timestamps, ball/run snapshots, and missed tick counters
+const scoreFetchedAtByMatch = new Map<string, Date>();
+const oddsFetchedAtByMatch = new Map<string, Date>();
+const missedTicksByMatch: Record<string, number> = {};
+const lastTimelineSnapshot: Record<
+  string,
+  { innings: number; legalBallCount: number; runs: number }
+> = {};
+const lastLatestStateSyncAt = new Map<string, number>();
 
-  // 2. Abu Dhabi T10 2026
-  const isAbuDhabiT10 =
-    rawQ === '2IO' ||
-    (combined.includes('abu dhabi') && (combined.includes('t10') || combined.includes('t-10'))) ||
-    combined.includes('abudhabi t10');
+function incrementMissedTick(matchId: string) {
+  missedTicksByMatch[matchId] = (missedTicksByMatch[matchId] || 0) + 1;
+}
 
-  return isWbbl || isAbuDhabiT10;
+function resolveSeriesNameFromMapping(item: any): string {
+  const rawQ = String(item.q || item.seriesKey || '').replace(/^\^/, '');
+  if (item.sfullname) return String(item.sfullname);
+  if (item.sname) return String(item.sname);
+  if (item.seriesName) return String(item.seriesName);
+  const seriesArr = matchStore.mapping?.series;
+  if (Array.isArray(seriesArr)) {
+    const found = seriesArr.find(
+      (s: any) =>
+        s.f_key === rawQ ||
+        s.f_key === item.q ||
+        String(s.f_key).toUpperCase() === rawQ.toUpperCase()
+    );
+    if (found?.n || found?.sn) return String(found.n || found.sn);
+  }
+  return resolveSeries(rawQ || item.q) || rawQ || 'Cricket';
+}
+
+function resolveFullTeamInfo(key?: string, fallbackName?: string, fallbackShort?: string) {
+  const teamsArr = matchStore.mapping?.teams;
+  const cleanKey = key ? String(key).replace(/^\^/, '') : '';
+  const mappedStatic = resolveTeam(key);
+  let mappedDynamic: any = null;
+  if (Array.isArray(teamsArr) && key) {
+    mappedDynamic = teamsArr.find(
+      (t: any) => t.f_key === key || t.f_key === cleanKey || t.key === key
+    );
+  }
+  const name =
+    (fallbackName && fallbackName.trim() && fallbackName !== key ? fallbackName.trim() : '') ||
+    mappedDynamic?.n ||
+    (mappedStatic.name !== mappedStatic.key ? mappedStatic.name : '') ||
+    fallbackShort ||
+    cleanKey ||
+    'Team';
+  const shortName =
+    fallbackShort ||
+    mappedDynamic?.sn ||
+    mappedStatic.shortName ||
+    name.slice(0, 3).toUpperCase();
+  const color = mappedDynamic?.uc || mappedStatic.color || '#2563eb';
+  const darkColor = mappedDynamic?.dc || mappedStatic.darkColor || '#1e3a8a';
+  return { key: key || cleanKey || shortName, name, shortName, color, darkColor };
+}
+
+function isMatchFinishedItem(item: any): boolean {
+  if (!item) return false;
+  const resText = String(item.res || item.soResult || '').toLowerCase();
+  return (
+    Boolean(item.finishTime) ||
+    item.d === 2 ||
+    resText.includes('won by') ||
+    /\bwon\b/.test(resText) ||
+    resText.includes('drawn') ||
+    resText.includes('tied') ||
+    resText.includes('abandoned') ||
+    resText.includes('no result')
+  );
+}
+
+function isMatchLiveItem(item: any): boolean {
+  if (!item || isMatchFinishedItem(item)) return false;
+  return Boolean(item.j || item.k || item.d === 1 || item.d === 4);
 }
 
 /**
@@ -441,7 +615,7 @@ function isAllowedTournament(item: any, mapping?: { series?: any[] }): boolean {
  * wicket alerts, and match conclusions across all data sources (Goscorer & Crex pool).
  */
 async function processMatchUpdate(id: string, item: any): Promise<boolean> {
-  // Enforce tournament filter: exclude anything outside WBBL 2026 and Abu Dhabi T10 2026
+  // Enforce series filter if configured
   if (!isAllowedTournament(item, matchStore.mapping)) {
     if (matchStore.matches[id]) {
       delete matchStore.matches[id];
@@ -705,6 +879,7 @@ async function syncGoscorerApi(countryCode = 'IN') {
 
     if (res.ok) {
       const data = await res.json();
+      const fetchedAt = new Date();
       let hasChange = false;
 
       for (const [id, m] of Object.entries(data)) {
@@ -715,15 +890,18 @@ async function syncGoscorerApi(countryCode = 'IN') {
           }
           continue;
         }
+        scoreFetchedAtByMatch.set(id, fetchedAt);
         const changed = await processMatchUpdate(id, m);
         if (changed) hasChange = true;
       }
 
-      // Prune any existing matches that are outside WBBL 2026 and Abu Dhabi T10 2026
-      for (const [id, m] of Object.entries(matchStore.matches)) {
-        if (!isAllowedTournament(m, matchStore.mapping)) {
-          delete matchStore.matches[id];
-          hasChange = true;
+      // Prune any existing matches if a series filter is active
+      if (ALLOWED_SERIES_FILTER.length > 0) {
+        for (const [id, m] of Object.entries(matchStore.matches)) {
+          if (!isAllowedTournament(m, matchStore.mapping)) {
+            delete matchStore.matches[id];
+            hasChange = true;
+          }
         }
       }
 
@@ -762,9 +940,19 @@ async function syncGoscorerApi(countryCode = 'IN') {
           timestamp: new Date().toISOString(),
         });
       }
+    } else {
+      const liveIds = Object.keys(matchStore.matches).filter((id) => isMatchLiveItem(matchStore.matches[id]));
+      for (const id of liveIds) incrementMissedTick(id);
+      console.warn(
+        `[Goscorer Fetch Error] status=${res.status} active_live_matches=${liveIds.join(',') || 'none'}`
+      );
     }
-  } catch {
-    // Non-blocking
+  } catch (err: any) {
+    const liveIds = Object.keys(matchStore.matches).filter((id) => isMatchLiveItem(matchStore.matches[id]));
+    for (const id of liveIds) incrementMissedTick(id);
+    console.warn(
+      `[Goscorer Fetch Error] error=${err?.message || err} active_live_matches=${liveIds.join(',') || 'none'}`
+    );
   } finally {
     isGoscorerRunning = false;
   }
@@ -815,6 +1003,7 @@ async function syncCrexPool() {
           }
 
           if (parsed.desktopTopMatchesRaw) {
+            const crexFetchedAt = new Date();
             for (const [id, m] of Object.entries(parsed.desktopTopMatchesRaw)) {
               if (!isAllowedTournament(m, matchStore.mapping)) {
                 if (matchStore.matches[id]) {
@@ -823,16 +1012,19 @@ async function syncCrexPool() {
                 }
                 continue;
               }
+              scoreFetchedAtByMatch.set(id, crexFetchedAt);
               const changed = await processMatchUpdate(id, m);
               if (changed) hasChange = true;
             }
           }
 
-          // Prune non-allowed tournament matches from memory immediately
-          for (const [mId, mObj] of Object.entries(matchStore.matches)) {
-            if (!isAllowedTournament(mObj, matchStore.mapping)) {
-              delete matchStore.matches[mId];
-              hasChange = true;
+          // Prune non-allowed matches if series filter is active
+          if (ALLOWED_SERIES_FILTER.length > 0) {
+            for (const [mId, mObj] of Object.entries(matchStore.matches)) {
+              if (!isAllowedTournament(mObj, matchStore.mapping)) {
+                delete matchStore.matches[mId];
+                hasChange = true;
+              }
             }
           }
           break;
@@ -849,68 +1041,570 @@ async function syncCrexPool() {
         timestamp: new Date().toISOString(),
       });
     }
-  } catch {
-    // Non-blocking
+  } catch (err: any) {
+    const liveIds = Object.keys(matchStore.matches).filter((id) => isMatchLiveItem(matchStore.matches[id]));
+    for (const id of liveIds) incrementMissedTick(id);
+    console.warn(
+      `[Crex Pool Fetch Error] error=${err?.message || err} active_live_matches=${liveIds.join(',') || 'none'}`
+    );
   } finally {
     isCrexRunning = false;
   }
 }
 
-// 3. Ultra-fast Live Match Score Sync directly from getSV3 (ball-by-ball, ~1.5s)
+// 3. Ultra-fast Live Match Score & Odds Sync directly from getSV3 (ball-by-ball, 1s)
 async function syncLiveMatchScores() {
-  const liveMatchIds = Object.keys(matchStore.matches).filter((id) => {
-    const m = matchStore.matches[id];
-    return m && !m.finishTime && (m.j || m.k || m.d === 1 || m.d === 4);
-  });
+  if (isLiveOddsRunning) return;
+  isLiveOddsRunning = true;
 
-  if (liveMatchIds.length === 0) return;
+  try {
+    const liveMatchIds = Object.keys(matchStore.matches).filter((id) =>
+      isMatchLiveItem(matchStore.matches[id])
+    );
 
-  await Promise.allSettled(
-    liveMatchIds.slice(0, 10).map(async (key) => {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1800);
-        const res = await fetch(`https://api.goscorer.com/api/v3/getSV3?key=${encodeURIComponent(key)}&_t=${Date.now()}`, {
-          headers: {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            Pragma: 'no-cache',
-          },
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          const data = await res.json();
-          serverOddsCache.set(key, { data, timestamp: Date.now() });
-          if (data && matchStore.matches[key]) {
-            const existing = matchStore.matches[key];
-            let changed = false;
-            if (data.j && existing.j !== data.j) {
-              existing.j = data.j;
-              changed = true;
+    if (liveMatchIds.length === 0) return;
+
+    await Promise.allSettled(
+      liveMatchIds.slice(0, 20).map(async (key) => {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 1800);
+          const res = await fetch(
+            `https://api.goscorer.com/api/v3/getSV3?key=${encodeURIComponent(key)}&_t=${Date.now()}`,
+            {
+              headers: {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                Pragma: 'no-cache',
+              },
+              signal: controller.signal,
             }
-            if (data.k && existing.k !== data.k) {
-              existing.k = data.k;
-              changed = true;
+          );
+          clearTimeout(timeout);
+          if (res.ok) {
+            const data = await res.json();
+            const now = new Date();
+            serverOddsCache.set(key, { data, timestamp: now.getTime() });
+            oddsFetchedAtByMatch.set(key, now);
+
+            if (data && matchStore.matches[key]) {
+              const existing = matchStore.matches[key];
+              let changed = false;
+              if (data.j || data.k || data.res) {
+                scoreFetchedAtByMatch.set(key, now);
+              }
+              if (data.j && existing.j !== data.j) {
+                existing.j = data.j;
+                changed = true;
+              }
+              if (data.k && existing.k !== data.k) {
+                existing.k = data.k;
+                changed = true;
+              }
+              if (data.res && existing.res !== data.res) {
+                existing.res = data.res;
+                changed = true;
+              }
+              if (data.R && existing.flb !== data.R) {
+                existing.flb = data.R;
+                changed = true;
+              }
+              if (changed) {
+                matchStore.lastUpdated = Date.now();
+                await processMatchUpdate(key, existing);
+              }
             }
-            if (data.res && existing.res !== data.res) {
-              existing.res = data.res;
-              changed = true;
-            }
-            if (data.R && existing.flb !== data.R) {
-              existing.flb = data.R;
-              changed = true;
-            }
-            if (changed) {
-              matchStore.lastUpdated = Date.now();
-              await processMatchUpdate(key, existing);
+          } else {
+            incrementMissedTick(key);
+            console.warn(
+              `[getSV3 Fetch Error] match_id=${key} status=${res.status} missed=${missedTicksByMatch[key]}`
+            );
+          }
+        } catch (err: any) {
+          incrementMissedTick(key);
+          console.warn(
+            `[getSV3 Fetch Error] match_id=${key} error=${err?.message || err} missed=${missedTicksByMatch[key]}`
+          );
+        }
+      })
+    );
+  } finally {
+    isLiveOddsRunning = false;
+  }
+}
+
+/**
+ * Resolves team control ('BATTING' | 'BOWLING' | 'UNKNOWN') and favorite info from raw.F + match teams.
+ */
+function resolveControlForMatch(
+  item: any,
+  oddsData: any,
+  battingTeamKey: string,
+  battingTeamName: string,
+  battingShort: string,
+  bowlingTeamKey: string,
+  bowlingTeamName: string,
+  bowlingShort: string
+): { control: 'BATTING' | 'BOWLING' | 'UNKNOWN'; favoriteTeam: string | null } {
+  const speechNames =
+    oddsData?.speech_names && typeof oddsData.speech_names === 'object' ? oddsData.speech_names : {};
+  const rawF = oddsData?.F;
+  const favKey = typeof rawF === 'string' ? rawF.replace(/^\^/, '').trim() : '';
+  const favSpeechName = favKey && speechNames[favKey] ? String(speechNames[favKey]) : '';
+
+  let control: 'BATTING' | 'BOWLING' | 'UNKNOWN' = 'UNKNOWN';
+  if (favKey || favSpeechName) {
+    const batK = battingTeamKey.replace(/^\^/, '').toLowerCase();
+    const bowlK = bowlingTeamKey.replace(/^\^/, '').toLowerCase();
+    const fk = favKey.toLowerCase();
+    const fn = favSpeechName.toLowerCase();
+    const batN = battingTeamName.toLowerCase();
+    const batS = battingShort.toLowerCase();
+    const bowlN = bowlingTeamName.toLowerCase();
+    const bowlS = bowlingShort.toLowerCase();
+
+    if (fk && fk === batK) control = 'BATTING';
+    else if (fk && fk === bowlK) control = 'BOWLING';
+    else if (
+      (fn && (fn.includes(batS) || batN.includes(fn))) ||
+      (fk && (fk === batS || batN.includes(fk)))
+    ) {
+      control = 'BATTING';
+    } else if (
+      (fn && (fn.includes(bowlS) || bowlN.includes(fn))) ||
+      (fk && (fk === bowlS || bowlN.includes(fk)))
+    ) {
+      control = 'BOWLING';
+    } else if (Array.isArray(oddsData?.cl)) {
+      const matched = oddsData.cl.find((c: any) => c.code === favKey);
+      if (matched?.name) {
+        const cn = String(matched.name).toLowerCase();
+        if (cn.includes(batS) || batN.includes(cn)) control = 'BATTING';
+        else if (cn.includes(bowlS) || bowlN.includes(cn)) control = 'BOWLING';
+      }
+    }
+  }
+
+  let favoriteTeam: string | null = favSpeechName || null;
+  if (!favoriteTeam && favKey) {
+    if (control === 'BATTING') favoriteTeam = battingTeamName;
+    else if (control === 'BOWLING') favoriteTeam = bowlingTeamName;
+    else favoriteTeam = favKey;
+  }
+  return { control, favoriteTeam };
+}
+
+/**
+ * Updates latest_* snapshot tables (teams, matches, match_odds_keys, latest_match_state, latest_odds_state)
+ * directly from the server so fast-read queries remain fresh even with zero browsers open.
+ */
+async function syncLatestStateToDb(
+  matchId: string,
+  item: any,
+  meta: {
+    seriesName: string;
+    team1: { key: string; name: string; shortName: string; color: string; darkColor: string };
+    team2: { key: string; name: string; shortName: string; color: string; darkColor: string };
+    innings: number;
+    score1: ReturnType<typeof parseScore>;
+    score2: ReturnType<typeof parseScore>;
+    hasInn1: boolean;
+    hasInn2: boolean;
+    matchStatus: string;
+    resultText: string | null;
+    bookmaker: ReturnType<typeof parseBookmakerRate>;
+    sessions: ReturnType<typeof parseSessionMarkets>;
+    favoriteTeam: string | null;
+    speechNames: Record<string, string>;
+    oddsData: any;
+  }
+) {
+  const t1Res = await dbPool.query(
+    `INSERT INTO teams (external_team_key, name, short_name, color, dark_color, flag_url, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (external_team_key) DO UPDATE SET
+       name = EXCLUDED.name,
+       short_name = EXCLUDED.short_name,
+       color = EXCLUDED.color,
+       dark_color = EXCLUDED.dark_color,
+       updated_at = NOW()
+     RETURNING id`,
+    [meta.team1.key, meta.team1.name, meta.team1.shortName, meta.team1.color, meta.team1.darkColor, item.team1flag || null]
+  );
+  const team1Id = t1Res.rows[0]?.id;
+
+  const t2Res = await dbPool.query(
+    `INSERT INTO teams (external_team_key, name, short_name, color, dark_color, flag_url, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (external_team_key) DO UPDATE SET
+       name = EXCLUDED.name,
+       short_name = EXCLUDED.short_name,
+       color = EXCLUDED.color,
+       dark_color = EXCLUDED.dark_color,
+       updated_at = NOW()
+     RETURNING id`,
+    [meta.team2.key, meta.team2.name, meta.team2.shortName, meta.team2.color, meta.team2.darkColor, item.team2flag || null]
+  );
+  const team2Id = t2Res.rows[0]?.id;
+
+  const venueName = item.vname || resolveVenue(item.v) || null;
+  const startTimeIso = item.t ? new Date(Number(item.t)).toISOString() : new Date().toISOString();
+  const finishTimeIso = item.finishTime ? new Date(Number(item.finishTime)).toISOString() : null;
+
+  const matchRes = await dbPool.query(
+    `INSERT INTO matches (
+      external_match_id, dt_id, format, match_title_prefix, series_key, series_name,
+      venue_key, venue_name, team1_id, team2_id, start_time, finish_time, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+    ON CONFLICT (external_match_id) DO UPDATE SET
+      dt_id = COALESCE(EXCLUDED.dt_id, matches.dt_id),
+      format = EXCLUDED.format,
+      match_title_prefix = COALESCE(EXCLUDED.match_title_prefix, matches.match_title_prefix),
+      series_key = COALESCE(EXCLUDED.series_key, matches.series_key),
+      series_name = COALESCE(EXCLUDED.series_name, matches.series_name),
+      venue_key = COALESCE(EXCLUDED.venue_key, matches.venue_key),
+      venue_name = COALESCE(EXCLUDED.venue_name, matches.venue_name),
+      team1_id = COALESCE(EXCLUDED.team1_id, matches.team1_id),
+      team2_id = COALESCE(EXCLUDED.team2_id, matches.team2_id),
+      finish_time = COALESCE(EXCLUDED.finish_time, matches.finish_time),
+      updated_at = NOW()
+    RETURNING id`,
+    [
+      matchId,
+      item.dt_id ? String(item.dt_id) : null,
+      item.fo || item.t || 'Match',
+      item.matchNums ? `${item.matchNums} ${item.fo || 'Match'}` : item.fo || null,
+      item.q ? String(item.q) : null,
+      meta.seriesName,
+      item.v ? String(item.v) : null,
+      venueName,
+      team1Id,
+      team2Id,
+      startTimeIso,
+      finishTimeIso,
+    ]
+  );
+  const matchUuid = matchRes.rows[0]?.id;
+  if (!matchUuid) return;
+
+  await dbPool.query(
+    `INSERT INTO match_odds_keys (match_id, odds_key, masked_key, is_verified, verification_reason, last_verified_at)
+     VALUES ($1, $2, $3, true, 'Synced by server 1s loop', NOW())
+     ON CONFLICT (match_id, odds_key) DO UPDATE SET last_verified_at = NOW()`,
+    [matchUuid, matchId, `${matchId.slice(0, 2)}**`]
+  );
+
+  const battingTeamId = meta.innings === 2 ? team2Id : team1Id;
+  const activeRunRate = meta.innings === 2 ? meta.score2.runRate : meta.score1.runRate;
+  const statusLabel =
+    meta.matchStatus === 'completed'
+      ? 'Finished'
+      : meta.matchStatus === 'live'
+      ? 'LIVE'
+      : 'Scheduled';
+
+  await dbPool.query(
+    `INSERT INTO latest_match_state (
+      match_id, status, status_label, status_detail, result_text, session_text,
+      current_innings, batting_team_id, current_run_rate,
+      team1_score_runs, team1_score_wickets, team1_score_overs, team1_score_raw,
+      team2_score_runs, team2_score_wickets, team2_score_overs, team2_score_raw,
+      raw_score_j, raw_score_k, updated_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW()
+    ) ON CONFLICT (match_id) DO UPDATE SET
+      status = EXCLUDED.status,
+      status_label = EXCLUDED.status_label,
+      status_detail = EXCLUDED.status_detail,
+      result_text = EXCLUDED.result_text,
+      session_text = EXCLUDED.session_text,
+      current_innings = EXCLUDED.current_innings,
+      batting_team_id = EXCLUDED.batting_team_id,
+      current_run_rate = EXCLUDED.current_run_rate,
+      team1_score_runs = EXCLUDED.team1_score_runs,
+      team1_score_wickets = EXCLUDED.team1_score_wickets,
+      team1_score_overs = EXCLUDED.team1_score_overs,
+      team1_score_raw = EXCLUDED.team1_score_raw,
+      team2_score_runs = EXCLUDED.team2_score_runs,
+      team2_score_wickets = EXCLUDED.team2_score_wickets,
+      team2_score_overs = EXCLUDED.team2_score_overs,
+      team2_score_raw = EXCLUDED.team2_score_raw,
+      raw_score_j = EXCLUDED.raw_score_j,
+      raw_score_k = EXCLUDED.raw_score_k,
+      updated_at = NOW()`,
+    [
+      matchUuid,
+      meta.matchStatus,
+      statusLabel,
+      item.res || item.soResult || null,
+      meta.resultText,
+      item.sessionText || null,
+      meta.innings,
+      battingTeamId,
+      activeRunRate,
+      meta.hasInn1 ? meta.score1.runs : null,
+      meta.hasInn1 ? meta.score1.wickets : null,
+      meta.hasInn1 ? meta.score1.oversDecimal : null,
+      item.j || null,
+      meta.hasInn2 ? meta.score2.runs : null,
+      meta.hasInn2 ? meta.score2.wickets : null,
+      meta.hasInn2 ? meta.score2.oversDecimal : null,
+      item.k || null,
+      item.j || null,
+      item.k || null,
+    ]
+  );
+
+  if (meta.oddsData) {
+    await dbPool.query(
+      `INSERT INTO latest_odds_state (
+        match_id, odds_key, raw_rate_string, back_rate, lay_rate, decimal_back,
+        decimal_lay, spread, is_suspended, favorite_team_name, session_markets,
+        speech_names, last_updated
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+      ON CONFLICT (match_id) DO UPDATE SET
+        raw_rate_string = EXCLUDED.raw_rate_string,
+        back_rate = EXCLUDED.back_rate,
+        lay_rate = EXCLUDED.lay_rate,
+        decimal_back = EXCLUDED.decimal_back,
+        decimal_lay = EXCLUDED.decimal_lay,
+        spread = EXCLUDED.spread,
+        is_suspended = EXCLUDED.is_suspended,
+        favorite_team_name = EXCLUDED.favorite_team_name,
+        session_markets = EXCLUDED.session_markets,
+        speech_names = EXCLUDED.speech_names,
+        last_updated = NOW()`,
+      [
+        matchUuid,
+        matchId,
+        meta.bookmaker.rawRateString || null,
+        meta.bookmaker.backRate ?? null,
+        meta.bookmaker.layRate ?? null,
+        meta.bookmaker.decimalBack ?? null,
+        meta.bookmaker.decimalLay ?? null,
+        meta.bookmaker.spread ?? null,
+        meta.bookmaker.isSuspended,
+        meta.favoriteTeam,
+        JSON.stringify(meta.sessions || []),
+        JSON.stringify(meta.speechNames || {}),
+      ]
+    );
+  }
+}
+
+/**
+ * Phase 1: Append-Only 1-Second Server Timeline Persistence
+ * Inserts 1 row per second per live match (and 1 final 'completed' row with result_text when finished).
+ * Runs continuously with zero browsers open.
+ */
+async function persistLiveTimelineTicks() {
+  if (isTimelineLoopRunning) return;
+  isTimelineLoopRunning = true;
+
+  try {
+    const entries = Object.entries(matchStore.matches);
+    if (entries.length === 0) return;
+
+    if (!isDbAvailable) {
+      for (const [matchId, item] of entries) {
+        if (item && isAllowedTournament(item, matchStore.mapping) && isMatchLiveItem(item)) {
+          incrementMissedTick(matchId);
+        }
+      }
+      return;
+    }
+
+    await Promise.allSettled(
+      entries.map(async ([matchId, item]) => {
+        try {
+          if (!item || !isAllowedTournament(item, matchStore.mapping)) return;
+
+          const isFinished = isMatchFinishedItem(item);
+          const isLive = isMatchLiveItem(item);
+
+          // Skip upcoming matches that haven't started, and skip matches already finalized
+          if (isFinished) {
+            if (finalizedTimelineMatches.has(matchId)) return;
+            // Only emit final completed row if we saw this match live/started in timeline
+            if (!startedTimelineMatches.has(matchId) && !lastTimelineSnapshot[matchId]) return;
+          } else if (!isLive) {
+            return;
+          }
+
+          const team1 = resolveFullTeamInfo(item.b, item.t1Name || item.team1, item.t1Sname);
+          const team2 = resolveFullTeamInfo(item.c, item.t2Name || item.team2, item.t2Sname);
+          const seriesName = resolveSeriesNameFromMapping(item);
+
+          const hasInn1 = Boolean(item.j && String(item.j).trim());
+          const hasInn2 = Boolean(item.k && String(item.k).trim());
+          const innings = hasInn2 ? 2 : 1;
+
+          const score1 = parseScore(item.j);
+          const score2 = parseScore(item.k);
+          const activeScore = innings === 2 ? score2 : score1;
+
+          const battingTeamObj = innings === 2 ? team2 : team1;
+          const bowlingTeamObj = innings === 2 ? team1 : team2;
+
+          const cachedOdds = serverOddsCache.get(matchId);
+          const oddsData = cachedOdds?.data || null;
+          const bookmaker = parseBookmakerRate(oddsData?.R ?? oddsData?.r ?? item.flb);
+          const sessions = parseSessionMarkets(oddsData?.Z, oddsData?.D);
+          const speechNames =
+            oddsData?.speech_names && typeof oddsData.speech_names === 'object'
+              ? oddsData.speech_names
+              : {};
+
+          const { control, favoriteTeam } = resolveControlForMatch(
+            item,
+            oddsData,
+            battingTeamObj.key,
+            battingTeamObj.name,
+            battingTeamObj.shortName,
+            bowlingTeamObj.key,
+            bowlingTeamObj.name,
+            bowlingTeamObj.shortName
+          );
+
+          const controlTeamOdds = bookmaker.backRate ?? null;
+          const matchStatus = isFinished ? 'completed' : 'live';
+          const resultText = item.res || item.soResult || null;
+
+          // Determine is_new_ball and runs_on_ball by comparing against previous tracked snapshot
+          const prev = lastTimelineSnapshot[matchId];
+          let isNewBall = false;
+          let runsOnBall = 0;
+
+          if (!prev) {
+            isNewBall = activeScore.legalBallCount > 0 || activeScore.runs > 0;
+            runsOnBall = activeScore.legalBallCount <= 1 ? activeScore.runs : 0;
+          } else if (innings !== prev.innings) {
+            isNewBall = true;
+            runsOnBall = activeScore.legalBallCount <= 1 ? activeScore.runs : 0;
+          } else {
+            isNewBall = activeScore.legalBallCount !== prev.legalBallCount;
+            if (isNewBall || activeScore.runs !== prev.runs) {
+              runsOnBall = Math.max(0, activeScore.runs - prev.runs);
             }
           }
+
+          const scoreFetchedAt = scoreFetchedAtByMatch.get(matchId) || null;
+          const oddsFetchedAt = oddsFetchedAtByMatch.get(matchId) || null;
+
+          // Append-only INSERT into match_timeline_ticks (never UPDATE or overwrite)
+          await dbPool.query(
+            `INSERT INTO match_timeline_ticks (
+              match_id, series_name, innings, overs, legal_ball_count, runs, wickets,
+              batting_team, bowling_team, favorite_team, control,
+              back_rate, lay_rate, decimal_back, decimal_lay, control_team_odds,
+              raw_rate_string, session_data, match_status, result_text,
+              is_new_ball, runs_on_ball, score_fetched_at, odds_fetched_at, recorded_at
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7,
+              $8, $9, $10, $11,
+              $12, $13, $14, $15, $16,
+              $17, $18, $19, $20,
+              $21, $22, $23, $24, NOW()
+            )`,
+            [
+              matchId,
+              seriesName,
+              innings,
+              activeScore.oversDecimal,
+              activeScore.legalBallCount,
+              activeScore.runs,
+              activeScore.wickets,
+              battingTeamObj.name,
+              bowlingTeamObj.name,
+              favoriteTeam,
+              control,
+              bookmaker.backRate ?? null,
+              bookmaker.layRate ?? null,
+              bookmaker.decimalBack ?? null,
+              bookmaker.decimalLay ?? null,
+              controlTeamOdds,
+              bookmaker.rawRateString || null,
+              sessions.length > 0 ? JSON.stringify(sessions) : null,
+              matchStatus,
+              resultText,
+              isNewBall,
+              runsOnBall,
+              scoreFetchedAt ? scoreFetchedAt.toISOString() : null,
+              oddsFetchedAt ? oddsFetchedAt.toISOString() : null,
+            ]
+          );
+
+          startedTimelineMatches.add(matchId);
+          lastTimelineSnapshot[matchId] = {
+            innings,
+            legalBallCount: activeScore.legalBallCount,
+            runs: activeScore.runs,
+          };
+
+          if (isFinished) {
+            finalizedTimelineMatches.add(matchId);
+          }
+
+          // Also keep latest_match_state & latest_odds_state updated from server
+          // (on new ball, completion, or every 2 seconds)
+          const nowMs = Date.now();
+          const lastSyncMs = lastLatestStateSyncAt.get(matchId) || 0;
+          if (isNewBall || isFinished || nowMs - lastSyncMs >= 2000) {
+            lastLatestStateSyncAt.set(matchId, nowMs);
+            try {
+              await syncLatestStateToDb(matchId, item, {
+                seriesName,
+                team1,
+                team2,
+                innings,
+                score1,
+                score2,
+                hasInn1,
+                hasInn2,
+                matchStatus,
+                resultText,
+                bookmaker,
+                sessions,
+                favoriteTeam,
+                speechNames,
+                oddsData,
+              });
+            } catch (latestErr: any) {
+              if (isDbConnectionError(latestErr)) {
+                if (isDbAvailable) {
+                  isDbAvailable = false;
+                  hasLoggedDbOffline = true;
+                  console.warn(
+                    `[PostgreSQL] Lost connection during latest-state sync (${latestErr?.message || latestErr}). Retrying every 15s.`
+                  );
+                }
+              } else {
+                console.error(
+                  `[LatestState Sync Error] match_id=${matchId} error=${latestErr?.message || latestErr}`
+                );
+              }
+            }
+          }
+        } catch (err: any) {
+          incrementMissedTick(matchId);
+          if (isDbConnectionError(err)) {
+            if (isDbAvailable) {
+              isDbAvailable = false;
+              hasLoggedDbOffline = true;
+              console.warn(
+                `[PostgreSQL] Lost connection during timeline insert (${err?.message || err}). Retrying every 15s.`
+              );
+            }
+          } else {
+            console.error(
+              `[Timeline Insert Error] match_id=${matchId} missed=${missedTicksByMatch[matchId]} error=${err?.message || err}`
+            );
+          }
         }
-      } catch {
-        // Non-blocking
-      }
-    })
-  );
+      })
+    );
+  } finally {
+    isTimelineLoopRunning = false;
+  }
 }
 
 // Initial eager sync
@@ -919,10 +1613,11 @@ syncGoscorerApi()
   .then(syncLiveMatchScores)
   .catch((err) => console.error('Initial sync error:', err));
 
-// Continuous live polling loop
-setInterval(syncGoscorerApi, 1000); // Check Goscorer API every 1000ms
-setInterval(syncLiveMatchScores, 1500); // Live ball-by-ball getSV3 sync every 1500ms
-setInterval(syncCrexPool, 2500);   // Sync Crex fixtures pool every 2.5s for real-time live matches
+// Continuous live polling loops (24/7 independent of any open browser)
+setInterval(syncGoscorerApi, 1000);         // Check Goscorer top matches every 1000ms
+setInterval(syncLiveMatchScores, 1000);     // Live ball-by-ball getSV3 score & odds every 1000ms
+setInterval(syncCrexPool, 2500);            // Sync Crex fixtures pool & mapping every 2.5s
+setInterval(persistLiveTimelineTicks, 1000); // Append-only 1-second timeline DB saver
 
 // SSE Live Stream: Instant zero-latency push to connected clients
 app.get('/api/live-stream', (req, res) => {
@@ -1026,12 +1721,17 @@ app.get(['/api/odds', '/api/v3/getSV3'], async (req, res) => {
     }
 
     const data = await upstreamRes.json();
-    serverOddsCache.set(key, { data, timestamp: Date.now() });
+    const now = new Date();
+    serverOddsCache.set(key, { data, timestamp: now.getTime() });
+    oddsFetchedAtByMatch.set(key, now);
 
     // Instantly update matchStore with live ball-by-ball score from getSV3
     if (data && matchStore.matches[key]) {
       const existing = matchStore.matches[key];
       let changed = false;
+      if (data.j || data.k || data.res) {
+        scoreFetchedAtByMatch.set(key, now);
+      }
       if (data.j && existing.j !== data.j) {
         existing.j = data.j;
         changed = true;
@@ -1352,9 +2052,9 @@ app.post('/api/db/matches', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing match or match.id' });
     }
 
-    // Exclude matches outside WBBL 2026 and Abu Dhabi T10 2026
+    // Enforce optional ALLOWED_SERIES_FILTER when configured
     if (!isAllowedTournament(match, matchStore.mapping)) {
-      return res.json({ ok: true, skipped: true, reason: 'Excluded: Only WBBL 2026 and Abu Dhabi T10 2026 are permitted' });
+      return res.json({ ok: true, skipped: true, reason: 'Excluded by ALLOWED_SERIES_FILTER' });
     }
 
     const t1 = match.team1 || {};
@@ -1514,7 +2214,25 @@ app.post('/api/db/matches', async (req, res) => {
 // Fetch Matches from PostgreSQL
 app.get('/api/db/matches', async (_req, res) => {
   try {
-    const result = await dbPool.query(`
+    let whereClause = '';
+    const params: any[] = [];
+
+    if (ALLOWED_SERIES_FILTER.length > 0) {
+      const patterns = ALLOWED_SERIES_FILTER.map((s) => `%${s.trim().toLowerCase()}%`);
+      whereClause = `
+        WHERE (
+          LOWER(COALESCE(m.series_key, '')) = ANY($1::text[])
+          OR LOWER(COALESCE(m.series_name, '')) LIKE ANY($2::text[])
+        )
+      `;
+      params.push(
+        ALLOWED_SERIES_FILTER.map((s) => s.trim().toLowerCase()),
+        patterns
+      );
+    }
+
+    const result = await dbPool.query(
+      `
       SELECT
         m.id,
         m.external_match_id,
@@ -1536,14 +2254,11 @@ app.get('/api/db/matches', async (_req, res) => {
       LEFT JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN latest_match_state lms ON m.id = lms.match_id
       LEFT JOIN latest_odds_state los ON m.id = los.match_id
-      WHERE (
-        m.series_key IN ('2KG', '^2KG', '2IO', '^2IO')
-        OR LOWER(COALESCE(m.series_name, '')) LIKE '%wbbl%'
-        OR LOWER(COALESCE(m.series_name, '')) LIKE '%big bash%'
-        OR (LOWER(COALESCE(m.series_name, '')) LIKE '%abu dhabi%' AND LOWER(COALESCE(m.series_name, '')) LIKE '%t10%')
-      )
+      ${whereClause}
       ORDER BY m.start_time DESC
-    `);
+      `,
+      params
+    );
     return res.json({ ok: true, data: result.rows });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message, data: [] });
@@ -1647,6 +2362,41 @@ app.get('/api/db/odds-ticks/:matchId', async (req, res) => {
     return res.json({ ok: true, data: result.rows });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message, data: [] });
+  }
+});
+
+// Fetch Append-Only Timeline Ticks for a Match (1-second & ball-by-ball history)
+app.get('/api/db/timeline/:matchId', async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const ballsOnly = req.query.ballsOnly === 'true' || req.query.ballsOnly === '1';
+    const order = String(req.query.order || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '10000'), 10) || 10000, 1), 50000);
+
+    const whereBalls = ballsOnly ? 'AND is_new_ball = true' : '';
+    const result = await dbPool.query(
+      `SELECT * FROM match_timeline_ticks
+       WHERE match_id = $1 ${whereBalls}
+       ORDER BY recorded_at ${order}, id ${order}
+       LIMIT $2`,
+      [matchId, limit]
+    );
+
+    return res.json({
+      ok: true,
+      matchId,
+      missedTicks: missedTicksByMatch[matchId] || 0,
+      count: result.rows.length,
+      data: result.rows,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      ok: false,
+      matchId: req.params.matchId,
+      missedTicks: missedTicksByMatch[req.params.matchId] || 0,
+      error: err.message,
+      data: [],
+    });
   }
 });
 

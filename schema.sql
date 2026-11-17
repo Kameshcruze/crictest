@@ -217,6 +217,44 @@ CREATE TABLE IF NOT EXISTS match_odds_ticks (
 CREATE INDEX IF NOT EXISTS idx_match_odds_ticks_key_ts ON match_odds_ticks(odds_key, created_at DESC);
 
 -- ============================================================================
+-- 6B. MATCH TIMELINE TICKS (Append-Only 1-Second Server History)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS match_timeline_ticks (
+  id BIGSERIAL PRIMARY KEY,
+  match_id VARCHAR(64) NOT NULL,
+  series_name VARCHAR(256),
+  innings INT NOT NULL DEFAULT 1,
+  overs NUMERIC(5, 1) NOT NULL DEFAULT 0.0,
+  legal_ball_count INT NOT NULL DEFAULT 0,
+  runs INT NOT NULL DEFAULT 0,
+  wickets INT NOT NULL DEFAULT 0,
+  batting_team VARCHAR(128),
+  bowling_team VARCHAR(128),
+  favorite_team VARCHAR(128),
+  control VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+  back_rate NUMERIC(6, 2),
+  lay_rate NUMERIC(6, 2),
+  decimal_back NUMERIC(6, 2),
+  decimal_lay NUMERIC(6, 2),
+  control_team_odds NUMERIC(6, 2),
+  raw_rate_string VARCHAR(64),
+  session_data JSONB,
+  match_status VARCHAR(32) NOT NULL DEFAULT 'live',
+  result_text TEXT,
+  is_new_ball BOOLEAN NOT NULL DEFAULT false,
+  runs_on_ball INT NOT NULL DEFAULT 0,
+  score_fetched_at TIMESTAMPTZ,
+  odds_fetched_at TIMESTAMPTZ,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_match_timeline_ticks_match_recorded
+  ON match_timeline_ticks(match_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_match_timeline_ticks_match_ball
+  ON match_timeline_ticks(match_id, legal_ball_count);
+
+-- ============================================================================
 -- 7. TRADE POSITIONS
 -- ============================================================================
 
