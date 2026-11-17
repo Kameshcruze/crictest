@@ -17,7 +17,6 @@ import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState } from '../types/odds';
 import {
   strategyEngine,
-  calculateOpposingOdds,
   isWithinEntryWindow,
   detectTeamInControl,
 } from '../services/strategy/engine';
@@ -28,7 +27,8 @@ export interface EntryOpportunity {
   type: 'FIRST_ENTRY' | 'SECOND_ENTRY';
   teamName: string;
   decimalOdds: number;
-  opposingOdds?: number;
+  controlTeamOdds: number;
+  control: 'BATTING' | 'BOWLING' | 'UNKNOWN';
   currentOver: number;
   currentInnings: number;
   runs: number;
@@ -45,7 +45,8 @@ export interface MatchRadarStatus {
   match: ParsedCricketMatch;
   oddsState?: MatchOddsState;
   decimalOdds: number | null;
-  opposingOdds: number | null;
+  controlTeamOdds: number | null;
+  control: 'BATTING' | 'BOWLING' | 'UNKNOWN';
   currentOver: number;
   currentInnings: number;
   inWindow: boolean;
@@ -76,7 +77,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
 }) => {
   const [filterMode, setFilterMode] = useState<'all' | 'opportunities' | 'monitoring'>('all');
 
-  // Compute live entry radar analysis across all matches
+  // Compute live entry radar analysis across all matches (strictly control & control_team_odds)
   const { opportunities, radarWatchlist } = useMemo(() => {
     const oppList: EntryOpportunity[] = [];
     const watchList: MatchRadarStatus[] = [];
@@ -94,117 +95,134 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       const wickets = activeScore ? activeScore.wickets : 0;
       const crr = match.currentRunRate;
 
-      const decimalOdds =
-        oddsState?.odds?.bookmaker?.decimalBack ??
-        oddsState?.odds?.bookmaker?.decimalLay ??
-        null;
-      const opposingOdds = decimalOdds ? calculateOpposingOdds(decimalOdds) : null;
-      const inWindow = isWithinEntryWindow(currentInnings, currentOver);
       const controlInfo = detectTeamInControl(match, oddsState);
-      const isBattingInControl = controlInfo.teamInControl === 'BATTING';
+      const control = controlInfo.teamInControl;
+      const controlTeamOdds = controlInfo.currentPaise;
+      const decimalOdds =
+        controlInfo.decimalOdds ??
+        (controlTeamOdds !== null ? Number((1 + controlTeamOdds / 100).toFixed(2)) : null);
+      const inWindow = isWithinEntryWindow(currentInnings, currentOver);
+      const isBattingInControl = control === 'BATTING';
+      const isBowlingInControl = control === 'BOWLING';
       const engineState = strategyEngine.getState(match.id);
-      const isDisqualifiedByWickets = wickets >= 3 && !recordedFirstEntries.has(match.id) && engineState.stage !== 'ACTIVE_FIRST_ENTRY';
+      const isDisqualifiedByWickets =
+        wickets >= 3 &&
+        !recordedFirstEntries.has(match.id) &&
+        engineState.stage !== 'ACTIVE_FIRST_ENTRY' &&
+        engineState.stage !== 'ACTIVE_SECOND_ENTRY';
 
-      // Check if First Entry was recorded in DB or actively held by strategy engine
       const hasFirstEntryRecorded =
         recordedFirstEntries.has(match.id) ||
         engineState.stage === 'ACTIVE_FIRST_ENTRY' ||
+        engineState.stage === 'ACTIVE_SECOND_ENTRY' ||
         engineState.stage === 'FIRST_BOOKSET_COMPLETED' ||
+        engineState.stage === 'FULL_BOOKSET_COMPLETED' ||
         engineState.firstEntryPosition.status === 'RECORDED_ENTRY';
 
-      // Booking Team is strictly the batting team of that innings
       const bookingTeamDisplay = engineState.bookingTeamName || controlInfo.battingTeamName;
 
-      // 1. Evaluate First Entry: 2nd boundary confirmed with batting in control and odds >= 85 paise
+      // 1. Evaluate First Entry: booking/entry confirmed inside window with BATTING >= 85 paise
       const firstEntryQualified =
         !isDisqualifiedByWickets &&
         inWindow &&
-        (engineState.stage === 'ACTIVE_FIRST_ENTRY' ||
-          (engineState.stage === 'CONFIRMED_PENDING_85' && decimalOdds !== null && decimalOdds >= 1.85 && isBattingInControl));
+        !hasFirstEntryRecorded &&
+        (engineState.stage === 'CONFIRMED_BOOKING_TEAM' || engineState.stage === 'CONFIRMED_PENDING_85') &&
+        isBattingInControl &&
+        controlTeamOdds !== null &&
+        controlTeamOdds >= 85;
 
-      // 2. Evaluate Second Entry: STRICT RULE
-      // "without the first entry you should not send the 2nd entry message."
+      // 2. Evaluate Second Entry: strictly after active 1st entry, confirmed wicket, BOWLING < 65 paise (works after window)
       let secondEntryQualified = false;
       let secondEntryLockedReason: string | undefined;
 
+      const anchorWickets =
+        engineState.firstEntryTrade?.entryWickets ?? engineState.firstEntryPosition.entryWickets ?? 0;
+
       if (isDisqualifiedByWickets) {
         secondEntryLockedReason = `Match skipped: ${wickets} wickets fell before entry (limit < 3).`;
-      } else if (!hasFirstEntryRecorded && !firstEntryQualified) {
-        secondEntryLockedReason = 'Locked: First Entry must appear and be recorded before 2nd entry can unlock.';
-      } else if (!inWindow) {
-        secondEntryLockedReason = `Window closed: Over ${currentOver} > ${currentInnings === 1 ? '10.0' : '6.0'} ov.`;
-      } else if (!opposingOdds || opposingOdds >= 1.65) {
-        secondEntryLockedReason = `Waiting: Opposing odds must drop below 1.65 / 65 paise (Currently: ${opposingOdds ? opposingOdds.toFixed(2) : 'N/A'}).`;
+      } else if (!hasFirstEntryRecorded) {
+        secondEntryLockedReason = 'Locked: First Entry must be recorded before 2nd entry can unlock.';
+      } else if (
+        engineState.stage === 'FIRST_BOOKSET_COMPLETED' ||
+        engineState.stage === 'FULL_BOOKSET_COMPLETED'
+      ) {
+        secondEntryLockedReason = 'Cycle completed via Exit/Bookset.';
+      } else if (wickets <= anchorWickets) {
+        secondEntryLockedReason = `Waiting for wicket after 1st entry (${wickets}/${anchorWickets} wkts).`;
+      } else if (!isBowlingInControl || controlTeamOdds === null || controlTeamOdds >= 65) {
+        secondEntryLockedReason = `Waiting: BOWLING control_team_odds must be < 65 paise (Currently: ${control} ${controlTeamOdds ?? 'N/A'}p).`;
       } else {
         secondEntryQualified = true;
       }
 
-      // Add to Opportunities list
       const teamName = bookingTeamDisplay;
       const windowLimitOver = currentInnings === 1 ? 10.0 : 6.0;
 
-      if (firstEntryQualified && !hasFirstEntryRecorded) {
+      if (firstEntryQualified && controlTeamOdds !== null && decimalOdds !== null) {
         oppList.push({
           matchId: match.id,
           match,
           type: 'FIRST_ENTRY',
           teamName,
-          decimalOdds: decimalOdds!,
-          opposingOdds: opposingOdds ?? undefined,
+          decimalOdds,
+          controlTeamOdds,
+          control,
           currentOver,
           currentInnings,
           runs,
           wickets,
           crr,
-          explanation: `Booking team ${teamName} (Batting) confirmed via 2 boundaries. Odds ${decimalOdds!.toFixed(2)} are in optimal 1st entry range >= 1.85 / 85 paise.`,
-          booksetTarget: '45 - 55 Paise (1.45 - 1.55)',
+          explanation: `Booking team ${teamName} (BATTING) confirmed. BATTING control_team_odds ${controlTeamOdds}p (>= 85p) ready for 1st Entry.`,
+          booksetTarget: 'BOWLING > 85 Paise',
           windowLimitOver,
           timestamp: new Date(),
         });
       }
 
-      if (secondEntryQualified && opposingOdds) {
+      if (secondEntryQualified && controlTeamOdds !== null && decimalOdds !== null) {
         oppList.push({
           matchId: match.id,
           match,
           type: 'SECOND_ENTRY',
           teamName,
-          decimalOdds: decimalOdds!,
-          opposingOdds,
+          decimalOdds,
+          controlTeamOdds,
+          control,
           currentOver,
           currentInnings,
           runs,
           wickets,
           crr,
-          explanation: `Opposing odds ${opposingOdds.toFixed(2)} are below 1.65 / 65 paise after confirmed wicket with verified prior 1st entry on ${teamName}.`,
-          booksetTarget: 'Opposing Odds >= 85 Paise (1.85)',
+          explanation: `Wicket confirmed after 1st entry and BOWLING control_team_odds ${controlTeamOdds}p (< 65p) on ${teamName}.`,
+          booksetTarget: 'BOWLING > 85 Paise',
           windowLimitOver,
           timestamp: new Date(),
         });
       }
 
-      // Compute status summary & distance to entry
       let distanceToFirstEntry = '';
       let statusSummary = '';
 
       if (isDisqualifiedByWickets || engineState.stage === 'DISQUALIFIED_3_WICKETS') {
         statusSummary = `⚠️ Skipped: ${wickets} wickets before entry (>= 3 limit)`;
+      } else if (engineState.stage === 'ACTIVE_SECOND_ENTRY') {
+        statusSummary = `🛡️ 1st & 2nd Entries Active on ${bookingTeamDisplay} (Bookset: BOWLING > 85p)`;
       } else if (hasFirstEntryRecorded || engineState.stage === 'ACTIVE_FIRST_ENTRY') {
-        statusSummary = `🛡️ 1st Entry Active on ${bookingTeamDisplay} (Holding state - Bookset target 45-55)`;
+        statusSummary = `🛡️ 1st Entry Active on ${bookingTeamDisplay} (Exit: BATTING <= 55p pre-wkt | Bookset: BOWLING > 85p)`;
       } else if (engineState.stage === 'CONFIRMED_PENDING_85') {
-        statusSummary = `⏳ 2nd Boundary Confirmed: Waiting for ${bookingTeamDisplay} to cross 85p in control`;
+        statusSummary = `⏳ Entry Confirmed (${bookingTeamDisplay}): Waiting for first later ball with BATTING >= 85p`;
       } else if (engineState.stage === 'CONFIRMED_BOOKING_TEAM') {
-        statusSummary = `🎯 Booking Confirmed: ${bookingTeamDisplay} (Waiting for 2nd boundary 4 >= 11p or 6 >= 18p)`;
+        statusSummary = `🎯 Booking Confirmed: ${bookingTeamDisplay} (Waiting for next 4/6 entry confirmation)`;
       } else if (engineState.stage === 'WAITING_FOR_CONFIRMATION') {
-        statusSummary = `⏳ Waiting for Booking Team: ${controlInfo.battingTeamName} must hit 4 (>= 11p) or 6 (>= 18p) in control`;
+        statusSummary = `⏳ Waiting for Booking Team: ${controlInfo.battingTeamName} needs BATTING >= 85p + 4 (>= 11p) or 6 (>= 18p)`;
       } else if (firstEntryQualified) {
         statusSummary = '🎯 1st Entry Ready NOW';
       } else if (secondEntryQualified) {
         statusSummary = '🚀 2nd Entry Ready NOW';
       } else if (!inWindow) {
-        statusSummary = `Window passed (${currentOver} ov > ${windowLimitOver} ov limit)`;
-      } else if (decimalOdds !== null) {
-        statusSummary = `Monitoring ball-by-ball odds & boundary shifts on ${controlInfo.battingTeamName}...`;
+        statusSummary = `Window passed (${currentOver} ov >= ${windowLimitOver} ov limit)`;
+      } else if (controlTeamOdds !== null) {
+        statusSummary = `Monitoring ball-by-ball control & boundary shifts on ${controlInfo.battingTeamName}...`;
       } else {
         statusSummary = 'Connecting to real-time odds feed...';
       }
@@ -214,7 +232,8 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
         match,
         oddsState,
         decimalOdds,
-        opposingOdds,
+        controlTeamOdds,
+        control,
         currentOver,
         currentInnings,
         inWindow,
@@ -386,14 +405,12 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                       </div>
                       <div>
                         <div className="text-slate-400 text-[10px]">
-                          {opp.type === 'FIRST_ENTRY' ? 'Target Range' : 'Opposing Odds'}
+                          {opp.type === 'FIRST_ENTRY' ? 'Entry Condition' : 'Control Trigger'}
                         </div>
                         <div className="font-mono font-bold text-slate-200 text-sm">
                           {opp.type === 'FIRST_ENTRY'
-                            ? '1.85 - 2.00'
-                            : opp.opposingOdds
-                            ? `< 1.65 (${opp.opposingOdds.toFixed(2)})`
-                            : '< 1.65'}
+                            ? `BATTING >= 85p (${opp.controlTeamOdds}p)`
+                            : `BOWLING < 65p (${opp.controlTeamOdds}p)`}
                         </div>
                       </div>
                       <div>
@@ -454,27 +471,27 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                 <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
                   <div className="flex items-center gap-1.5 text-emerald-400 font-semibold text-xs mb-1">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Booking Team & 1st Entry</span>
+                    <span>Booking Team &amp; 1st Entry</span>
                   </div>
                   <ul className="text-[11px] text-slate-400 space-y-1">
                     <li>• Boundary: 4 with <strong className="text-slate-200">&ge; 11 paise</strong> | 6 with <strong className="text-slate-200">&ge; 18 paise</strong></li>
-                    <li>• Flip Formula: (100 - Pprev) + (100 - Pcurr) when bowling in control</li>
+                    <li>• Switch Formula: (100 - bowl_before) + (100 - bat_after)</li>
                     <li>• Wicket Filter: &lt; 3 wickets before entry (&ge; 3 skips match)</li>
-                    <li>• Over Window: 1st Innings &le; 10.0 ov | 2nd Innings &le; 6.0 ov</li>
-                    <li>• 1st Entry Odds: &ge; 85 paise (1.85+) | Bookset at 45 to 55 paise</li>
+                    <li>• Over Window: 1st Innings &lt; 10.0 ov | 2nd Innings &lt; 6.0 ov</li>
+                    <li>• Booking &amp; Entry: BATTING &ge; 85p (defers if confirmed &lt; 85p)</li>
                   </ul>
                 </div>
 
                 <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
                   <div className="flex items-center gap-1.5 text-indigo-400 font-semibold text-xs mb-1">
                     <Lock className="w-3.5 h-3.5" />
-                    <span>Second Entry & Bookset</span>
+                    <span>Exits &amp; Second Entry</span>
                   </div>
                   <ul className="text-[11px] text-slate-400 space-y-1">
-                    <li>• <strong className="text-amber-300">Mandatory:</strong> Wicket fell strictly after 1st entry</li>
-                    <li>• Opposite team odds strictly &lt; 65 paise (decimal &lt; 1.65)</li>
-                    <li>• Combined Bookset for both entries: Opposite team &ge; 85 paise (1.85+)</li>
-                    <li>• Held State: Once entry fires, it is held without duplicate spam</li>
+                    <li>• <strong className="text-amber-300">Early Exit (&le; 55p):</strong> No wicket since 1st entry + BATTING &le; 55p</li>
+                    <li>• <strong className="text-amber-300">Second Entry:</strong> Wicket after 1st entry + BOWLING &lt; 65p (any over)</li>
+                    <li>• Bookset for BOTH entries: BOWLING control &amp; odds &gt; 85 paise</li>
+                    <li>• Held State: Once entry fires, server locks it in PostgreSQL</li>
                   </ul>
                 </div>
               </div>
@@ -563,15 +580,13 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                       {/* Odds & Proximity */}
                       <div className="flex items-center gap-4 shrink-0 justify-between sm:justify-end border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-700/60">
                         <div className="text-right">
-                          <div className="text-[10px] text-slate-400">Live Decimal Odds</div>
+                          <div className="text-[10px] text-slate-400">Control &amp; Odds</div>
                           <div className="font-mono font-bold text-base text-white">
-                            {item.decimalOdds ? item.decimalOdds.toFixed(2) : '—'}
+                            {item.controlTeamOdds !== null ? `${item.controlTeamOdds}p` : '—'}
                           </div>
-                          {item.opposingOdds && (
-                            <div className="text-[10px] font-mono text-slate-400">
-                              Opp: {item.opposingOdds.toFixed(2)}
-                            </div>
-                          )}
+                          <div className="text-[10px] font-mono text-slate-400">
+                            {item.control}
+                          </div>
                         </div>
 
                         <button

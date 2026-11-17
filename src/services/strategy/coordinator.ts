@@ -67,8 +67,8 @@ export function buildSignalDedupeHash(signal: StrategySignal): string {
     signal.currentInnings,
     signal.currentOver,
     signal.ballNumber || 0,
+    signal.relevantOdds?.teamInControl ?? 'UNKNOWN',
     signal.relevantOdds?.decimalOdds ?? 'null',
-    signal.relevantOdds?.opposingTeamOdds ?? 'null',
     signal.relevantOdds?.oddsDelta ?? 'null',
     signal.relevantOdds?.currentPaise ?? 'null',
   ].join(':');
@@ -96,12 +96,16 @@ function snapshotSignature(s: SerializedMatchStrategyState): string {
     s.pending85 ? '1' : '0',
     s.firstEntryPosition.status,
     s.secondEntryPosition.status,
+    s.lastEvaluatedInnings ?? 0,
     s.lastEvaluatedOver,
     s.lastEvaluatedWickets,
     s.lastEvaluatedRuns,
     s.lastEvaluatedBalls,
+    s.lastEvaluatedLegalBalls ?? 0,
     s.lastEvaluatedPaise ?? '',
     s.lastEvaluatedControl,
+    s.preBallControl ?? 'UNKNOWN',
+    s.preBallPaise ?? '',
     s.abnormalActivityCount,
   ].join('|');
 }
@@ -485,7 +489,7 @@ export class StrategyPersistenceCoordinator {
     positionType: PositionType;
     exitOdds: number;
     over: number;
-    exitReason?: 'FIRST_BOOKSET_45_55' | 'FULL_BOOKSET_OPPOSING_85';
+    exitReason?: 'FIRST_EXIT_BELOW_55' | 'FIRST_BOOKSET_45_55' | 'FULL_BOOKSET_OPPOSING_85';
     match?: ParsedCricketMatch;
     dbAvailable?: boolean;
   }): Promise<SerializedMatchStrategyState> {
@@ -494,11 +498,7 @@ export class StrategyPersistenceCoordinator {
     }
     this.emittedTradesBuffer = [];
 
-    const reason =
-      params.exitReason ||
-      (params.positionType === 'FIRST_ENTRY'
-        ? 'FIRST_BOOKSET_45_55'
-        : 'FULL_BOOKSET_OPPOSING_85');
+    const reason = params.exitReason || 'FULL_BOOKSET_OPPOSING_85';
 
     this.engine.recordExit(
       params.matchId,

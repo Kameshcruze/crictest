@@ -30,7 +30,7 @@ import { MatchOddsState, OddsTick } from '../types/odds';
 import { KNOWN_TEAMS } from '../data/cricketMapping';
 import {
   strategyEngine,
-  calculateOpposingOdds,
+  detectTeamInControl,
 } from '../services/strategy';
 import { SerializedMatchStrategyState } from '../services/strategy/types';
 import {
@@ -312,6 +312,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   // Extract latest signal outputs for each rule
   const signals = strategyState.signalsHistory;
   const firstEntrySignal = signals.find((s) => s.signalType === 'FIRST_ENTRY_CANDIDATE');
+  const firstExit55Signal = signals.find((s) => s.signalType === 'FIRST_EXIT_BELOW_55');
   const firstBooksetSignal = signals.find((s) => s.signalType === 'FIRST_BOOKSET_TARGET');
   const secondEntrySignal = signals.find((s) => s.signalType === 'SECOND_ENTRY_CANDIDATE');
   const secondBooksetSignal = signals.find((s) => s.signalType === 'SECOND_BOOKSET_TARGET');
@@ -327,6 +328,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
           (s) =>
             (s.signalType === 'FIRST_ENTRY_CANDIDATE' ||
               s.signalType === 'SECOND_ENTRY_CANDIDATE' ||
+              s.signalType === 'FIRST_EXIT_BELOW_55' ||
               s.signalType === 'FIRST_BOOKSET_TARGET' ||
               s.signalType === 'SECOND_BOOKSET_TARGET') &&
             s.status === 'PASS'
@@ -351,6 +353,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
         (s) =>
           (s.signalType === 'FIRST_ENTRY_CANDIDATE' ||
             s.signalType === 'SECOND_ENTRY_CANDIDATE' ||
+            s.signalType === 'FIRST_EXIT_BELOW_55' ||
             s.signalType === 'FIRST_BOOKSET_TARGET' ||
             s.signalType === 'SECOND_BOOKSET_TARGET') &&
           s.status === 'PASS'
@@ -374,10 +377,17 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     [signals]
   );
 
-  // Opposing odds derived value
-  const opposingOdds = useMemo(() => {
-    return calculateOpposingOdds(bookmaker?.decimalBack);
-  }, [bookmaker?.decimalBack]);
+  // Control & control_team_odds directly from Crex (never 100-minus)
+  const controlInfo = useMemo(() => {
+    if (!match) {
+      return {
+        teamInControl: 'UNKNOWN' as const,
+        currentPaise: null,
+        decimalOdds: bookmaker?.decimalBack ?? null,
+      };
+    }
+    return detectTeamInControl(match, oddsState);
+  }, [match, oddsState, bookmaker?.decimalBack]);
 
   // Manual Overrides (persisted on server.ts and broadcast via SSE)
   const handleRecordFirstEntry = async () => {
@@ -422,7 +432,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
         positionType: 'FIRST_ENTRY',
         exitOdds: bookmaker.decimalLay,
         over: currentOver,
-        exitReason: 'FIRST_BOOKSET_45_55',
+        exitReason: 'FULL_BOOKSET_OPPOSING_85',
       });
       if (updated) {
         strategyEngine.hydrateState(matchId, updated);
@@ -435,7 +445,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   };
 
   const handleRecordSecondEntry = async () => {
-    if (!opposingOdds || !match || overridePending) return;
+    const triggerDecimal = controlInfo.decimalOdds ?? bookmaker?.decimalBack;
+    if (!triggerDecimal || !match || overridePending) return;
     setOverridePending(true);
     try {
       const currentInnings = match.team2Score ? 2 : 1;
@@ -447,7 +458,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
 
       const updated = await sendManualOverrideEntry(matchId, {
         positionType: 'SECOND_ENTRY',
-        entryOdds: opposingOdds,
+        entryOdds: triggerDecimal,
         innings: currentInnings,
         over: currentOver,
         wickets: currentWickets,
@@ -1129,30 +1140,36 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
 
                 <div className="space-y-2 mt-3 text-xs">
                   <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Qualifying Odds Range:</span>
-                    <span className="text-slate-200 font-semibold">[1.85 to 2.00]</span>
+                    <span className="text-slate-400">Qualifying Condition:</span>
+                    <span className="text-slate-200 font-semibold">BATTING &gt;= 85p</span>
                   </div>
                   <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Current Decimal Odds:</span>
+                    <span className="text-slate-400">Control &amp; Odds:</span>
                     <span className="font-bold text-blue-300">
-                      {bookmaker?.decimalBack ? bookmaker.decimalBack.toFixed(2) : '—'}
+                      {controlInfo.teamInControl}{' '}
+                      {controlInfo.currentPaise !== null
+                        ? `${controlInfo.currentPaise}p (${bookmaker?.decimalBack?.toFixed(2) ?? (1 + controlInfo.currentPaise / 100).toFixed(2)})`
+                        : '—'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
                     <span className="text-slate-400">Entry Window Limit:</span>
                     <span className="text-slate-300">
-                      {match?.team2Score ? 'Inn 2 (<= 6.0 ov)' : 'Inn 1 (<= 10.0 ov)'}
+                      {match?.team2Score ? 'Inn 2 (< 6.0 ov)' : 'Inn 1 (< 10.0 ov)'}
                     </span>
                   </div>
                   <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
                     <span className="text-slate-400 font-semibold">Engine Evaluation: </span>
                     {strategyState.stage === 'ACTIVE_FIRST_ENTRY' ||
                     strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
-                      ? `FIRST ENTRY ACTIVE & HELD: Position entered at ${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.85) - 1) * 100)} paise (${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds?.toFixed(2) ?? '1.85'}). Holding until Bookset Target (45-55 paise). Zero flickering.`
-                      : strategyState.stage === 'FIRST_BOOKSET_COMPLETED'
-                      ? `FIRST ENTRY COMPLETED: Secured via Bookset at ${strategyState.firstEntryTrade?.exitPaise ?? 50} paise. Position closed.`
+                      ? `FIRST ENTRY ACTIVE & HELD: Entered at ${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.85) - 1) * 100)} paise (${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds?.toFixed(2) ?? '1.85'}). Holding until pre-wicket BATTING <= 55p or Bookset (BOWLING > 85 paise).`
+                      : strategyState.stage === 'FIRST_BOOKSET_COMPLETED' ||
+                        strategyState.stage === 'FULL_BOOKSET_COMPLETED'
+                      ? `FIRST ENTRY COMPLETED: Exited at ${strategyState.firstEntryTrade?.exitPaise ?? 86} paise (${strategyState.firstEntryTrade?.exitReason || 'BOOKSET'}). Position closed.`
                       : strategyState.stage === 'CONFIRMED_PENDING_85'
-                      ? `CANDIDATE CONFIRMED (AWAITING 85 PAISE): 2nd boundary confirmed entry. Waiting for odds >= 85 paise to enter.`
+                      ? `CONFIRMED_PENDING_85 (${strategyState.bookingTeamName}): Entry boundary confirmed below 85p. Entering on first later ball with BATTING >= 85 paise inside window.`
+                      : strategyState.stage === 'CONFIRMED_BOOKING_TEAM'
+                      ? `BOOKING TEAM CONFIRMED (${strategyState.bookingTeamName}): Waiting for next 4 (>= 11p) or 6 (>= 18p) entry confirmation.`
                       : firstEntrySignal?.explanation || 'Awaiting tick evaluation'}
                   </div>
                 </div>
@@ -1164,22 +1181,24 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   <span className="text-[11px] text-slate-400 font-medium">
                     {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
                     strategyState.stage === 'ACTIVE_FIRST_ENTRY'
-                      ? `Entered @ ${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds} (${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.85) - 1) * 100)}p) • ${strategyState.firstEntryTrade?.entryWickets ?? strategyState.firstEntryPosition.entryWickets ?? 0} wkts`
+                      ? `Entered @ ${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds} (${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.86) - 1) * 100)}p) • ${strategyState.firstEntryTrade?.entryWickets ?? strategyState.firstEntryPosition.entryWickets ?? 0} wkts`
                       : strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED'
-                      ? 'Candidate signal qualified (awaiting 85p or manual entry)'
+                      ? 'Candidate signal qualified (manual override available)'
                       : 'Candidate signal only (trade not recorded)'}
                   </span>
                   <span className="text-[10px] text-slate-500 flex items-center gap-1 mt-0.5">
                     <Database className="w-2.5 h-2.5 text-emerald-400" />
                     <span>
-                      {strategyState.firstEntryTrade ? 'Saved in Supabase strategy_trades' : 'Database Ready'}
+                      {strategyState.firstEntryTrade ? 'Saved in PostgreSQL strategy_trades' : 'Database Ready'}
                     </span>
                   </span>
                 </div>
                 {strategyState.firstEntryPosition.status !== 'RECORDED_ENTRY' &&
                 strategyState.firstEntryPosition.status !== 'RECORDED_EXIT' &&
                 strategyState.stage !== 'ACTIVE_FIRST_ENTRY' &&
-                strategyState.stage !== 'FIRST_BOOKSET_COMPLETED' ? (
+                strategyState.stage !== 'ACTIVE_SECOND_ENTRY' &&
+                strategyState.stage !== 'FIRST_BOOKSET_COMPLETED' &&
+                strategyState.stage !== 'FULL_BOOKSET_COMPLETED' ? (
                   <button
                     type="button"
                     onClick={handleRecordFirstEntry}
@@ -1241,19 +1260,21 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                       }`}
                     >
                       {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
-                        ? `Entry Wkts: ${strategyState.firstEntryPosition.entryWickets} | Current: ${activeScore?.wickets || 0}`
+                        ? `Entry Wkts: ${strategyState.firstEntryPosition.entryWickets ?? 0} | Current: ${activeScore?.wickets || 0}`
                         : 'Requires prior 1st entry'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Opposing-Team Odds:</span>
+                    <span className="text-slate-400">Bowling Control Trigger:</span>
                     <span className="font-bold text-amber-300">
-                      {opposingOdds !== null ? `${opposingOdds.toFixed(2)} (< 1.65 target)` : '—'}
+                      {controlInfo.teamInControl === 'BOWLING' && controlInfo.currentPaise !== null
+                        ? `BOWLING ${controlInfo.currentPaise}p (< 65p target)`
+                        : `${controlInfo.teamInControl} ${controlInfo.currentPaise !== null ? `${controlInfo.currentPaise}p` : '—'} (needs BOWLING < 65p)`}
                     </span>
                   </div>
                   <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
                     <span className="text-slate-400 font-semibold">Engine Evaluation: </span>
-                    {secondEntrySignal?.explanation || 'Awaiting wicket & opposing odds'}
+                    {secondEntrySignal?.explanation || 'Awaiting wicket & BOWLING < 65p'}
                   </div>
                 </div>
               </div>
@@ -1271,7 +1292,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     <button
                       type="button"
                       onClick={handleRecordSecondEntry}
-                      disabled={!opposingOdds || overridePending}
+                      disabled={!controlInfo.decimalOdds && !bookmaker?.decimalBack || overridePending}
                       className="px-2.5 py-1 text-xs font-semibold text-blue-300 bg-blue-950/60 hover:bg-blue-900/80 border border-blue-600/50 rounded-lg transition-colors disabled:opacity-50"
                       title="Manual Override (saved on server)"
                     >
@@ -1292,7 +1313,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {renderStatusBadge(firstBooksetSignal?.status)}
+                    {renderStatusBadge((secondBooksetSignal || firstExit55Signal?.status === 'PASS' ? firstExit55Signal : firstBooksetSignal)?.status)}
                     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
                       {strategyState.firstEntryPosition.status === 'RECORDED_EXIT' ? 'EXITED' : 'MONITORING'}
                     </span>
@@ -1301,12 +1322,15 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
 
                 <div className="space-y-2 mt-3 text-xs">
                   <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">1st Bookset Range:</span>
-                    <span className="text-purple-300 font-semibold">[1.45 to 1.55]</span>
+                    <span className="text-slate-400">Exit Rules (1st / Both):</span>
+                    <span className="text-purple-300 font-semibold">BATTING &lt;= 55p (no wkt) | BOWLING &gt; 85p</span>
                   </div>
                   <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">2nd Bookset Threshold:</span>
-                    <span className="text-purple-300 font-semibold">&gt;= 1.85</span>
+                    <span className="text-slate-400">Current Control Odds:</span>
+                    <span className="text-purple-300 font-semibold">
+                      {controlInfo.teamInControl}{' '}
+                      {controlInfo.currentPaise !== null ? `${controlInfo.currentPaise}p` : '—'}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
                     <span className="text-slate-400">Window Continuity:</span>
@@ -1315,8 +1339,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     </span>
                   </div>
                   <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
-                    <span className="text-slate-400 font-semibold">1st Bookset Target: </span>
-                    {firstBooksetSignal?.explanation || 'Waiting for bookset odds'}
+                    <span className="text-slate-400 font-semibold">Bookset Target: </span>
+                    {(secondBooksetSignal || (firstExit55Signal?.status === 'PASS' ? firstExit55Signal : firstBooksetSignal))?.explanation || 'Waiting for BATTING <= 55p (no wicket) or BOWLING > 85p'}
                   </div>
                 </div>
               </div>
@@ -1325,7 +1349,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
               <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between gap-2">
                 <span className="text-[11px] text-slate-400">
                   {strategyState.firstEntryPosition.status === 'RECORDED_EXIT'
-                    ? `1st Exited @ ${strategyState.firstEntryTrade?.exitDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.exitOdds ?? '—'} (${strategyState.firstEntryTrade?.exitOver ?? strategyState.firstEntryPosition.exitOver ?? '—'} ov)`
+                    ? `Exited @ ${strategyState.firstEntryTrade?.exitDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.exitOdds ?? '—'} (${strategyState.firstEntryTrade?.exitOver ?? strategyState.firstEntryPosition.exitOver ?? '—'} ov)`
                     : 'Awaiting automatic server exit'}
                 </span>
                 {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' && (
@@ -1336,7 +1360,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     className="px-2.5 py-1 text-xs font-semibold text-purple-300 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-600/50 rounded-lg transition-colors disabled:opacity-50"
                     title="Manual Override (saved on server)"
                   >
-                    Manual Override: 1st Exit
+                    Manual Override: Exit
                   </button>
                 )}
               </div>

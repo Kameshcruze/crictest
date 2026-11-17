@@ -372,7 +372,7 @@ export async function testOverCompletionAlert(
 
 /**
  * Formats a verified First Entry Opportunity alert
- * Qualifying criteria: Odds in [1.85, 2.00], Window: 1st inn <= 10.0 ov, 2nd inn <= 6.0 ov
+ * Qualifying criteria: control = BATTING, control_team_odds > 85 paise, Window: 1st inn < 10.0 ov, 2nd inn < 6.0 ov
  */
 export function formatFirstEntryAlert(params: {
   match: ParsedCricketMatch;
@@ -403,14 +403,14 @@ export function formatFirstEntryAlert(params: {
   text += `🏏 <b>${t1} vs ${t2}</b> · <i>${match.format}</i>\n`;
   text += `───────────────────\n`;
   text += `🔹 <b>Target Team:</b> <b>${targetTeamName}</b>\n`;
-  text += `💰 <b>Qualifying Odds:</b> <b>${decimalOdds.toFixed(2)}</b> (Range: 1.85 - 2.00)\n`;
+  text += `💰 <b>Control Odds:</b> <b>${decimalOdds.toFixed(2)}</b> (BATTING &gt;= 85p)\n`;
   text += `⏱ <b>Over:</b> <b>${currentOver} ov</b> (Inn ${currentInnings})\n`;
   text += `📊 <b>Current Score:</b> <b>${runs}/${wickets}</b>`;
   if (crr !== undefined) text += ` (CRR: ${crr.toFixed(2)})`;
   text += `\n`;
-  text += `🎯 <b>Bookset Target:</b> <code>1.45 - 1.55</code>\n`;
+  text += `🎯 <b>Bookset Target:</b> <code>BOWLING &gt; 85 paise</code>\n`;
   text += `───────────────────\n`;
-  text += `⚡ <i>1st Entry Window: Inn 1 &lt;= 10.0 ov | Inn 2 &lt;= 6.0 ov</i>\n`;
+  text += `⚡ <i>Entry Window: Inn 1 &lt; 10.0 ov | Inn 2 &lt; 6.0 ov</i>\n`;
   text += `⏰ <i>Detected at ${timeStr}</i>`;
 
   return text;
@@ -419,7 +419,7 @@ export function formatFirstEntryAlert(params: {
 /**
  * Formats a verified Second Entry Opportunity alert
  * STRICT REQUIREMENT: Only dispatched if First Entry was confirmed earlier,
- * followed by a confirmed wicket, opposing team odds < 1.65, and within window.
+ * followed by a confirmed wicket, control = BOWLING with control_team_odds < 65p, and within window.
  */
 export function formatSecondEntryAlert(params: {
   match: ParsedCricketMatch;
@@ -451,11 +451,11 @@ export function formatSecondEntryAlert(params: {
   text += `───────────────────\n`;
   text += `✅ <b>Prerequisite Met:</b> First Entry previously established\n`;
   text += `💥 <b>Trigger:</b> Confirmed wicket fell (${anchorWickets} ➔ ${wickets} wkts)\n`;
-  text += `🔹 <b>Measured Team:</b> <b>${measuredTeamName}</b>\n`;
-  text += `💰 <b>Opposing Odds:</b> <b>${opposingOdds.toFixed(2)}</b> (Strictly &lt; 1.65)\n`;
+  text += `🔹 <b>Control Team:</b> <b>${measuredTeamName} (BOWLING)</b>\n`;
+  text += `💰 <b>Control Odds:</b> <b>${opposingOdds.toFixed(2)}</b> (BOWLING &lt; 65p)\n`;
   text += `⏱ <b>Over:</b> <b>${currentOver} ov</b> (Inn ${currentInnings})\n`;
   text += `📊 <b>Current Score:</b> <b>${runs}/${wickets}</b>\n`;
-  text += `🎯 <b>Bookset / Exit:</b> Opposing Odds reach &gt;= 1.85\n`;
+  text += `🎯 <b>Bookset / Exit:</b> BOWLING control_team_odds &gt; 85p\n`;
   text += `───────────────────\n`;
   text += `⚡ <i>Zero-compromise rule: 2nd entry only fires after verified 1st entry</i>\n`;
   text += `⏰ <i>Detected at ${timeStr}</i>`;

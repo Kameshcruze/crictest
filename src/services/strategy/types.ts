@@ -12,6 +12,7 @@ export type SignalType =
   | 'ENTRY_CONFIRMED_WAITING_85'
   | 'FIRST_ENTRY_CANDIDATE'
   | 'FIRST_ENTRY_TRIGGER'
+  | 'FIRST_EXIT_BELOW_55'
   | 'FIRST_BOOKSET_TARGET'
   | 'SECOND_ENTRY_CANDIDATE'
   | 'SECOND_ENTRY_TRIGGER'
@@ -83,7 +84,7 @@ export interface TradePosition {
   entryTimestamp?: Date;
   entryOver?: number;
   entryInnings?: number;
-  /** Wickets count at the exact moment of entry (used for second-entry wicket confirmation) */
+  /** Wickets count at the exact moment of entry (used for second-entry & exit-55 wicket checks) */
   entryWickets?: number;
   exitOdds?: number;
   exitTimestamp?: Date;
@@ -114,7 +115,7 @@ export interface StrategyTradeRecord {
   exitPaise?: number;
   exitDecimal?: number;
   exitTime?: Date;
-  exitReason?: 'FIRST_BOOKSET_45_55' | 'FULL_BOOKSET_OPPOSING_85';
+  exitReason?: 'FIRST_EXIT_BELOW_55' | 'FIRST_BOOKSET_45_55' | 'FULL_BOOKSET_OPPOSING_85';
   status: 'ACTIVE' | 'BOOKSET_COMPLETED' | 'CANCELLED';
   createdAt: Date;
   updatedAt: Date;
@@ -136,12 +137,21 @@ export interface MatchStrategyState {
   signalsHistory: StrategySignal[];
   candidates: StrategySignal[];
   lastEvaluatedOver: number;
+  lastEvaluatedInnings?: number;
   lastEvaluatedWickets: number;
   lastEvaluatedRuns: number;
   lastEvaluatedBalls: number;
+  lastEvaluatedLegalBalls?: number;
   lastEvaluatedOdds: number | null;
   lastEvaluatedPaise: number | null;
   lastEvaluatedControl: TeamControlState;
+  preBallControl?: TeamControlState;
+  preBallPaise?: number | null;
+  pendingBoundaryBall?: {
+    innings: number;
+    legalBalls: number;
+    type: 'FOUR' | 'SIX';
+  } | null;
   bookingConfirmedBoundary?: {
     type: 'FOUR' | 'SIX';
     over: number;
@@ -151,6 +161,8 @@ export interface MatchStrategyState {
   } | null;
   entryConfirmedBoundary?: {
     type: 'FOUR' | 'SIX';
+    innings?: number;
+    legalBalls?: number;
     over: number;
     ball: number;
     paiseDelta: number;

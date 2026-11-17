@@ -20,7 +20,7 @@ import { OddsDiagnosticModal } from './components/OddsDiagnosticModal';
 import { MatchAnalysisPage } from './components/MatchAnalysisPage';
 import { EntryPossibilitiesModal } from './components/EntryPossibilitiesModal';
 import { useOddsManager } from './hooks/useOddsManager';
-import { strategyEngine, calculateOpposingOdds, isWithinEntryWindow } from './services/strategy/engine';
+import { strategyEngine, detectTeamInControl, isWithinEntryWindow } from './services/strategy/engine';
 import { SerializedMatchStrategyState } from './services/strategy/types';
 import {
   TelegramConfig,
@@ -367,7 +367,7 @@ export default function App() {
     [countryCode, soundEnabled, telegramConfig]
   );
 
-  // Real-time Entry Opportunities Count for Navbar Radar Badge
+  // Real-time Entry Opportunities Count for Navbar Radar Badge (control-only odds)
   const entryOpportunitiesCount = useMemo(() => {
     let count = 0;
     const liveMatches = matches.filter(
@@ -375,25 +375,24 @@ export default function App() {
     );
     for (const m of liveMatches) {
       const oddsState = oddsByMatchId[m.id];
-      const decimalOdds =
-        oddsState?.odds?.bookmaker?.decimalBack ??
-        oddsState?.odds?.bookmaker?.decimalLay ??
-        null;
-      const opposingOdds = decimalOdds ? calculateOpposingOdds(decimalOdds) : null;
+      const controlInfo = detectTeamInControl(m, oddsState);
+      const currentPaise = controlInfo.currentPaise;
       const activeScore = m.team2Score || m.team1Score;
       const currentInnings = m.team2Score ? 2 : 1;
       const currentOver = activeScore ? activeScore.overs : 0;
       const inWindow = isWithinEntryWindow(currentInnings, currentOver);
 
-      // First entry criteria: [1.85, 2.00] in window
-      if (decimalOdds !== null && decimalOdds >= 1.85 && decimalOdds <= 2.0 && inWindow) {
+      if (currentPaise === null) continue;
+
+      // First entry eligible state: BATTING control >= 85 paise inside window
+      if (inWindow && controlInfo.teamInControl === 'BATTING' && currentPaise >= 85) {
         count++;
         continue;
       }
 
-      // Second entry criteria: STRICT REQUIREMENT: MUST HAVE 1ST ENTRY
+      // Second entry criteria: STRICT REQUIREMENT: MUST HAVE 1ST ENTRY & BOWLING < 65 paise (allowed after window)
       const hasFirst = recordedFirstEntries.has(m.id);
-      if (hasFirst && opposingOdds && opposingOdds < 1.65 && inWindow) {
+      if (hasFirst && controlInfo.teamInControl === 'BOWLING' && currentPaise < 65) {
         count++;
       }
     }

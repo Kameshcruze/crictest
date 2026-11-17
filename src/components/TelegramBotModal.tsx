@@ -379,7 +379,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                     <span>🎯 Trading Strategy Entry Alerts (1st & 2nd Entry Signals)</span>
                   </div>
                   <p className="text-[11px] text-slate-300 mt-0.5">
-                    Broadcasts verified <b>First Entry</b> signals when odds hit <code>[1.85, 2.00]</code> within window (1st Inn &le; 10.0 ov, 2nd Inn &le; 6.0 ov). Strictly requires First Entry before <b>Second Entry</b> alerts can ever be sent (after confirmed wicket + opposing odds &lt; 1.65). Verified in DB to eliminate duplicates.
+                    Broadcasts verified <b>First Entry</b> signals when BATTING control odds are <code>&gt;= 85 paise</code> (including deferred CONFIRMED_PENDING_85 entries) within window (1st Inn &lt; 10.0 ov, 2nd Inn &lt; 6.0 ov). Exits 1st entry at BATTING &lt;= 55p if no wicket fell, or unlocks <b>Second Entry</b> after confirmed wicket + BOWLING &lt; 65p (any over). Bookset exits when BOWLING &gt; 85 paise. Verified in DB to eliminate duplicates.
                   </p>
                 </div>
               </label>
