@@ -3,8 +3,11 @@ import {
   fetchCrexTopMatches,
   playAlertSound,
   isAllowedTournament,
+  registerDynamicMapping,
+  transformCrexMatch,
 } from './services/cricketApi';
 import { ParsedCricketMatch, RawApiResponse } from './types/cricket';
+import { MatchOddsState } from './types/odds';
 import { Navbar } from './components/Navbar';
 import { StatsHeader } from './components/StatsHeader';
 import { FilterBar } from './components/FilterBar';
@@ -18,6 +21,7 @@ import { MatchAnalysisPage } from './components/MatchAnalysisPage';
 import { EntryPossibilitiesModal } from './components/EntryPossibilitiesModal';
 import { useOddsManager } from './hooks/useOddsManager';
 import { strategyEngine, calculateOpposingOdds, isWithinEntryWindow } from './services/strategy/engine';
+import { SerializedMatchStrategyState } from './services/strategy/types';
 import {
   TelegramConfig,
   getStoredTelegramConfig,
@@ -26,18 +30,14 @@ import {
   formatWicketAlert,
   formatResultAlert,
   formatScoreboardDigest,
-  formatFirstEntryAlert,
-  formatSecondEntryAlert,
 } from './services/telegramService';
 import {
   migrateLocalStorageToSupabase,
   fetchMatchesFromSupabase,
-  syncMatchToSupabase,
   checkAndRecordMatchConclusionInDb,
-  checkAndRecordEntrySignalInDb,
   fetchRecordedFirstEntriesFromDb,
-  syncStrategyTradeToDb,
   fetchStrategyTradesFromDb,
+  fetchServerStrategyStates,
 } from './services/supabaseSyncService';
 import {
   Radio,
@@ -78,51 +78,103 @@ export default function App() {
   const [isOddsDiagnosticOpen, setIsOddsDiagnosticOpen] = useState<boolean>(false);
   const [isEntryRadarOpen, setIsEntryRadarOpen] = useState<boolean>(false);
 
-  // Strategy Entry Tracking (ball 0.0 to match end)
+  // Authoritative Server SSE State (Read-only browser mirror)
+  const [allServerMatches, setAllServerMatches] = useState<ParsedCricketMatch[]>([]);
+  const [serverOddsByMatch, setServerOddsByMatch] = useState<Record<string, MatchOddsState>>({});
+  const [strategyVersion, setStrategyVersion] = useState<number>(0);
+  const [isSseConnected, setIsSseConnected] = useState<boolean>(false);
   const [recordedFirstEntries, setRecordedFirstEntries] = useState<Set<string>>(new Set());
-  const firstEntryWicketsAnchorRef = useRef<Record<string, number>>({});
 
-  // Rehydrate persisted trades from Supabase strategy_trades on mount
+  const applyServerStrategyStates = useCallback(
+    (states?: Record<string, SerializedMatchStrategyState>) => {
+      if (!states || typeof states !== 'object') return;
+      const firstEntryIds = new Set<string>();
+      for (const [mId, snap] of Object.entries(states)) {
+        if (!snap) continue;
+        strategyEngine.hydrateState(mId, snap);
+        if (
+          snap.firstEntryTrade ||
+          snap.stage === 'ACTIVE_FIRST_ENTRY' ||
+          snap.stage === 'FIRST_BOOKSET_COMPLETED' ||
+          snap.stage === 'ACTIVE_SECOND_ENTRY' ||
+          snap.stage === 'FULL_BOOKSET_COMPLETED' ||
+          snap.firstEntryPosition?.status === 'RECORDED_ENTRY' ||
+          snap.firstEntryPosition?.status === 'RECORDED_EXIT'
+        ) {
+          firstEntryIds.add(mId);
+        }
+      }
+      if (firstEntryIds.size > 0) {
+        setRecordedFirstEntries((prev) => new Set([...prev, ...firstEntryIds]));
+      }
+      setStrategyVersion((v) => v + 1);
+    },
+    []
+  );
+
+  // Rehydrate persisted strategy states & trades from PostgreSQL on mount
   useEffect(() => {
-    fetchStrategyTradesFromDb().then((trades) => {
-      if (trades && trades.length > 0) {
-        const matchIds = new Set<string>();
-        for (const t of trades) {
-          matchIds.add(t.matchId);
-          const state = strategyEngine.getState(t.matchId);
-          if (t.entryType === 'FIRST_ENTRY') {
-            state.firstEntryTrade = t;
-            state.bookingTeamName = t.bookingTeam;
-            if (t.status === 'ACTIVE') {
-              state.stage = 'ACTIVE_FIRST_ENTRY';
-              state.firstEntryPosition.status = 'RECORDED_ENTRY';
-              state.firstEntryPosition.entryOdds = t.entryDecimal;
-              state.firstEntryPosition.entryOver = t.entryOver;
-              state.firstEntryPosition.entryInnings = t.innings;
-              state.firstEntryPosition.entryWickets = t.entryWickets;
-              state.firstEntryPosition.entryTimestamp = t.entryTime;
-            } else if (t.status === 'BOOKSET_COMPLETED') {
-              state.stage = 'FIRST_BOOKSET_COMPLETED';
-              state.firstEntryPosition.status = 'RECORDED_EXIT';
-              state.firstEntryPosition.exitOdds = t.exitDecimal;
-              state.firstEntryPosition.exitOver = t.exitOver;
-              state.firstEntryPosition.exitTimestamp = t.exitTime;
-            }
-          } else if (t.entryType === 'SECOND_ENTRY') {
-            state.secondEntryTrade = t;
-            if (t.status === 'ACTIVE') {
-              state.stage = 'ACTIVE_SECOND_ENTRY';
-              state.secondEntryPosition.status = 'RECORDED_ENTRY';
-            } else if (t.status === 'BOOKSET_COMPLETED') {
-              state.stage = 'FULL_BOOKSET_COMPLETED';
-              state.secondEntryPosition.status = 'RECORDED_EXIT';
+    fetchServerStrategyStates()
+      .then((res) => {
+        if (res?.states) applyServerStrategyStates(res.states);
+      })
+      .catch(() => {});
+
+    fetchStrategyTradesFromDb()
+      .then((trades) => {
+        if (trades && trades.length > 0) {
+          const matchIds = new Set<string>();
+          for (const t of trades) {
+            matchIds.add(t.matchId);
+            const state = strategyEngine.getState(t.matchId);
+            if (t.entryType === 'FIRST_ENTRY') {
+              state.firstEntryTrade = t;
+              if (!state.bookingTeamName) state.bookingTeamName = t.bookingTeam;
+              if (t.status === 'ACTIVE') {
+                if (state.stage === 'WAITING_FOR_CONFIRMATION') state.stage = 'ACTIVE_FIRST_ENTRY';
+                state.firstEntryPosition.status = 'RECORDED_ENTRY';
+                state.firstEntryPosition.entryOdds = t.entryDecimal;
+                state.firstEntryPosition.entryOver = t.entryOver;
+                state.firstEntryPosition.entryInnings = t.innings;
+                state.firstEntryPosition.entryWickets = t.entryWickets;
+                state.firstEntryPosition.entryTimestamp = t.entryTime;
+              } else if (t.status === 'BOOKSET_COMPLETED') {
+                if (
+                  state.stage === 'WAITING_FOR_CONFIRMATION' ||
+                  state.stage === 'ACTIVE_FIRST_ENTRY'
+                ) {
+                  state.stage = 'FIRST_BOOKSET_COMPLETED';
+                }
+                state.firstEntryPosition.status = 'RECORDED_EXIT';
+                state.firstEntryPosition.exitOdds = t.exitDecimal;
+                state.firstEntryPosition.exitOver = t.exitOver;
+                state.firstEntryPosition.exitTimestamp = t.exitTime;
+              }
+            } else if (t.entryType === 'SECOND_ENTRY') {
+              state.secondEntryTrade = t;
+              if (t.status === 'ACTIVE') {
+                state.stage = 'ACTIVE_SECOND_ENTRY';
+                state.secondEntryPosition.status = 'RECORDED_ENTRY';
+                state.secondEntryPosition.entryOdds = t.entryDecimal;
+                state.secondEntryPosition.entryOver = t.entryOver;
+                state.secondEntryPosition.entryInnings = t.innings;
+                state.secondEntryPosition.entryWickets = t.entryWickets;
+                state.secondEntryPosition.entryTimestamp = t.entryTime;
+              } else if (t.status === 'BOOKSET_COMPLETED') {
+                state.stage = 'FULL_BOOKSET_COMPLETED';
+                state.secondEntryPosition.status = 'RECORDED_EXIT';
+                state.secondEntryPosition.exitOdds = t.exitDecimal;
+                state.secondEntryPosition.exitOver = t.exitOver;
+                state.secondEntryPosition.exitTimestamp = t.exitTime;
+              }
             }
           }
+          setRecordedFirstEntries((prev) => new Set([...prev, ...matchIds]));
+          setStrategyVersion((v) => v + 1);
         }
-        setRecordedFirstEntries(matchIds);
-      }
-    }).catch(() => {});
-  }, []);
+      })
+      .catch(() => {});
+  }, [applyServerStrategyStates]);
 
   // Phase 5 Routing: Dedicated Match Analysis View
   const [activeAnalysisMatchId, setActiveAnalysisMatchId] = useState<string | null>(() => {
@@ -159,7 +211,7 @@ export default function App() {
     window.location.hash = '';
   }, []);
 
-  // Phase 4: Per-Match Isolated Odds Manager
+  // Phase 4 + Phase 2: Per-Match Isolated Odds Manager (hydrated via Server SSE)
   const {
     oddsByMatchId,
     getMatchOdds,
@@ -167,7 +219,7 @@ export default function App() {
     refreshAllOdds,
     isGlobalRefreshing,
     totalRecordsReceived,
-  } = useOddsManager(matches);
+  } = useOddsManager(matches, serverOddsByMatch);
 
   // Telegram Bot Configuration
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>(getStoredTelegramConfig);
@@ -295,16 +347,15 @@ export default function App() {
           }
         }
 
-        // Strictly filter to WBBL 2026 and Abu Dhabi T10 2026 matches only
+        // Strictly filter to WBBL 2026 and Abu Dhabi T10 2026 matches only for dashboard grid
+        const allParsed = Object.entries(result.raw || {})
+          .filter(([_, m]) => m && typeof m === 'object' && m.b && m.c)
+          .map(([id, m]) => transformCrexMatch(id, m));
+        if (allParsed.length > 0) {
+          setAllServerMatches(allParsed);
+        }
         const allowedMatches = result.matches.filter(isAllowedTournament);
         setMatches([...allowedMatches]);
-
-        // Asynchronously sync live matches to Local PostgreSQL (only allowed tournaments)
-        allowedMatches.forEach((m) => {
-          if (m.status === 'live' || m.status === 'completed') {
-            syncMatchToSupabase(m).catch(() => {});
-          }
-        });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to fetch Crex matches';
         setError(msg);
@@ -347,113 +398,92 @@ export default function App() {
       }
     }
     return count;
-  }, [matches, oddsByMatchId, recordedFirstEntries]);
+  }, [matches, oddsByMatchId, recordedFirstEntries, strategyVersion]);
 
-  // Initial load: Migrate local data, populate from Supabase, then fetch fresh feed
+  // Initial load: Migrate local data, populate from PostgreSQL, then fetch fresh feed
   useEffect(() => {
     // 1. Migrate any existing local data
     migrateLocalStorageToSupabase().catch(() => {});
 
-    // 2. Hydrate matches from Supabase if available
+    // 2. Hydrate matches from PostgreSQL if available
     fetchMatchesFromSupabase().then((savedMatches) => {
       if (savedMatches.length > 0) {
         setMatches((prev) => (prev.length === 0 ? savedMatches : prev));
+        setAllServerMatches((prev) => (prev.length === 0 ? savedMatches : prev));
       }
     }).catch(() => {});
 
-    // 3. Hydrate strategy recorded 1st entries from Supabase
+    // 3. Hydrate strategy recorded 1st entries from PostgreSQL
     fetchRecordedFirstEntriesFromDb().then((entries) => {
       if (entries.size > 0) {
         setRecordedFirstEntries((prev) => new Set([...prev, ...entries]));
       }
     }).catch(() => {});
 
-    // 4. Initiate live streaming / polling
+    // 4. Initiate baseline load
     loadMatches(false);
   }, [loadMatches]);
 
-  // Live Evaluation using Strategy Engine (Booking Team Confirmed ONLY via Boundary 4 >= 11p or 6 >= 18p with Batting in Control)
+  // Authoritative SSE Stream from server.ts (browser stays read-only & synced across all devices)
   useEffect(() => {
-    const liveMatches = matches.filter(
-      (m) => m.status === 'live' || (m.status !== 'completed' && (m.team1Score || m.team2Score))
-    );
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
 
-    for (const m of liveMatches) {
-      const oddsState = oddsByMatchId[m.id];
-      if (!oddsState) continue;
+    const eventSource = new EventSource('/api/live-stream');
 
-      // Evaluate match strictly using strategyEngine (guarantees booking team is batting team confirmed via boundary surge)
-      strategyEngine.evaluateMatch(m, oddsState);
-      const state = strategyEngine.getState(m.id);
+    eventSource.onopen = () => {
+      setIsSseConnected(true);
+      setIsFetching(false);
+    };
 
-      // 1. Sync First Entry Trade if newly triggered and established
-      if (
-        (state.stage === 'ACTIVE_FIRST_ENTRY' || state.stage === 'FIRST_BOOKSET_COMPLETED') &&
-        state.firstEntryTrade &&
-        !recordedFirstEntries.has(m.id)
-      ) {
-        setRecordedFirstEntries((prev) => new Set(prev).add(m.id));
-        firstEntryWicketsAnchorRef.current[m.id] = state.firstEntryTrade.entryWickets;
-
-        // Persist to dedicated strategy_trades database table
-        syncStrategyTradeToDb(state.firstEntryTrade);
-
-        // Record signal deduplication in DB
-        checkAndRecordEntrySignalInDb(m.id, 'FIRST_ENTRY', {
-          team1: m.team1.shortName,
-          team2: m.team2.shortName,
-          measuredTeam: state.bookingTeamName || state.firstEntryTrade.bookingTeam,
-          decimalOdds: state.firstEntryTrade.entryDecimal,
-          over: state.firstEntryTrade.entryOver,
-          innings: state.firstEntryTrade.innings,
-          score: `${m.team2Score?.runs || m.team1Score?.runs || 0}/${state.firstEntryTrade.entryWickets}`,
-          rule: 'First Entry: 1st boundary confirmed booking team + 2nd boundary confirmed entry >= 85 paise',
-        });
-
-        // Optional Telegram notification
-        if (
-          telegramConfig.enabled &&
-          telegramConfig.botToken &&
-          telegramConfig.chatId &&
-          telegramConfig.notifyStrategyEntries
-        ) {
-          const alertMsg = formatFirstEntryAlert({
-            match: m,
-            targetTeamName: state.bookingTeamName || state.firstEntryTrade.bookingTeam,
-            decimalOdds: state.firstEntryTrade.entryDecimal,
-            currentOver: state.firstEntryTrade.entryOver,
-            currentInnings: state.firstEntryTrade.innings,
-            runs: m.team2Score?.runs || m.team1Score?.runs || 0,
-            wickets: state.firstEntryTrade.entryWickets,
-            crr: m.currentRunRate,
-          });
-          sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertMsg);
+    eventSource.onmessage = (evt) => {
+      try {
+        const payload = JSON.parse(evt.data);
+        if (payload.mapping) {
+          registerDynamicMapping(payload.mapping);
         }
+        if (payload.matches && typeof payload.matches === 'object') {
+          setRawData(payload.matches);
+          const allParsed: ParsedCricketMatch[] = [];
+          for (const [id, rawItem] of Object.entries(payload.matches)) {
+            if (rawItem && typeof rawItem === 'object' && (rawItem as any).b && (rawItem as any).c) {
+              allParsed.push(transformCrexMatch(id, rawItem as any));
+            }
+          }
+          if (allParsed.length > 0) {
+            setAllServerMatches(allParsed);
+            const allowed = allParsed.filter(isAllowedTournament);
+            allowed.sort((a, b) => {
+              const prio = { live: 0, upcoming: 1, completed: 2 };
+              if (prio[a.status] !== prio[b.status]) return prio[a.status] - prio[b.status];
+              return b.startTime.getTime() - a.startTime.getTime();
+            });
+            setMatches(allowed);
+          }
+          setLastUpdated(new Date());
+          setTickCounter((prev) => prev + 1);
+          setIsFetching(false);
+        }
+        if (payload.oddsByMatch && typeof payload.oddsByMatch === 'object') {
+          setServerOddsByMatch(payload.oddsByMatch);
+        }
+        if (payload.strategyStates && typeof payload.strategyStates === 'object') {
+          applyServerStrategyStates(payload.strategyStates);
+        }
+      } catch {
+        // Ignore malformed heartbeat/SSE chunks
       }
+    };
 
-      // 2. Sync Second Entry Trade if newly triggered
-      if (
-        (state.stage === 'ACTIVE_SECOND_ENTRY' || state.stage === 'FULL_BOOKSET_COMPLETED') &&
-        state.secondEntryTrade &&
-        state.secondEntryPosition.status === 'RECORDED_ENTRY'
-      ) {
-        syncStrategyTradeToDb(state.secondEntryTrade);
-      }
+    eventSource.onerror = () => {
+      setIsSseConnected(false);
+    };
 
-      // 3. Sync First Bookset Exit if completed
-      if (state.stage === 'FIRST_BOOKSET_COMPLETED' && state.firstEntryTrade?.exitTime) {
-        syncStrategyTradeToDb(state.firstEntryTrade);
-      }
+    return () => {
+      eventSource.close();
+    };
+  }, [applyServerStrategyStates]);
 
-      // 4. Sync Full Combined Bookset Exit if completed
-      if (state.stage === 'FULL_BOOKSET_COMPLETED') {
-        if (state.firstEntryTrade) syncStrategyTradeToDb(state.firstEntryTrade);
-        if (state.secondEntryTrade) syncStrategyTradeToDb(state.secondEntryTrade);
-      }
-    }
-  }, [matches, oddsByMatchId, recordedFirstEntries, telegramConfig]);
-
-  // Active 1-Second Continuous Live Engine with accurate countdown
+  // Active 1-Second Fallback Engine (runs polling only when SSE isn't streaming or custom CC selected)
   useEffect(() => {
     if (autoRefreshInterval <= 0) return;
 
@@ -464,13 +494,15 @@ export default function App() {
       countdown -= 1;
       if (countdown <= 0) {
         countdown = autoRefreshInterval;
-        loadMatches(true);
+        if (!isSseConnected || countryCode !== 'IN') {
+          loadMatches(true);
+        }
       }
       setSecondsRemaining(countdown);
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [autoRefreshInterval, loadMatches]);
+  }, [autoRefreshInterval, loadMatches, isSseConnected, countryCode]);
 
   // Filtered Matches
   const filteredMatches = useMemo(() => {
@@ -499,14 +531,18 @@ export default function App() {
 
   // Dedicated Match Analysis View (Phase 5)
   if (activeAnalysisMatchId) {
-    const analysisMatch = matches.find((m) => m.id === activeAnalysisMatchId);
+    const analysisMatch =
+      matches.find((m) => m.id === activeAnalysisMatchId) ||
+      allServerMatches.find((m) => m.id === activeAnalysisMatchId);
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
         <MatchAnalysisPage
           matchId={activeAnalysisMatchId}
           match={analysisMatch}
           oddsState={getMatchOdds(activeAnalysisMatchId)}
-          allMatches={matches}
+          allMatches={matches.length > 0 ? matches : allServerMatches}
+          strategyVersion={strategyVersion}
+          onStrategyStateSync={(snap) => applyServerStrategyStates({ [activeAnalysisMatchId]: snap })}
           onBack={navigateToDashboard}
           onSelectMatch={navigateToAnalysis}
           onRefreshOdds={refreshMatchOdds}
@@ -601,7 +637,7 @@ export default function App() {
         entryOpportunitiesCount={entryOpportunitiesCount}
         isTelegramActive={telegramConfig.enabled && !!telegramConfig.botToken && !!telegramConfig.chatId}
         lastUpdated={lastUpdated}
-        isSseActive={true}
+        isSseActive={isSseConnected}
       />
 
       {/* Main Content Area */}

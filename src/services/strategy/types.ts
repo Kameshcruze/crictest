@@ -160,3 +160,8 @@ export interface MatchStrategyState {
   abnormalActivityCount: number;
   lastUpdated: Date;
 }
+
+export interface SerializedMatchStrategyState
+  extends Omit<MatchStrategyState, 'processedEventKeys'> {
+  processedEventKeys: string[];
+}

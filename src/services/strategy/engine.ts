@@ -26,6 +26,7 @@ import {
   TeamControlState,
   StrategyTradeRecord,
   MatchStrategyState,
+  SerializedMatchStrategyState,
 } from './types';
 import { StrategyConfig, DEFAULT_STRATEGY_CONFIG } from './config';
 
@@ -341,6 +342,171 @@ export class CricketStrategyEngine {
 
     this.matchStates.set(matchId, newState);
     return newState;
+  }
+
+  /**
+   * Checks whether a match already has initialized strategy state in memory.
+   */
+  public hasState(matchId: string): boolean {
+    return this.matchStates.has(matchId);
+  }
+
+  /**
+   * Lists all match IDs currently tracked in memory.
+   */
+  public getAllMatchIds(): string[] {
+    return Array.from(this.matchStates.keys());
+  }
+
+  /**
+   * Serializes a match's strategy state into a JSON-safe snapshot.
+   */
+  public serializeState(matchId: string): SerializedMatchStrategyState {
+    const state = this.getState(matchId);
+    return {
+      ...state,
+      firstEntryPosition: { ...state.firstEntryPosition },
+      secondEntryPosition: { ...state.secondEntryPosition },
+      firstEntryTrade: state.firstEntryTrade ? { ...state.firstEntryTrade } : null,
+      secondEntryTrade: state.secondEntryTrade ? { ...state.secondEntryTrade } : null,
+      signalsHistory: [...state.signalsHistory],
+      candidates: [...state.candidates],
+      bookingConfirmedBoundary: state.bookingConfirmedBoundary
+        ? { ...state.bookingConfirmedBoundary }
+        : null,
+      entryConfirmedBoundary: state.entryConfirmedBoundary
+        ? { ...state.entryConfirmedBoundary }
+        : null,
+      processedEventKeys: Array.from(state.processedEventKeys).slice(-500),
+    };
+  }
+
+  /**
+   * Serializes all tracked match states for SSE broadcast or DB snapshotting.
+   */
+  public getAllSerializedStates(): Record<string, SerializedMatchStrategyState> {
+    const out: Record<string, SerializedMatchStrategyState> = {};
+    for (const matchId of this.matchStates.keys()) {
+      out[matchId] = this.serializeState(matchId);
+    }
+    return out;
+  }
+
+  /**
+   * Hydrates strategy state from a persisted snapshot or DB records WITHOUT firing alerts/listeners.
+   */
+  public hydrateState(
+    matchId: string,
+    snapshot: Partial<Omit<MatchStrategyState, 'processedEventKeys'>> & {
+      processedEventKeys?: Set<string> | string[];
+    }
+  ): MatchStrategyState {
+    const state = this.getState(matchId);
+
+    const toDate = (v: unknown): Date | undefined => {
+      if (!v) return undefined;
+      if (v instanceof Date) return isNaN(v.getTime()) ? undefined : v;
+      const d = new Date(String(v));
+      return isNaN(d.getTime()) ? undefined : d;
+    };
+
+    const hydratePosition = (
+      current: TradePosition,
+      incoming?: Partial<TradePosition>
+    ): TradePosition => {
+      if (!incoming) return current;
+      return {
+        ...current,
+        ...incoming,
+        id: incoming.id || current.id,
+        matchId,
+        positionType: incoming.positionType || current.positionType,
+        status: incoming.status || current.status,
+        entryTimestamp: toDate(incoming.entryTimestamp) ?? current.entryTimestamp,
+        exitTimestamp: toDate(incoming.exitTimestamp) ?? current.exitTimestamp,
+      };
+    };
+
+    const hydrateTrade = (
+      incoming?: StrategyTradeRecord | null
+    ): StrategyTradeRecord | null | undefined => {
+      if (incoming === undefined) return undefined;
+      if (incoming === null) return null;
+      return {
+        ...incoming,
+        entryTime: toDate(incoming.entryTime) || new Date(),
+        exitTime: toDate(incoming.exitTime),
+        createdAt: toDate(incoming.createdAt) || new Date(),
+        updatedAt: toDate(incoming.updatedAt) || new Date(),
+      };
+    };
+
+    const hydrateSignal = (sig: StrategySignal): StrategySignal => ({
+      ...sig,
+      timestamp: toDate(sig.timestamp) || new Date(),
+    });
+
+    if (snapshot.stage !== undefined) state.stage = snapshot.stage;
+    if (snapshot.bookingTeamName !== undefined) state.bookingTeamName = snapshot.bookingTeamName;
+    if (snapshot.bookingTeamKey !== undefined) state.bookingTeamKey = snapshot.bookingTeamKey;
+    if (snapshot.battingTeamKey !== undefined) state.battingTeamKey = snapshot.battingTeamKey;
+    if (snapshot.bowlingTeamKey !== undefined) state.bowlingTeamKey = snapshot.bowlingTeamKey;
+    if (snapshot.teamInControl !== undefined) state.teamInControl = snapshot.teamInControl;
+    if (snapshot.pending85 !== undefined) state.pending85 = snapshot.pending85;
+    if (snapshot.lastEvaluatedOver !== undefined) state.lastEvaluatedOver = snapshot.lastEvaluatedOver;
+    if (snapshot.lastEvaluatedWickets !== undefined) state.lastEvaluatedWickets = snapshot.lastEvaluatedWickets;
+    if (snapshot.lastEvaluatedRuns !== undefined) state.lastEvaluatedRuns = snapshot.lastEvaluatedRuns;
+    if (snapshot.lastEvaluatedBalls !== undefined) state.lastEvaluatedBalls = snapshot.lastEvaluatedBalls;
+    if (snapshot.lastEvaluatedOdds !== undefined) state.lastEvaluatedOdds = snapshot.lastEvaluatedOdds;
+    if (snapshot.lastEvaluatedPaise !== undefined) state.lastEvaluatedPaise = snapshot.lastEvaluatedPaise;
+    if (snapshot.lastEvaluatedControl !== undefined) state.lastEvaluatedControl = snapshot.lastEvaluatedControl;
+    if (snapshot.abnormalActivityCount !== undefined) state.abnormalActivityCount = snapshot.abnormalActivityCount;
+
+    if (snapshot.firstEntryPosition) {
+      state.firstEntryPosition = hydratePosition(state.firstEntryPosition, snapshot.firstEntryPosition);
+    }
+    if (snapshot.secondEntryPosition) {
+      state.secondEntryPosition = hydratePosition(state.secondEntryPosition, snapshot.secondEntryPosition);
+    }
+    if (snapshot.firstEntryTrade !== undefined) {
+      state.firstEntryTrade = hydrateTrade(snapshot.firstEntryTrade) ?? null;
+    }
+    if (snapshot.secondEntryTrade !== undefined) {
+      state.secondEntryTrade = hydrateTrade(snapshot.secondEntryTrade) ?? null;
+    }
+    if (Array.isArray(snapshot.signalsHistory)) {
+      state.signalsHistory = snapshot.signalsHistory.map(hydrateSignal).slice(0, 200);
+    }
+    if (Array.isArray(snapshot.candidates)) {
+      state.candidates = snapshot.candidates.map(hydrateSignal).slice(0, 200);
+    }
+    if (snapshot.bookingConfirmedBoundary !== undefined) {
+      state.bookingConfirmedBoundary = snapshot.bookingConfirmedBoundary
+        ? {
+            ...snapshot.bookingConfirmedBoundary,
+            timestamp: toDate(snapshot.bookingConfirmedBoundary.timestamp) || new Date(),
+          }
+        : null;
+    }
+    if (snapshot.entryConfirmedBoundary !== undefined) {
+      state.entryConfirmedBoundary = snapshot.entryConfirmedBoundary
+        ? {
+            ...snapshot.entryConfirmedBoundary,
+            timestamp: toDate(snapshot.entryConfirmedBoundary.timestamp) || new Date(),
+          }
+        : null;
+    }
+    if (snapshot.processedEventKeys) {
+      state.processedEventKeys =
+        snapshot.processedEventKeys instanceof Set
+          ? new Set(snapshot.processedEventKeys)
+          : new Set(snapshot.processedEventKeys);
+    }
+    if (snapshot.lastUpdated) {
+      state.lastUpdated = toDate(snapshot.lastUpdated) || new Date();
+    }
+
+    return state;
   }
 
   /**

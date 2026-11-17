@@ -341,6 +341,17 @@ CREATE INDEX IF NOT EXISTS idx_strategy_trades_match ON strategy_trades(match_id
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_status ON strategy_trades(status);
 
 -- ============================================================================
+-- 9B. STRATEGY MATCH STATES (Authoritative Server Engine Snapshot for Reboot Rehydration)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS strategy_match_states (
+  match_id VARCHAR(64) PRIMARY KEY,
+  stage VARCHAR(64) NOT NULL DEFAULT 'WAITING_FOR_CONFIRMATION',
+  state JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================================
 -- 10. APPLICATION SETTINGS (Key-Value Store)
 -- ============================================================================
 
@@ -366,7 +377,7 @@ VALUES (
     "notifyResults": true,
     "notifyOverCompletion": true,
     "notifyPeriodicDigest": true,
-    "notifyStrategyEntries": true,
+    "notifyStrategyEntries": false,
     "digestIntervalMinutes": 3
   }'::jsonb,
   'Default Telegram Bot and Broadcast Notifications Configuration',

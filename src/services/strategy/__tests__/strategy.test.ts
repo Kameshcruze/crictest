@@ -13,6 +13,13 @@ import {
   isWithinEntryWindow,
   calculatePaiseChange,
   detectTeamInControl,
+  StrategyPersistenceCoordinator,
+  StrategyStorageAdapter,
+  SerializedMatchStrategyState,
+  StrategyTradeRecord,
+  TradePosition,
+  StrategySignal,
+  buildSignalDedupeHash,
 } from '../index';
 
 describe('Cricket Trading Strategy Engine - Boundary & Rules Suite', () => {
@@ -936,5 +943,409 @@ describe('Cricket Trading Strategy Engine - Boundary & Rules Suite', () => {
       unsubscribe();
     });
   });
+
+  // =========================================================================
+  // PHASE 2: SERVER PERSISTENCE, REHYDRATION & OFFLINE RESILIENCE SUITE
+  // =========================================================================
+  describe('Phase 2 Server Persistence, Rehydration & Resilience Suite', () => {
+    function createInMemoryStorage(): StrategyStorageAdapter & {
+      snapshots: Map<string, SerializedMatchStrategyState>;
+      trades: Map<string, StrategyTradeRecord>;
+      positions: Map<string, TradePosition>;
+      signals: Map<string, StrategySignal>;
+      tradeWriteCalls: number;
+      exitWriteCalls: number;
+      failWrites: boolean;
+    } {
+      const store = {
+        snapshots: new Map<string, SerializedMatchStrategyState>(),
+        trades: new Map<string, StrategyTradeRecord>(),
+        positions: new Map<string, TradePosition>(),
+        signals: new Map<string, StrategySignal>(),
+        tradeWriteCalls: 0,
+        exitWriteCalls: 0,
+        failWrites: false,
+
+        async loadAllSnapshots() {
+          return Array.from(store.snapshots.values());
+        },
+        async loadAllTrades() {
+          return Array.from(store.trades.values());
+        },
+        async loadAllPositions() {
+          return Array.from(store.positions.values());
+        },
+        async loadRecentSignals() {
+          return Array.from(store.signals.values());
+        },
+        async upsertTrade(trade: StrategyTradeRecord) {
+          if (store.failWrites) throw new Error('connect ECONNREFUSED 127.0.0.1:5432');
+          store.tradeWriteCalls += 1;
+          const key = `${trade.matchId}:${trade.entryType}`;
+          const existing = store.trades.get(key);
+          // Enforce DB idempotency: never overwrite BOOKSET_COMPLETED
+          if (existing?.status === 'BOOKSET_COMPLETED') {
+            return;
+          }
+          if (trade.status === 'BOOKSET_COMPLETED') {
+            store.exitWriteCalls += 1;
+          }
+          store.trades.set(key, { ...trade });
+        },
+        async upsertPosition(position: TradePosition) {
+          if (store.failWrites) throw new Error('connect ECONNREFUSED 127.0.0.1:5432');
+          const key = `${position.matchId}:${position.positionType}`;
+          const existing = store.positions.get(key);
+          if (existing?.status === 'RECORDED_EXIT') return;
+          store.positions.set(key, { ...position });
+        },
+        async insertSignal(signal: StrategySignal, dedupeHash: string) {
+          if (store.failWrites) throw new Error('connect ECONNREFUSED 127.0.0.1:5432');
+          if (!store.signals.has(dedupeHash)) {
+            store.signals.set(dedupeHash, { ...signal });
+          }
+        },
+        async upsertSnapshot(snapshot: SerializedMatchStrategyState) {
+          if (store.failWrites) throw new Error('connect ECONNREFUSED 127.0.0.1:5432');
+          store.snapshots.set(snapshot.matchId, JSON.parse(JSON.stringify(snapshot)));
+        },
+        async deleteMatchStrategy(matchId: string) {
+          store.snapshots.delete(matchId);
+          for (const k of Array.from(store.trades.keys())) {
+            if (k.startsWith(`${matchId}:`)) store.trades.delete(k);
+          }
+          for (const k of Array.from(store.positions.keys())) {
+            if (k.startsWith(`${matchId}:`)) store.positions.delete(k);
+          }
+          for (const [h, s] of Array.from(store.signals.entries())) {
+            if (s.matchId === matchId) store.signals.delete(h);
+          }
+        },
+      };
+      return store;
+    }
+
+    function makeSnapMatch(matchId: string, runs: number, wickets: number, overs: number): any {
+      return {
+        id: matchId,
+        seriesName: 'Test League',
+        status: 'live',
+        battingTeamKey: 'ADS-W',
+        team1: { key: 'ADS-W', name: 'Adelaide Strikers Women', shortName: 'ADS-W' },
+        team2: { key: 'BH-W', name: 'Brisbane Heat Women', shortName: 'BH-W' },
+        team1Score: { runs, wickets, overs, completedOvers: Math.floor(overs), ballsInOver: 1 },
+      };
+    }
+
+    function makeSnapOdds(matchId: string, favoriteKey: string, favoriteName: string, backRate: number): any {
+      return {
+        matchId,
+        oddsKey: matchId,
+        status: 'success',
+        recordsCount: 1,
+        odds: {
+          matchKey: matchId,
+          favoriteTeamKey: favoriteKey,
+          favoriteTeamName: favoriteName,
+          bookmaker: {
+            rawRateString: `${backRate}+1`,
+            backRate,
+            layRate: backRate + 1,
+            decimalBack: Number((1 + backRate / 100).toFixed(2)),
+            decimalLay: Number((1 + (backRate + 1) / 100).toFixed(2)),
+            spread: 1,
+            isSuspended: false,
+          },
+          raw: {
+            F: `^${favoriteKey}`,
+            R: `${backRate}+1`,
+          },
+        },
+      };
+    }
+
+    it('No duplicate entries or exits after server restart and rehydration', async () => {
+      const storage = createInMemoryStorage();
+      const matchId = 'RESTART_NO_DUP_01';
+
+      // Server instance 1
+      const coord1 = new StrategyPersistenceCoordinator({ storage });
+
+      // Tick 1: Bowling ahead at 80p
+      await coord1.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 10, 0, 1.0),
+        makeSnapOdds(matchId, 'BH-W', 'Brisbane Heat Women', 80)
+      );
+      // Tick 2: Boundary 1 (FOUR, 22p shift) confirms booking team ADS-W @ 98p
+      await coord1.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 14, 0, 1.1),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 98),
+        { boundaryEvent: { type: 'FOUR', oddsMovement: 22 } }
+      );
+      // Tick 3: Boundary 2 (FOUR, |98 - 86| = 12p >= 11p) @ 86p triggers FIRST_ENTRY immediately
+      await coord1.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 18, 0, 1.5),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 86),
+        { boundaryEvent: { type: 'FOUR', oddsMovement: 12 } }
+      );
+      // Tick 4: Bookset target hit @ 50p -> FIRST_ENTRY exits once
+      await coord1.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 35, 0, 3.2),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 50)
+      );
+
+      assert.equal(storage.trades.size, 1);
+      assert.equal(storage.trades.get(`${matchId}:FIRST_ENTRY`)?.status, 'BOOKSET_COMPLETED');
+      const writesBeforeRestart = storage.tradeWriteCalls;
+      const exitsBeforeRestart = storage.exitWriteCalls;
+      assert.equal(exitsBeforeRestart, 1);
+
+      // Simulate server restart: brand new Coordinator + Engine
+      const coord2 = new StrategyPersistenceCoordinator({ storage });
+      const rehydrateSummary = await coord2.rehydrateFromDatabase();
+      assert.equal(rehydrateSummary.tradesRestored, 1);
+
+      // Replay ticks that might re-arrive around the same match state after restart
+      await coord2.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 35, 0, 3.2),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 50)
+      );
+      await coord2.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 38, 0, 3.4),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 88)
+      );
+
+      // Must still have exactly 1 FIRST_ENTRY trade and 1 exit write total
+      assert.equal(storage.trades.size, 1);
+      assert.equal(storage.tradeWriteCalls, writesBeforeRestart);
+      assert.equal(storage.exitWriteCalls, exitsBeforeRestart);
+    });
+
+    it('Rehydrates full state cleanly on boot without firing any alerts', async () => {
+      const storage = createInMemoryStorage();
+      const matchId = 'REHYDRATE_ZERO_ALERTS';
+      const entryTime = new Date('2026-11-17T06:15:00Z');
+
+      const savedTrade1: StrategyTradeRecord = {
+        id: 't1',
+        matchId,
+        matchName: 'ADS-W vs BH-W',
+        seriesName: 'WBBL 2026',
+        bookingTeam: 'Adelaide Strikers Women',
+        battingTeam: 'Adelaide Strikers Women',
+        bowlingTeam: 'Brisbane Heat Women',
+        entryType: 'FIRST_ENTRY',
+        innings: 1,
+        entryOver: 2.3,
+        entryPaise: 87,
+        entryDecimal: 1.87,
+        entryWickets: 0,
+        entryTime,
+        status: 'ACTIVE',
+        createdAt: entryTime,
+        updatedAt: entryTime,
+      };
+      const savedTrade2: StrategyTradeRecord = {
+        id: 't2',
+        matchId,
+        matchName: 'ADS-W vs BH-W',
+        seriesName: 'WBBL 2026',
+        bookingTeam: 'Adelaide Strikers Women',
+        battingTeam: 'Adelaide Strikers Women',
+        bowlingTeam: 'Brisbane Heat Women',
+        entryType: 'SECOND_ENTRY',
+        innings: 1,
+        entryOver: 4.1,
+        entryPaise: 61,
+        entryDecimal: 1.61,
+        entryWickets: 1,
+        entryTime: new Date('2026-11-17T06:22:00Z'),
+        status: 'ACTIVE',
+        createdAt: new Date('2026-11-17T06:22:00Z'),
+        updatedAt: new Date('2026-11-17T06:22:00Z'),
+      };
+
+      storage.trades.set(`${matchId}:FIRST_ENTRY`, savedTrade1);
+      storage.trades.set(`${matchId}:SECOND_ENTRY`, savedTrade2);
+      storage.snapshots.set(matchId, {
+        matchId,
+        stage: 'ACTIVE_SECOND_ENTRY',
+        bookingTeamName: 'Adelaide Strikers Women',
+        bookingTeamKey: 'ADS-W',
+        pending85: false,
+        firstEntryPosition: {
+          id: 'pos1',
+          matchId,
+          positionType: 'FIRST_ENTRY',
+          status: 'RECORDED_ENTRY',
+          entryOdds: 1.87,
+          entryOver: 2.3,
+          entryInnings: 1,
+          entryWickets: 0,
+          entryTimestamp: entryTime,
+        },
+        secondEntryPosition: {
+          id: 'pos2',
+          matchId,
+          positionType: 'SECOND_ENTRY',
+          status: 'RECORDED_ENTRY',
+          entryOdds: 1.61,
+          entryOver: 4.1,
+          entryInnings: 1,
+          entryWickets: 1,
+          entryTimestamp: savedTrade2.entryTime,
+        },
+        firstEntryTrade: savedTrade1,
+        secondEntryTrade: savedTrade2,
+        lastEvaluatedOver: 4.2,
+        lastEvaluatedWickets: 1,
+        lastEvaluatedRuns: 34,
+        lastEvaluatedBalls: 26,
+        lastEvaluatedOdds: 1.61,
+        lastEvaluatedPaise: 61,
+        lastEvaluatedControl: 'BOWLING',
+        teamInControl: 'BOWLING',
+        abnormalActivityCount: 2,
+        signalsHistory: [],
+        candidates: [],
+        processedEventKeys: [],
+        lastUpdated: new Date('2026-11-17T06:22:00Z'),
+      });
+
+      const sampleSig: StrategySignal = {
+        id: 'sig-1',
+        signalType: 'FIRST_ENTRY_TRIGGER',
+        matchId,
+        timestamp: entryTime,
+        currentInnings: 1,
+        currentOver: 2.3,
+        ballNumber: 3,
+        relevantOdds: {
+          measuredTeam: 'Adelaide Strikers Women',
+          decimalOdds: 1.87,
+          previousDecimalOdds: 1.80,
+          oddsDelta: 0.07,
+          opposingTeamOdds: 2.13,
+        },
+        ruleEvaluated: 'FIRST_ENTRY',
+        status: 'PASS',
+        explanation: 'Restored signal',
+      };
+      storage.signals.set(buildSignalDedupeHash(sampleSig), sampleSig);
+
+      const alertSpy: any[] = [];
+      const coord = new StrategyPersistenceCoordinator({
+        storage,
+        strategyAlertsEnabled: true,
+        onStrategyAlert: async (evt) => {
+          alertSpy.push(evt);
+        },
+      });
+
+      const res = await coord.rehydrateFromDatabase();
+      assert.equal(res.matchesRestored, 1);
+      assert.equal(res.tradesRestored, 2);
+      assert.equal(res.signalsRestored, 1);
+      assert.equal(alertSpy.length, 0, 'Boot rehydration must NEVER fire strategy alerts');
+
+      const restored = coord.engine.getState(matchId);
+      assert.equal(restored.stage, 'ACTIVE_SECOND_ENTRY');
+      assert.equal(restored.bookingTeamName, 'Adelaide Strikers Women');
+      assert.equal(restored.bookingTeamKey, 'ADS-W');
+      assert.equal(restored.firstEntryTrade?.entryPaise, 87);
+      assert.equal(restored.secondEntryTrade?.entryPaise, 61);
+      assert.equal(restored.secondEntryPosition.entryOdds, 1.61);
+      assert.equal(restored.secondEntryPosition.entryOver, 4.1);
+      assert.equal(restored.lastEvaluatedOver, 4.2);
+      assert.equal(restored.lastEvaluatedRuns, 34);
+      assert.equal(restored.signalsHistory.length, 1);
+    });
+
+    it('Unreachable DB queues trades/exits in offline outbox and flushes without losing a recorded trade', async () => {
+      const storage = createInMemoryStorage();
+      const matchId = 'OFFLINE_DB_RECOVERY_01';
+      const coord = new StrategyPersistenceCoordinator({ storage });
+
+      // Simulate PostgreSQL completely offline / ECONNREFUSED
+      storage.failWrites = true;
+
+      await coord.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 10, 0, 1.0),
+        makeSnapOdds(matchId, 'BH-W', 'Brisbane Heat Women', 80),
+        { dbAvailable: false }
+      );
+      await coord.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 14, 0, 1.1),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 98),
+        { boundaryEvent: { type: 'FOUR', oddsMovement: 22 }, dbAvailable: false }
+      );
+      // Even if dbAvailable=true is passed while socket throws ECONNREFUSED, outbox must catch it
+      await coord.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 18, 0, 1.5),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 86),
+        { boundaryEvent: { type: 'FOUR', oddsMovement: 12 }, dbAvailable: true }
+      );
+      await coord.evaluateMatchSnapshot(
+        makeSnapMatch(matchId, 36, 0, 3.3),
+        makeSnapOdds(matchId, 'ADS-W', 'Adelaide Strikers Women', 49),
+        { dbAvailable: false }
+      );
+
+      // DB still has 0 rows because it was unreachable, but coordinator held state & outbox
+      assert.equal(storage.trades.size, 0);
+      assert.equal(coord.engine.getState(matchId).stage, 'FIRST_BOOKSET_COMPLETED');
+      assert.ok(coord.getPendingCounts().trades >= 1, 'Recorded trade must be queued in outbox');
+      assert.ok(coord.getPendingCounts().total > 0);
+
+      // PostgreSQL comes back online -> flush outbox
+      storage.failWrites = false;
+      const flushResult = await coord.flushPendingSaves();
+
+      assert.equal(flushResult.remaining, 0);
+      assert.ok(flushResult.flushed > 0);
+      assert.equal(storage.trades.size, 1);
+      const saved = storage.trades.get(`${matchId}:FIRST_ENTRY`);
+      assert.equal(saved?.entryPaise, 86);
+      assert.equal(saved?.exitPaise, 49);
+      assert.equal(saved?.status, 'BOOKSET_COMPLETED');
+    });
+
+    it('STRATEGY_ALERTS_ENABLED defaults to false and suppresses strategy alerts until enabled', async () => {
+      const storage = createInMemoryStorage();
+      const alertSpy: any[] = [];
+      const coord = new StrategyPersistenceCoordinator({
+        storage,
+        onStrategyAlert: async (evt) => {
+          alertSpy.push(evt);
+        },
+      });
+
+      assert.equal(coord.isStrategyAlertsEnabled(), false);
+
+      const matchId = 'ALERTS_OFF_DEFAULT';
+      await coord.recordManualEntry({
+        matchId,
+        positionType: 'FIRST_ENTRY',
+        entryOdds: 1.9,
+        innings: 1,
+        over: 3.1,
+        wickets: 0,
+        bookingTeam: 'ADS-W',
+        battingTeam: 'ADS-W',
+        bowlingTeam: 'BH-W',
+      });
+      await coord.recordManualExit({
+        matchId,
+        positionType: 'FIRST_ENTRY',
+        exitOdds: 1.5,
+        over: 5.2,
+      });
+
+      // Trade + exit were recorded in DB, but 0 strategy alerts were fired
+      assert.equal(storage.trades.get(`${matchId}:FIRST_ENTRY`)?.status, 'BOOKSET_COMPLETED');
+      assert.equal(alertSpy.length, 0);
+    });
+  });
 });
+
 

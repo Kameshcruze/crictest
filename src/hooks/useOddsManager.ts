@@ -7,7 +7,6 @@ import {
   verifyMatchOddsConsistency,
 } from '../services/oddsApi';
 import { registerDynamicTeam } from '../data/cricketMapping';
-import { syncOddsToSupabase } from '../services/supabaseSyncService';
 
 export interface UseOddsManagerReturn {
   oddsByMatchId: Record<string, MatchOddsState>;
@@ -18,7 +17,10 @@ export interface UseOddsManagerReturn {
   totalRecordsReceived: number;
 }
 
-export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerReturn {
+export function useOddsManager(
+  matches: ParsedCricketMatch[],
+  serverOddsByMatch?: Record<string, MatchOddsState>
+): UseOddsManagerReturn {
   const [oddsByMatchId, setOddsByMatchId] = useState<Record<string, MatchOddsState>>({});
   const [isGlobalRefreshing, setIsGlobalRefreshing] = useState(false);
 
@@ -104,12 +106,6 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
       totalRecordsRef.current += 1;
       setTotalRecordsReceived(totalRecordsRef.current);
 
-      let computedMovement: OddsMovement = {
-        direction: 'stable',
-        deltaBack: 0,
-        deltaLay: 0,
-      };
-
       setOddsByMatchId((prev) => {
         const existing = prev[cleanId];
         const existingOdds = existing?.odds || null;
@@ -140,8 +136,6 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
             };
           }
         }
-
-        computedMovement = movement;
 
         // Record tick history (up to last 30 ticks)
         const newTick: OddsTick = {
@@ -175,19 +169,6 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
           },
         };
       });
-
-      // Asynchronously persist current odds and price movement to Supabase
-      syncOddsToSupabase(cleanId, {
-        matchId: cleanId,
-        oddsKey: cleanId,
-        maskedKey: maskOddsKey(cleanId),
-        status: odds.bookmaker.isSuspended ? 'unavailable' : 'success',
-        odds,
-        movement: computedMovement,
-        recordsCount: totalRecordsRef.current,
-        lastUpdated: new Date(),
-        consistency,
-      }).catch(() => {});
     } catch (err: unknown) {
       // Guard: Discard stale failures
       if (requestSeqRef.current[cleanId] !== seq) return;
@@ -242,30 +223,83 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
     }
   }, [fetchOddsForMatch]);
 
-  /**
-   * Automatic background polling loop for odds
-   * - Trigger initial fetch once when a match is discovered
-   * - Live matches: polled steadily every 3 seconds
-   * - Upcoming/Completed matches: polled every 20 seconds
-   */
+  // Merge authoritative server-pushed SSE odds snapshots (keeps client read-only)
+  const lastServerTimestampRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    if (!serverOddsByMatch || Object.keys(serverOddsByMatch).length === 0) return;
+
+    setOddsByMatchId((prev) => {
+      const next = { ...prev };
+      let anyChanged = false;
+
+      for (const [mId, incoming] of Object.entries(serverOddsByMatch)) {
+        if (!incoming?.odds) continue;
+        const incomingTime = incoming.lastUpdated ? new Date(incoming.lastUpdated).getTime() : Date.now();
+        if (lastServerTimestampRef.current[mId] === incomingTime && prev[mId]?.odds) {
+          continue;
+        }
+        lastServerTimestampRef.current[mId] = incomingTime;
+        anyChanged = true;
+
+        const existing = prev[mId];
+        const newTick: OddsTick = {
+          timestamp: new Date(incomingTime),
+          rawRateString: incoming.odds.bookmaker.rawRateString,
+          backRate: incoming.odds.bookmaker.backRate,
+          layRate: incoming.odds.bookmaker.layRate,
+          decimalBack: incoming.odds.bookmaker.decimalBack,
+          decimalLay: incoming.odds.bookmaker.decimalLay,
+          spread: incoming.odds.bookmaker.spread,
+          isSuspended: incoming.odds.bookmaker.isSuspended,
+        };
+        const prevTick = existing?.history?.[0];
+        const shouldAppendTick =
+          !prevTick ||
+          prevTick.rawRateString !== newTick.rawRateString ||
+          newTick.timestamp.getTime() - new Date(prevTick.timestamp).getTime() >= 900;
+
+        const history = shouldAppendTick
+          ? [newTick, ...(existing?.history || [])].slice(0, 30)
+          : existing?.history || [newTick];
+
+        next[mId] = {
+          ...incoming,
+          lastUpdated: new Date(incomingTime),
+          previousOdds: incoming.previousOdds || existing?.odds || null,
+          history,
+        };
+      }
+
+      return anyChanged ? next : prev;
+    });
+    totalRecordsRef.current += 1;
+    setTotalRecordsReceived(totalRecordsRef.current);
+  }, [serverOddsByMatch]);
+
   useEffect(() => {
     if (matches.length === 0) return;
 
-    // Trigger initial fetch for any new match not yet fetched
+    // Trigger initial fetch only for matches that don't already have server SSE odds
     matches.forEach((m) => {
       if (!initialFetchedRef.current.has(m.id)) {
         initialFetchedRef.current.add(m.id);
-        fetchOddsForMatch(m.id);
+        if (!serverOddsByMatch?.[m.id]?.odds) {
+          fetchOddsForMatch(m.id);
+        }
       }
     });
-  }, [matches, fetchOddsForMatch]);
+  }, [matches, fetchOddsForMatch, serverOddsByMatch]);
 
   useEffect(() => {
     const liveTimer = setInterval(() => {
       matchesRef.current
         .filter((m) => m.status === 'live')
         .forEach((m) => {
-          fetchOddsForMatch(m.id);
+          // Only poll from browser if SSE hasn't delivered a fresh update within 5s
+          const lastSse = lastServerTimestampRef.current[m.id] || 0;
+          if (Date.now() - lastSse > 5000) {
+            fetchOddsForMatch(m.id);
+          }
         });
     }, 3000);
 
@@ -273,7 +307,10 @@ export function useOddsManager(matches: ParsedCricketMatch[]): UseOddsManagerRet
       matchesRef.current
         .filter((m) => m.status !== 'live')
         .forEach((m) => {
-          fetchOddsForMatch(m.id);
+          const lastSse = lastServerTimestampRef.current[m.id] || 0;
+          if (Date.now() - lastSse > 20000) {
+            fetchOddsForMatch(m.id);
+          }
         });
     }, 20000);
 

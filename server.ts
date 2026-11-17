@@ -4,10 +4,27 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import pg from 'pg';
 import dotenv from 'dotenv';
-import { parseBookmakerRate, parseSessionMarkets } from './src/services/oddsApi';
+import { parseBookmakerRate, parseSessionMarkets, transformGetSV3Response } from './src/services/oddsApi';
 import { resolveTeam, resolveSeries, resolveVenue } from './src/data/cricketMapping';
+import { ParsedCricketMatch, ParsedInningsScore } from './src/types/cricket';
+import { MatchOddsState } from './src/types/odds';
+import {
+  CricketStrategyEngine,
+  PositionType,
+  SerializedMatchStrategyState,
+  StrategyPersistenceCoordinator,
+  StrategySignal,
+  StrategyStorageAdapter,
+  StrategyTradeRecord,
+  TradePosition,
+} from './src/services/strategy/index';
 
 dotenv.config();
+
+/**
+ * Strategy Telegram Alerts Flag (Phase 2: OFF by default until Phase 3 is ready)
+ */
+const STRATEGY_ALERTS_ENABLED = process.env.STRATEGY_ALERTS_ENABLED === 'true';
 
 /**
  * Series Filter Configuration (Optional)
@@ -89,6 +106,15 @@ async function ensureTimelineSchema(client: pg.PoolClient) {
       ON match_timeline_ticks(match_id, legal_ball_count);
   `);
 
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS strategy_match_states (
+      match_id VARCHAR(64) PRIMARY KEY,
+      stage VARCHAR(64) NOT NULL DEFAULT 'WAITING_FOR_CONFIRMATION',
+      state JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
   // Seed sets from existing timeline rows so restarts don't duplicate completed rows
   const completedRes = await client.query(
     `SELECT DISTINCT match_id FROM match_timeline_ticks WHERE match_status = 'completed'`
@@ -105,6 +131,10 @@ async function ensureTimelineSchema(client: pg.PoolClient) {
 let isDbAvailable = false;
 let dbSchemaReady = false;
 let hasLoggedDbOffline = false;
+let hasRehydratedOnBoot = false;
+let leaderLockClient: pg.PoolClient | null = null;
+let hasPgAdvisoryLock = false;
+const STRATEGY_LEADER_LOCK_KEY = 84729103;
 
 function isDbConnectionError(err: any): boolean {
   const code = String(err?.code || '');
@@ -118,6 +148,52 @@ function isDbConnectionError(err: any): boolean {
     msg.includes('ECONNREFUSED') ||
     msg.includes('Connection terminated unexpectedly')
   );
+}
+
+function releaseLeaderLockClient() {
+  hasPgAdvisoryLock = false;
+  if (leaderLockClient) {
+    try {
+      leaderLockClient.release(true);
+    } catch {
+      // Ignore cleanup error
+    }
+    leaderLockClient = null;
+  }
+}
+
+async function acquireStrategyLeaderLock(): Promise<boolean> {
+  if (!isDbAvailable) {
+    // Fallback when DB is offline: only PM2 instance 0 (or standalone process) evaluates
+    return !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
+  }
+  if (hasPgAdvisoryLock && leaderLockClient) {
+    return true;
+  }
+  try {
+    const client = await dbPool.connect();
+    const res = await client.query('SELECT pg_try_advisory_lock($1) AS locked', [
+      STRATEGY_LEADER_LOCK_KEY,
+    ]);
+    if (res.rows[0]?.locked === true) {
+      client.on('error', () => {
+        releaseLeaderLockClient();
+      });
+      leaderLockClient = client;
+      hasPgAdvisoryLock = true;
+      return true;
+    }
+    client.release();
+    hasPgAdvisoryLock = false;
+    return false;
+  } catch (err: any) {
+    releaseLeaderLockClient();
+    if (isDbConnectionError(err)) {
+      isDbAvailable = false;
+      return !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
+    }
+    return false;
+  }
 }
 
 // Database connection verification test & schema initialization on server startup
@@ -135,16 +211,32 @@ async function testDbConnection(isRetry = false) {
     isDbAvailable = true;
     hasLoggedDbOffline = false;
 
+    // Rehydrate strategy engine state from PostgreSQL without firing alerts or duplicates
+    try {
+      const rehydrateStats = await strategyCoordinator.rehydrateFromDatabase({
+        preserveActiveMemory: hasRehydratedOnBoot || strategyCoordinator.engine.getAllMatchIds().length > 0,
+      });
+      hasRehydratedOnBoot = true;
+      const flushStats = await strategyCoordinator.flushPendingSaves();
+      console.log(
+        `[Strategy Rehydration] matches=${rehydrateStats.matchesRestored} trades=${rehydrateStats.tradesRestored} positions=${rehydrateStats.positionsRestored} signals=${rehydrateStats.signalsRestored} flushedOutbox=${flushStats.flushed}`
+      );
+    } catch (rehydrateErr: any) {
+      console.warn('[Strategy Rehydration Warning]', rehydrateErr?.message || rehydrateErr);
+    }
+
     const safeUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
     console.log(`\n======================================================`);
     console.log(`[PostgreSQL] ${isRetry ? 'Reconnection' : 'Connection'} SUCCESSFUL!`);
     console.log(`[PostgreSQL] Connected to: "${res.rows[0].db_name}" (${safeUrl})`);
     console.log(`[PostgreSQL] Series Filter: ${ALLOWED_SERIES_FILTER.length === 0 ? 'ALL LIVE MATCHES' : ALLOWED_SERIES_FILTER.join(', ')}`);
     console.log(`[PostgreSQL] Timeline Table: match_timeline_ticks READY`);
+    console.log(`[Strategy Engine] Server-side 1s loop active | STRATEGY_ALERTS_ENABLED=${STRATEGY_ALERTS_ENABLED}`);
     console.log(`[PostgreSQL] Server Time: ${res.rows[0].now}`);
     console.log(`======================================================\n`);
   } catch (err: any) {
     isDbAvailable = false;
+    releaseLeaderLockClient();
     if (!hasLoggedDbOffline) {
       hasLoggedDbOffline = true;
       const safeUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
@@ -153,7 +245,7 @@ async function testDbConnection(isRetry = false) {
       console.warn(`Target URL: ${safeUrl}`);
       console.warn(`Reason: ${err.message}`);
       console.warn(`Tip: Ensure PostgreSQL service is running on localhost:5432 and database "leadhunt" exists.`);
-      console.warn(`The application will continue running and auto-retry every 15s.`);
+      console.warn(`The application will continue running (strategy evaluates in-memory & queues writes) and auto-retry every 15s.`);
       console.warn(`======================================================\n`);
     }
   }
@@ -231,6 +323,7 @@ let activeTelegramConfig: {
   notifyResults: boolean;
   notifyOverCompletion: boolean;
   notifyPeriodicDigest: boolean;
+  notifyStrategyEntries: boolean;
   digestIntervalMinutes: number;
 } = {
   botToken: DEFAULT_TELEGRAM_BOT_TOKEN,
@@ -240,6 +333,7 @@ let activeTelegramConfig: {
   notifyResults: false,
   notifyOverCompletion: false,
   notifyPeriodicDigest: false,
+  notifyStrategyEntries: false,
   digestIntervalMinutes: 3,
 };
 
@@ -257,6 +351,7 @@ async function reloadTelegramConfigFromDb() {
         notifyResults: cfg.notifyResults ?? activeTelegramConfig.notifyResults,
         notifyOverCompletion: cfg.notifyOverCompletion ?? activeTelegramConfig.notifyOverCompletion,
         notifyPeriodicDigest: cfg.notifyPeriodicDigest ?? activeTelegramConfig.notifyPeriodicDigest,
+        notifyStrategyEntries: cfg.notifyStrategyEntries ?? activeTelegramConfig.notifyStrategyEntries,
         digestIntervalMinutes: cfg.digestIntervalMinutes || activeTelegramConfig.digestIntervalMinutes,
       };
     }
@@ -1247,8 +1342,16 @@ async function syncLatestStateToDb(
   const team2Id = t2Res.rows[0]?.id;
 
   const venueName = item.vname || resolveVenue(item.v) || null;
-  const startTimeIso = item.t ? new Date(Number(item.t)).toISOString() : new Date().toISOString();
-  const finishTimeIso = item.finishTime ? new Date(Number(item.finishTime)).toISOString() : null;
+  const parsedStartNum = Number(item.ti ?? item.tiMs ?? item.t);
+  const startTimeIso =
+    !isNaN(parsedStartNum) && parsedStartNum > 0
+      ? new Date(parsedStartNum).toISOString()
+      : new Date().toISOString();
+  const parsedFinishNum = Number(item.finishTime);
+  const finishTimeIso =
+    item.finishTime && !isNaN(parsedFinishNum) && parsedFinishNum > 0
+      ? new Date(parsedFinishNum).toISOString()
+      : null;
 
   const matchRes = await dbPool.query(
     `INSERT INTO matches (
@@ -1391,27 +1494,595 @@ async function syncLatestStateToDb(
   }
 }
 
+// Live parsed odds cache per matchId (shared with strategy engine and SSE clients)
+const serverParsedOddsCache = new Map<string, MatchOddsState>();
+
+function mapTradeRow(row: any): StrategyTradeRecord {
+  return {
+    id: String(row.id),
+    matchId: row.match_id,
+    matchName: row.match_name || undefined,
+    seriesName: row.series_name || undefined,
+    bookingTeam: row.booking_team,
+    battingTeam: row.batting_team,
+    bowlingTeam: row.bowling_team,
+    entryType: row.entry_type,
+    innings: Number(row.innings),
+    entryOver: Number(row.entry_over),
+    entryPaise: Number(row.entry_paise),
+    entryDecimal: Number(row.entry_decimal),
+    entryWickets: Number(row.entry_wickets || 0),
+    entryTime: new Date(row.entry_time),
+    exitOver: row.exit_over !== null && row.exit_over !== undefined ? Number(row.exit_over) : undefined,
+    exitPaise: row.exit_paise !== null && row.exit_paise !== undefined ? Number(row.exit_paise) : undefined,
+    exitDecimal:
+      row.exit_decimal !== null && row.exit_decimal !== undefined ? Number(row.exit_decimal) : undefined,
+    exitTime: row.exit_time ? new Date(row.exit_time) : undefined,
+    exitReason: row.exit_reason || undefined,
+    status: row.status,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+  };
+}
+
+function mapPositionRow(p: any, externalMatchId?: string): TradePosition {
+  return {
+    id: String(p.id),
+    matchId: externalMatchId || p.external_match_id || p.match_id,
+    positionType: p.position_type,
+    status: p.status,
+    candidateSignalId: p.candidate_signal_id || undefined,
+    entryOdds: p.entry_odds !== null && p.entry_odds !== undefined ? Number(p.entry_odds) : undefined,
+    entryTimestamp: p.entry_timestamp ? new Date(p.entry_timestamp) : undefined,
+    entryOver: p.entry_over !== null && p.entry_over !== undefined ? Number(p.entry_over) : undefined,
+    entryInnings: p.entry_innings !== null && p.entry_innings !== undefined ? Number(p.entry_innings) : undefined,
+    entryWickets: p.entry_wickets !== null && p.entry_wickets !== undefined ? Number(p.entry_wickets) : undefined,
+    exitOdds: p.exit_odds !== null && p.exit_odds !== undefined ? Number(p.exit_odds) : undefined,
+    exitTimestamp: p.exit_timestamp ? new Date(p.exit_timestamp) : undefined,
+    exitOver: p.exit_over !== null && p.exit_over !== undefined ? Number(p.exit_over) : undefined,
+    booksetSignalId: p.bookset_signal_id || undefined,
+  };
+}
+
+function mapSignalRow(s: any, externalMatchId?: string): StrategySignal {
+  return {
+    id: String(s.id),
+    signalType: s.signal_type,
+    matchId: externalMatchId || s.external_match_id || s.match_id,
+    timestamp: new Date(s.timestamp),
+    currentInnings: Number(s.current_innings),
+    currentOver: Number(s.current_over),
+    ballNumber: Number(s.ball_number || 0),
+    relevantOdds: {
+      measuredTeam: s.measured_team || '',
+      decimalOdds: s.decimal_odds !== null && s.decimal_odds !== undefined ? Number(s.decimal_odds) : null,
+      previousDecimalOdds:
+        s.previous_decimal_odds !== null && s.previous_decimal_odds !== undefined
+          ? Number(s.previous_decimal_odds)
+          : null,
+      oddsDelta: s.odds_delta !== null && s.odds_delta !== undefined ? Number(s.odds_delta) : null,
+      opposingTeamOdds:
+        s.opposing_team_odds !== null && s.opposing_team_odds !== undefined
+          ? Number(s.opposing_team_odds)
+          : null,
+    },
+    ruleEvaluated: s.rule_evaluated || '',
+    status: s.status,
+    explanation: s.explanation || '',
+    metadata: s.metadata || {},
+  };
+}
+
+async function ensureMatchUuidForStrategy(
+  externalMatchId: string,
+  contextMatch?: ParsedCricketMatch
+): Promise<string | null> {
+  const existing = await dbPool.query(
+    'SELECT id FROM matches WHERE external_match_id = $1 LIMIT 1',
+    [externalMatchId]
+  );
+  if (existing.rows[0]?.id) {
+    return existing.rows[0].id;
+  }
+
+  const rawItem = matchStore.matches[externalMatchId];
+  if (!contextMatch && !rawItem) {
+    return null;
+  }
+
+  const t1 = contextMatch?.team1 || resolveFullTeamInfo(rawItem?.b, rawItem?.t1Name || rawItem?.team1, rawItem?.t1Sname);
+  const t2 = contextMatch?.team2 || resolveFullTeamInfo(rawItem?.c, rawItem?.t2Name || rawItem?.team2, rawItem?.t2Sname);
+
+  const t1Res = await dbPool.query(
+    `INSERT INTO teams (external_team_key, name, short_name, color, dark_color, updated_at)
+     VALUES ($1, $2, $3, $4, $5, NOW())
+     ON CONFLICT (external_team_key) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()
+     RETURNING id`,
+    [t1.key || 'T1', t1.name || 'Team 1', t1.shortName || 'T1', t1.color || '#2563eb', t1.darkColor || '#1e3a8a']
+  );
+  const t2Res = await dbPool.query(
+    `INSERT INTO teams (external_team_key, name, short_name, color, dark_color, updated_at)
+     VALUES ($1, $2, $3, $4, $5, NOW())
+     ON CONFLICT (external_team_key) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()
+     RETURNING id`,
+    [t2.key || 'T2', t2.name || 'Team 2', t2.shortName || 'T2', t2.color || '#ef4444', t2.darkColor || '#991b1b']
+  );
+
+  const format = contextMatch?.format || rawItem?.fo || 'Match';
+  const seriesName = contextMatch?.seriesName || (rawItem ? resolveSeriesNameFromMapping(rawItem) : 'Cricket');
+  const rawStartNum = Number(rawItem?.ti ?? rawItem?.tiMs ?? rawItem?.t);
+  const startTimeIso = contextMatch?.startTime
+    ? new Date(contextMatch.startTime).toISOString()
+    : !isNaN(rawStartNum) && rawStartNum > 0
+    ? new Date(rawStartNum).toISOString()
+    : new Date().toISOString();
+
+  const matchRes = await dbPool.query(
+    `INSERT INTO matches (
+       external_match_id, format, series_name, team1_id, team2_id, start_time, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (external_match_id) DO UPDATE SET updated_at = NOW()
+     RETURNING id`,
+    [externalMatchId, format, seriesName, t1Res.rows[0]?.id, t2Res.rows[0]?.id, startTimeIso]
+  );
+  return matchRes.rows[0]?.id || null;
+}
+
+async function upsertTradeIdempotent(trade: StrategyTradeRecord): Promise<void> {
+  await dbPool.query(
+    `INSERT INTO strategy_trades (
+      match_id, match_name, series_name, booking_team, batting_team, bowling_team,
+      entry_type, innings, entry_over, entry_paise, entry_decimal, entry_wickets,
+      entry_time, exit_over, exit_paise, exit_decimal, exit_time, exit_reason,
+      status, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+    ON CONFLICT (match_id, entry_type) DO UPDATE SET
+      match_name = COALESCE(strategy_trades.match_name, EXCLUDED.match_name),
+      series_name = COALESCE(strategy_trades.series_name, EXCLUDED.series_name),
+      booking_team = COALESCE(NULLIF(strategy_trades.booking_team, ''), EXCLUDED.booking_team),
+      batting_team = COALESCE(NULLIF(strategy_trades.batting_team, ''), EXCLUDED.batting_team),
+      bowling_team = COALESCE(NULLIF(strategy_trades.bowling_team, ''), EXCLUDED.bowling_team),
+      exit_over = CASE
+        WHEN strategy_trades.status = 'BOOKSET_COMPLETED' THEN strategy_trades.exit_over
+        ELSE COALESCE(EXCLUDED.exit_over, strategy_trades.exit_over)
+      END,
+      exit_paise = CASE
+        WHEN strategy_trades.status = 'BOOKSET_COMPLETED' THEN strategy_trades.exit_paise
+        ELSE COALESCE(EXCLUDED.exit_paise, strategy_trades.exit_paise)
+      END,
+      exit_decimal = CASE
+        WHEN strategy_trades.status = 'BOOKSET_COMPLETED' THEN strategy_trades.exit_decimal
+        ELSE COALESCE(EXCLUDED.exit_decimal, strategy_trades.exit_decimal)
+      END,
+      exit_time = CASE
+        WHEN strategy_trades.status = 'BOOKSET_COMPLETED' THEN strategy_trades.exit_time
+        ELSE COALESCE(EXCLUDED.exit_time, strategy_trades.exit_time)
+      END,
+      exit_reason = CASE
+        WHEN strategy_trades.status = 'BOOKSET_COMPLETED' THEN strategy_trades.exit_reason
+        ELSE COALESCE(EXCLUDED.exit_reason, strategy_trades.exit_reason)
+      END,
+      status = CASE
+        WHEN strategy_trades.status = 'BOOKSET_COMPLETED' THEN 'BOOKSET_COMPLETED'
+        ELSE EXCLUDED.status
+      END,
+      updated_at = NOW()
+    WHERE strategy_trades.status IS DISTINCT FROM 'BOOKSET_COMPLETED'
+      AND (
+        EXCLUDED.status = 'BOOKSET_COMPLETED'
+        OR strategy_trades.match_name IS NULL
+      )`,
+    [
+      trade.matchId,
+      trade.matchName || null,
+      trade.seriesName || null,
+      trade.bookingTeam || 'Unknown Booking Team',
+      trade.battingTeam || 'Unknown Batting Team',
+      trade.bowlingTeam || 'Unknown Bowling Team',
+      trade.entryType,
+      trade.innings,
+      trade.entryOver,
+      trade.entryPaise,
+      trade.entryDecimal,
+      trade.entryWickets || 0,
+      trade.entryTime ? new Date(trade.entryTime).toISOString() : new Date().toISOString(),
+      trade.exitOver ?? null,
+      trade.exitPaise ?? null,
+      trade.exitDecimal ?? null,
+      trade.exitTime ? new Date(trade.exitTime).toISOString() : null,
+      trade.exitReason ?? null,
+      trade.status || 'ACTIVE',
+    ]
+  );
+}
+
+const pgStrategyStorageAdapter: StrategyStorageAdapter = {
+  async loadAllSnapshots(): Promise<SerializedMatchStrategyState[]> {
+    const res = await dbPool.query(`SELECT state FROM strategy_match_states`);
+    return res.rows.map((r: any) => r.state as SerializedMatchStrategyState).filter(Boolean);
+  },
+
+  async loadAllTrades(): Promise<StrategyTradeRecord[]> {
+    const res = await dbPool.query(`SELECT * FROM strategy_trades ORDER BY created_at ASC`);
+    return res.rows.map(mapTradeRow);
+  },
+
+  async loadAllPositions(): Promise<TradePosition[]> {
+    const res = await dbPool.query(
+      `SELECT tp.*, m.external_match_id
+       FROM trade_positions tp
+       JOIN matches m ON tp.match_id = m.id`
+    );
+    return res.rows.map((r: any) => mapPositionRow(r, r.external_match_id));
+  },
+
+  async loadRecentSignals(limit = 2000): Promise<StrategySignal[]> {
+    const res = await dbPool.query(
+      `SELECT ss.*, m.external_match_id
+       FROM strategy_signals ss
+       JOIN matches m ON ss.match_id = m.id
+       ORDER BY ss.timestamp DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.rows.map((r: any) => mapSignalRow(r, r.external_match_id));
+  },
+
+  async upsertTrade(trade: StrategyTradeRecord): Promise<void> {
+    await upsertTradeIdempotent(trade);
+  },
+
+  async upsertPosition(position: TradePosition, context?: { match?: ParsedCricketMatch }): Promise<void> {
+    const matchUuid = await ensureMatchUuidForStrategy(position.matchId, context?.match);
+    if (!matchUuid) {
+      throw new Error(`Match UUID unavailable for position ${position.matchId}`);
+    }
+    await dbPool.query(
+      `INSERT INTO trade_positions (
+        match_id, position_type, status, candidate_signal_id, entry_odds, entry_timestamp,
+        entry_over, entry_innings, entry_wickets, exit_odds, exit_timestamp, exit_over,
+        bookset_signal_id, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+      ON CONFLICT (match_id, position_type) DO UPDATE SET
+        status = CASE
+          WHEN trade_positions.status = 'RECORDED_EXIT' THEN 'RECORDED_EXIT'
+          ELSE EXCLUDED.status
+        END,
+        candidate_signal_id = COALESCE(trade_positions.candidate_signal_id, EXCLUDED.candidate_signal_id),
+        entry_odds = COALESCE(trade_positions.entry_odds, EXCLUDED.entry_odds),
+        entry_timestamp = COALESCE(trade_positions.entry_timestamp, EXCLUDED.entry_timestamp),
+        entry_over = COALESCE(trade_positions.entry_over, EXCLUDED.entry_over),
+        entry_innings = COALESCE(trade_positions.entry_innings, EXCLUDED.entry_innings),
+        entry_wickets = COALESCE(trade_positions.entry_wickets, EXCLUDED.entry_wickets),
+        exit_odds = COALESCE(trade_positions.exit_odds, EXCLUDED.exit_odds),
+        exit_timestamp = COALESCE(trade_positions.exit_timestamp, EXCLUDED.exit_timestamp),
+        exit_over = COALESCE(trade_positions.exit_over, EXCLUDED.exit_over),
+        bookset_signal_id = COALESCE(trade_positions.bookset_signal_id, EXCLUDED.bookset_signal_id),
+        updated_at = NOW()
+      WHERE trade_positions.status IS DISTINCT FROM 'RECORDED_EXIT'`,
+      [
+        matchUuid,
+        position.positionType,
+        position.status,
+        position.candidateSignalId || null,
+        position.entryOdds ?? null,
+        position.entryTimestamp ? new Date(position.entryTimestamp).toISOString() : null,
+        position.entryOver ?? null,
+        position.entryInnings ?? null,
+        position.entryWickets ?? null,
+        position.exitOdds ?? null,
+        position.exitTimestamp ? new Date(position.exitTimestamp).toISOString() : null,
+        position.exitOver ?? null,
+        position.booksetSignalId || null,
+      ]
+    );
+  },
+
+  async insertSignal(
+    signal: StrategySignal,
+    dedupeHash: string,
+    context?: { match?: ParsedCricketMatch }
+  ): Promise<void> {
+    const matchUuid = await ensureMatchUuidForStrategy(signal.matchId, context?.match);
+    if (!matchUuid) {
+      throw new Error(`Match UUID unavailable for signal ${signal.matchId}`);
+    }
+    await dbPool.query(
+      `INSERT INTO strategy_signals (
+        match_id, event_dedupe_hash, signal_type, status, current_innings, current_over,
+        ball_number, measured_team, decimal_odds, previous_decimal_odds, odds_delta,
+        opposing_team_odds, rule_evaluated, explanation, metadata, timestamp
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      ON CONFLICT (event_dedupe_hash) DO NOTHING`,
+      [
+        matchUuid,
+        dedupeHash,
+        signal.signalType,
+        signal.status,
+        signal.currentInnings,
+        signal.currentOver,
+        signal.ballNumber || 0,
+        signal.relevantOdds?.measuredTeam || null,
+        signal.relevantOdds?.decimalOdds ?? null,
+        signal.relevantOdds?.previousDecimalOdds ?? null,
+        signal.relevantOdds?.oddsDelta ?? null,
+        signal.relevantOdds?.opposingTeamOdds ?? null,
+        signal.ruleEvaluated || '',
+        signal.explanation || '',
+        JSON.stringify(signal.metadata || {}),
+        signal.timestamp ? new Date(signal.timestamp).toISOString() : new Date().toISOString(),
+      ]
+    );
+  },
+
+  async upsertSnapshot(snapshot: SerializedMatchStrategyState): Promise<void> {
+    await dbPool.query(
+      `INSERT INTO strategy_match_states (match_id, stage, state, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (match_id) DO UPDATE SET
+         stage = EXCLUDED.stage,
+         state = EXCLUDED.state,
+         updated_at = NOW()`,
+      [snapshot.matchId, snapshot.stage, JSON.stringify(snapshot)]
+    );
+  },
+
+  async deleteMatchStrategy(matchId: string): Promise<void> {
+    await dbPool.query('DELETE FROM strategy_match_states WHERE match_id = $1', [matchId]);
+    await dbPool.query('DELETE FROM strategy_trades WHERE match_id = $1', [matchId]);
+    const matchLookup = await dbPool.query('SELECT id FROM matches WHERE external_match_id = $1 LIMIT 1', [matchId]);
+    const matchUuid = matchLookup.rows[0]?.id;
+    if (matchUuid) {
+      await dbPool.query('DELETE FROM trade_positions WHERE match_id = $1', [matchUuid]);
+      await dbPool.query('DELETE FROM strategy_signals WHERE match_id = $1', [matchUuid]);
+    }
+  },
+};
+
+const strategyCoordinator = new StrategyPersistenceCoordinator({
+  engine: new CricketStrategyEngine(),
+  storage: pgStrategyStorageAdapter,
+  strategyAlertsEnabled: STRATEGY_ALERTS_ENABLED,
+  onStrategyAlert: async ({ kind, trade, match }) => {
+    if (!STRATEGY_ALERTS_ENABLED) return;
+    if (!activeTelegramConfig.enabled || !activeTelegramConfig.notifyStrategyEntries) return;
+
+    const dbKey = `tele_strategy:${trade.matchId}:${trade.entryType}:${trade.status}`;
+    try {
+      const existing = await dbPool.query('SELECT key FROM app_settings WHERE key = $1 LIMIT 1', [dbKey]);
+      if (existing.rows.length > 0) return;
+
+      await dbPool.query(
+        `INSERT INTO app_settings (key, value, description, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (key) DO NOTHING`,
+        [
+          dbKey,
+          JSON.stringify({ matchId: trade.matchId, entryType: trade.entryType, status: trade.status, sentAt: new Date().toISOString() }),
+          `Strategy ${trade.entryType} ${kind} alert`,
+        ]
+      );
+    } catch {
+      // Non-blocking if DB unavailable
+    }
+
+    const label = match
+      ? `${match.team1.shortName} vs ${match.team2.shortName}`
+      : trade.matchName || trade.matchId;
+    const msg =
+      kind === 'ENTRY'
+        ? `🎯 <b>${trade.entryType === 'FIRST_ENTRY' ? 'FIRST ENTRY' : 'SECOND ENTRY'} RECORDED</b>\n` +
+          `🏏 <b>${label}</b>\n` +
+          `🔹 Booking: <b>${trade.bookingTeam}</b>\n` +
+          `💰 Entry: <b>${trade.entryPaise} paise</b> (${trade.entryDecimal.toFixed(2)}) @ ${trade.entryOver} ov (Inn ${trade.innings})`
+        : `✅ <b>BOOKSET EXIT RECORDED (${trade.entryType})</b>\n` +
+          `🏏 <b>${label}</b>\n` +
+          `💰 Exit: <b>${trade.exitPaise ?? ''} paise</b> (${trade.exitDecimal?.toFixed(2) ?? ''}) @ ${trade.exitOver ?? ''} ov\n` +
+          `📌 Reason: <code>${trade.exitReason || 'BOOKSET'}</code>`;
+
+    await sendTelegramBroadcast(msg);
+  },
+});
+
+function buildServerInningsScore(
+  parsed: ReturnType<typeof parseScore>,
+  rawStr: string | undefined,
+  inningIndex: number,
+  teamCode: string
+): ParsedInningsScore | undefined {
+  if (!rawStr || !String(rawStr).trim()) return undefined;
+  return {
+    inningIndex,
+    runs: parsed.runs,
+    wickets: parsed.wickets,
+    overs: parsed.oversDecimal,
+    completedOvers: parsed.completedOvers,
+    ballsInOver: parsed.ballsInOver,
+    totalBalls: parsed.legalBallCount,
+    runRate: parsed.runRate,
+    rawString: String(rawStr),
+    teamCode,
+  };
+}
+
+function buildSnapshotForEvaluation(
+  matchId: string,
+  item: any,
+  meta: {
+    seriesName: string;
+    team1: { key: string; name: string; shortName: string; color: string; darkColor: string };
+    team2: { key: string; name: string; shortName: string; color: string; darkColor: string };
+    innings: number;
+    score1: ReturnType<typeof parseScore>;
+    score2: ReturnType<typeof parseScore>;
+    hasInn1: boolean;
+    hasInn2: boolean;
+    matchStatus: 'live' | 'completed' | 'upcoming';
+    resultText: string | null;
+    oddsData: any;
+    oddsFetchedAt: Date | null;
+    isFinished: boolean;
+  }
+): {
+  parsedMatch: ParsedCricketMatch;
+  parsedOddsState: MatchOddsState;
+  isStale: boolean;
+} {
+  const inn1 = meta.hasInn1
+    ? buildServerInningsScore(meta.score1, item.j, 1, meta.team1.shortName)
+    : undefined;
+  const inn2 = meta.hasInn2
+    ? buildServerInningsScore(meta.score2, item.k, 2, meta.team2.shortName)
+    : undefined;
+  const inningsList: ParsedInningsScore[] = [];
+  if (inn1) inningsList.push(inn1);
+  if (inn2) inningsList.push(inn2);
+
+  const parsedMatch: ParsedCricketMatch = {
+    id: matchId,
+    team1: {
+      key: meta.team1.key,
+      name: meta.team1.name,
+      shortName: meta.team1.shortName,
+      color: meta.team1.color,
+      darkColor: meta.team1.darkColor,
+      flagUrl: item.team1flag || undefined,
+    },
+    team2: {
+      key: meta.team2.key,
+      name: meta.team2.name,
+      shortName: meta.team2.shortName,
+      color: meta.team2.color,
+      darkColor: meta.team2.darkColor,
+      flagUrl: item.team2flag || undefined,
+    },
+    seriesName: meta.seriesName,
+    seriesKey: item.q ? String(item.q) : '',
+    venueName: item.vname || resolveVenue(item.v) || 'Stadium',
+    venueKey: item.v ? String(item.v) : '',
+    format: String(item.fo || item.t || 'Match'),
+    matchTitlePrefix: item.matchNums ? `${item.matchNums} ${item.fo || 'Match'}` : item.fo || undefined,
+    innings: inningsList,
+    team1Score: inn1,
+    team2Score: inn2,
+    status: meta.isFinished ? 'completed' : 'live',
+    statusLabel: meta.resultText || (meta.isFinished ? 'Finished' : 'Live'),
+    resultText: meta.resultText || undefined,
+    sessionText: typeof item.s === 'string' ? item.s : undefined,
+    startTime: (() => {
+      const n = Number(item.ti ?? item.tiMs ?? item.t);
+      return !isNaN(n) && n > 0 ? new Date(n) : new Date();
+    })(),
+    finishTime: (() => {
+      const n = Number(item.finishTime);
+      return item.finishTime && !isNaN(n) && n > 0 ? new Date(n) : undefined;
+    })(),
+    currentRunRate: meta.innings === 2 ? meta.score2.runRate : meta.score1.runRate,
+    battingTeamKey: meta.innings === 2 ? meta.team2.key : meta.team1.key,
+    odds: item.flb,
+    raw: item,
+  };
+
+  const prevParsedOddsState = serverParsedOddsCache.get(matchId);
+  const effectiveRaw = meta.oddsData || (item.flb ? { R: item.flb } : {});
+  const parsedOdds = transformGetSV3Response(matchId, effectiveRaw, 0);
+  if (meta.oddsFetchedAt) {
+    parsedOdds.timestamp = meta.oddsFetchedAt;
+  }
+
+  const prevBookmaker = prevParsedOddsState?.odds?.bookmaker || null;
+  let movement = prevParsedOddsState?.movement || {
+    direction: 'stable' as const,
+    deltaBack: 0,
+    deltaLay: 0,
+  };
+  if (
+    prevBookmaker &&
+    prevBookmaker.backRate !== null &&
+    parsedOdds.bookmaker.backRate !== null
+  ) {
+    const deltaBack = parsedOdds.bookmaker.backRate - prevBookmaker.backRate;
+    const deltaLay =
+      (parsedOdds.bookmaker.layRate ?? parsedOdds.bookmaker.backRate) -
+      (prevBookmaker.layRate ?? prevBookmaker.backRate);
+    const direction = deltaBack > 0 ? 'up' : deltaBack < 0 ? 'down' : 'stable';
+    if (direction !== 'stable' || deltaBack !== 0 || deltaLay !== 0) {
+      movement = {
+        direction,
+        deltaBack,
+        deltaLay,
+        lastChangedAt: new Date(),
+      };
+    }
+  }
+
+  const parsedOddsState: MatchOddsState = {
+    matchId,
+    oddsKey: matchId,
+    maskedKey: matchId.length > 2 ? `${matchId.slice(0, 2)}${'*'.repeat(matchId.length - 2)}` : matchId,
+    status: parsedOdds.bookmaker.isSuspended ? 'unavailable' : 'success',
+    odds: parsedOdds,
+    previousOdds: prevParsedOddsState?.odds || null,
+    movement,
+    recordsCount: (prevParsedOddsState?.recordsCount || 0) + 1,
+    lastUpdated: meta.oddsFetchedAt || new Date(),
+    consistency: {
+      isConsistent: true,
+      status: 'verified',
+      reason: 'Server 1s snapshot',
+    },
+  };
+
+  serverParsedOddsCache.set(matchId, parsedOddsState);
+
+  const isStale =
+    !meta.oddsFetchedAt || Date.now() - meta.oddsFetchedAt.getTime() > 15000;
+
+  return { parsedMatch, parsedOddsState, isStale };
+}
+
+function getSerializedOddsMap(): Record<string, MatchOddsState> {
+  const out: Record<string, MatchOddsState> = {};
+  for (const [id, st] of serverParsedOddsCache.entries()) {
+    out[id] = st;
+  }
+  return out;
+}
+
 /**
- * Phase 1: Append-Only 1-Second Server Timeline Persistence
- * Inserts 1 row per second per live match (and 1 final 'completed' row with result_text when finished).
- * Runs continuously with zero browsers open.
+ * Phase 1 & 2: Append-Only 1-Second Server Timeline Persistence + Unified Server Strategy Loop
+ * Uses the exact same per-second score & odds snapshot for both match_timeline_ticks and strategy evaluation.
+ * Leader-locked via PostgreSQL advisory lock (and NODE_APP_INSTANCE fallback when offline).
  */
 async function persistLiveTimelineTicks() {
   if (isTimelineLoopRunning) return;
   isTimelineLoopRunning = true;
 
   try {
+    const isLeader = await acquireStrategyLeaderLock();
+    if (!isLeader) return;
+
+    // Ensure initial DB state rehydration completes before running any strategy tick when DB is up
+    if (isDbAvailable && !hasRehydratedOnBoot) {
+      try {
+        await strategyCoordinator.rehydrateFromDatabase({
+          preserveActiveMemory: strategyCoordinator.engine.getAllMatchIds().length > 0,
+        });
+        hasRehydratedOnBoot = true;
+      } catch (err: any) {
+        console.warn('[Strategy Boot Rehydration Warning]', err?.message || err);
+      }
+    }
+
+    // Flush any queued offline trades/positions/signals/states when DB is available
+    if (isDbAvailable && strategyCoordinator.getPendingCounts().total > 0) {
+      await strategyCoordinator.flushPendingSaves();
+    }
+
     const entries = Object.entries(matchStore.matches);
     if (entries.length === 0) return;
 
-    if (!isDbAvailable) {
-      for (const [matchId, item] of entries) {
-        if (item && isAllowedTournament(item, matchStore.mapping) && isMatchLiveItem(item)) {
-          incrementMissedTick(matchId);
-        }
-      }
-      return;
-    }
+    let anyLiveEvaluated = false;
 
     await Promise.allSettled(
       entries.map(async ([matchId, item]) => {
@@ -1421,14 +2092,15 @@ async function persistLiveTimelineTicks() {
           const isFinished = isMatchFinishedItem(item);
           const isLive = isMatchLiveItem(item);
 
-          // Skip upcoming matches that haven't started, and skip matches already finalized
+          // Skip upcoming matches that haven't started, and skip matches already finalized in timeline
           if (isFinished) {
             if (finalizedTimelineMatches.has(matchId)) return;
-            // Only emit final completed row if we saw this match live/started in timeline
             if (!startedTimelineMatches.has(matchId) && !lastTimelineSnapshot[matchId]) return;
           } else if (!isLive) {
             return;
           }
+
+          anyLiveEvaluated = true;
 
           const team1 = resolveFullTeamInfo(item.b, item.t1Name || item.team1, item.t1Sname);
           const team2 = resolveFullTeamInfo(item.c, item.t2Name || item.team2, item.t2Sname);
@@ -1466,7 +2138,7 @@ async function persistLiveTimelineTicks() {
           );
 
           const controlTeamOdds = bookmaker.backRate ?? null;
-          const matchStatus = isFinished ? 'completed' : 'live';
+          const matchStatus: 'live' | 'completed' = isFinished ? 'completed' : 'live';
           const resultText = item.res || item.soResult || null;
 
           // Determine is_new_ball and runs_on_ball by comparing against previous tracked snapshot
@@ -1490,118 +2162,166 @@ async function persistLiveTimelineTicks() {
           const scoreFetchedAt = scoreFetchedAtByMatch.get(matchId) || null;
           const oddsFetchedAt = oddsFetchedAtByMatch.get(matchId) || null;
 
-          // Append-only INSERT into match_timeline_ticks (never UPDATE or overwrite)
-          await dbPool.query(
-            `INSERT INTO match_timeline_ticks (
-              match_id, series_name, innings, overs, legal_ball_count, runs, wickets,
-              batting_team, bowling_team, favorite_team, control,
-              back_rate, lay_rate, decimal_back, decimal_lay, control_team_odds,
-              raw_rate_string, session_data, match_status, result_text,
-              is_new_ball, runs_on_ball, score_fetched_at, odds_fetched_at, recorded_at
-            ) VALUES (
-              $1, $2, $3, $4, $5, $6, $7,
-              $8, $9, $10, $11,
-              $12, $13, $14, $15, $16,
-              $17, $18, $19, $20,
-              $21, $22, $23, $24, NOW()
-            )`,
-            [
-              matchId,
-              seriesName,
-              innings,
-              activeScore.oversDecimal,
-              activeScore.legalBallCount,
-              activeScore.runs,
-              activeScore.wickets,
-              battingTeamObj.name,
-              bowlingTeamObj.name,
-              favoriteTeam,
-              control,
-              bookmaker.backRate ?? null,
-              bookmaker.layRate ?? null,
-              bookmaker.decimalBack ?? null,
-              bookmaker.decimalLay ?? null,
-              controlTeamOdds,
-              bookmaker.rawRateString || null,
-              sessions.length > 0 ? JSON.stringify(sessions) : null,
-              matchStatus,
-              resultText,
-              isNewBall,
-              runsOnBall,
-              scoreFetchedAt ? scoreFetchedAt.toISOString() : null,
-              oddsFetchedAt ? oddsFetchedAt.toISOString() : null,
-            ]
-          );
-
-          startedTimelineMatches.add(matchId);
-          lastTimelineSnapshot[matchId] = {
+          // Build the unified per-second snapshot shared with the Strategy Engine
+          const { parsedMatch, parsedOddsState, isStale } = buildSnapshotForEvaluation(matchId, item, {
+            seriesName,
+            team1,
+            team2,
             innings,
-            legalBallCount: activeScore.legalBallCount,
-            runs: activeScore.runs,
-          };
+            score1,
+            score2,
+            hasInn1,
+            hasInn2,
+            matchStatus,
+            resultText,
+            oddsData,
+            oddsFetchedAt,
+            isFinished,
+          });
 
-          if (isFinished) {
-            finalizedTimelineMatches.add(matchId);
-          }
-
-          // Also keep latest_match_state & latest_odds_state updated from server
-          // (on new ball, completion, or every 2 seconds)
-          const nowMs = Date.now();
-          const lastSyncMs = lastLatestStateSyncAt.get(matchId) || 0;
-          if (isNewBall || isFinished || nowMs - lastSyncMs >= 2000) {
-            lastLatestStateSyncAt.set(matchId, nowMs);
+          // 1. Append-only INSERT into match_timeline_ticks when DB is available
+          if (!isDbAvailable) {
+            incrementMissedTick(matchId);
+          } else {
             try {
-              await syncLatestStateToDb(matchId, item, {
-                seriesName,
-                team1,
-                team2,
+              await dbPool.query(
+                `INSERT INTO match_timeline_ticks (
+                  match_id, series_name, innings, overs, legal_ball_count, runs, wickets,
+                  batting_team, bowling_team, favorite_team, control,
+                  back_rate, lay_rate, decimal_back, decimal_lay, control_team_odds,
+                  raw_rate_string, session_data, match_status, result_text,
+                  is_new_ball, runs_on_ball, score_fetched_at, odds_fetched_at, recorded_at
+                ) VALUES (
+                  $1, $2, $3, $4, $5, $6, $7,
+                  $8, $9, $10, $11,
+                  $12, $13, $14, $15, $16,
+                  $17, $18, $19, $20,
+                  $21, $22, $23, $24, NOW()
+                )`,
+                [
+                  matchId,
+                  seriesName,
+                  innings,
+                  activeScore.oversDecimal,
+                  activeScore.legalBallCount,
+                  activeScore.runs,
+                  activeScore.wickets,
+                  battingTeamObj.name,
+                  bowlingTeamObj.name,
+                  favoriteTeam,
+                  control,
+                  bookmaker.backRate ?? null,
+                  bookmaker.layRate ?? null,
+                  bookmaker.decimalBack ?? null,
+                  bookmaker.decimalLay ?? null,
+                  controlTeamOdds,
+                  bookmaker.rawRateString || null,
+                  sessions.length > 0 ? JSON.stringify(sessions) : null,
+                  matchStatus,
+                  resultText,
+                  isNewBall,
+                  runsOnBall,
+                  scoreFetchedAt ? scoreFetchedAt.toISOString() : null,
+                  oddsFetchedAt ? oddsFetchedAt.toISOString() : null,
+                ]
+              );
+
+              startedTimelineMatches.add(matchId);
+              lastTimelineSnapshot[matchId] = {
                 innings,
-                score1,
-                score2,
-                hasInn1,
-                hasInn2,
-                matchStatus,
-                resultText,
-                bookmaker,
-                sessions,
-                favoriteTeam,
-                speechNames,
-                oddsData,
-              });
-            } catch (latestErr: any) {
-              if (isDbConnectionError(latestErr)) {
+                legalBallCount: activeScore.legalBallCount,
+                runs: activeScore.runs,
+              };
+
+              if (isFinished) {
+                finalizedTimelineMatches.add(matchId);
+              }
+
+              // Keep latest_match_state & latest_odds_state updated from server
+              const nowMs = Date.now();
+              const lastSyncMs = lastLatestStateSyncAt.get(matchId) || 0;
+              if (isNewBall || isFinished || nowMs - lastSyncMs >= 2000) {
+                lastLatestStateSyncAt.set(matchId, nowMs);
+                try {
+                  await syncLatestStateToDb(matchId, item, {
+                    seriesName,
+                    team1,
+                    team2,
+                    innings,
+                    score1,
+                    score2,
+                    hasInn1,
+                    hasInn2,
+                    matchStatus,
+                    resultText,
+                    bookmaker,
+                    sessions,
+                    favoriteTeam,
+                    speechNames,
+                    oddsData,
+                  });
+                } catch (latestErr: any) {
+                  if (isDbConnectionError(latestErr)) {
+                    if (isDbAvailable) {
+                      isDbAvailable = false;
+                      releaseLeaderLockClient();
+                      hasLoggedDbOffline = true;
+                      console.warn(
+                        `[PostgreSQL] Lost connection during latest-state sync (${latestErr?.message || latestErr}). Retrying every 15s.`
+                      );
+                    }
+                  } else {
+                    console.error(
+                      `[LatestState Sync Error] match_id=${matchId} error=${latestErr?.message || latestErr}`
+                    );
+                  }
+                }
+              }
+            } catch (err: any) {
+              incrementMissedTick(matchId);
+              if (isDbConnectionError(err)) {
                 if (isDbAvailable) {
                   isDbAvailable = false;
+                  releaseLeaderLockClient();
                   hasLoggedDbOffline = true;
                   console.warn(
-                    `[PostgreSQL] Lost connection during latest-state sync (${latestErr?.message || latestErr}). Retrying every 15s.`
+                    `[PostgreSQL] Lost connection during timeline insert (${err?.message || err}). Retrying every 15s.`
                   );
                 }
               } else {
                 console.error(
-                  `[LatestState Sync Error] match_id=${matchId} error=${latestErr?.message || latestErr}`
+                  `[Timeline Insert Error] match_id=${matchId} missed=${missedTicksByMatch[matchId]} error=${err?.message || err}`
                 );
               }
             }
           }
+
+          // 2. Run Strategy Evaluation ONCE per match per second on the EXACT same snapshot
+          // (runs in memory and queues failed DB writes to outbox even if PostgreSQL is unreachable)
+          if (isLive) {
+            await strategyCoordinator.evaluateMatchSnapshot(parsedMatch, parsedOddsState, {
+              isStale,
+              dbAvailable: isDbAvailable,
+            });
+          }
         } catch (err: any) {
           incrementMissedTick(matchId);
-          if (isDbConnectionError(err)) {
-            if (isDbAvailable) {
-              isDbAvailable = false;
-              hasLoggedDbOffline = true;
-              console.warn(
-                `[PostgreSQL] Lost connection during timeline insert (${err?.message || err}). Retrying every 15s.`
-              );
-            }
-          } else {
-            console.error(
-              `[Timeline Insert Error] match_id=${matchId} missed=${missedTicksByMatch[matchId]} error=${err?.message || err}`
-            );
-          }
+          console.error(
+            `[Server 1s Loop Error] match_id=${matchId} missed=${missedTicksByMatch[matchId]} error=${err?.message || err}`
+          );
         }
       })
     );
+
+    if (anyLiveEvaluated && sseClients.size > 0) {
+      broadcastToClients({
+        type: 'update',
+        matches: matchStore.matches,
+        oddsByMatch: getSerializedOddsMap(),
+        strategyStates: strategyCoordinator.engine.getAllSerializedStates(),
+        timestamp: new Date().toISOString(),
+      });
+    }
   } finally {
     isTimelineLoopRunning = false;
   }
@@ -1617,9 +2337,9 @@ syncGoscorerApi()
 setInterval(syncGoscorerApi, 1000);         // Check Goscorer top matches every 1000ms
 setInterval(syncLiveMatchScores, 1000);     // Live ball-by-ball getSV3 score & odds every 1000ms
 setInterval(syncCrexPool, 2500);            // Sync Crex fixtures pool & mapping every 2.5s
-setInterval(persistLiveTimelineTicks, 1000); // Append-only 1-second timeline DB saver
+setInterval(persistLiveTimelineTicks, 1000); // Append-only 1-second timeline DB saver + strategy loop
 
-// SSE Live Stream: Instant zero-latency push to connected clients
+// SSE Live Stream: Instant zero-latency push to connected clients (read-only UI hydration)
 app.get('/api/live-stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1632,6 +2352,8 @@ app.get('/api/live-stream', (req, res) => {
       type: 'init',
       matches: matchStore.matches,
       mapping: matchStore.mapping,
+      oddsByMatch: getSerializedOddsMap(),
+      strategyStates: strategyCoordinator.engine.getAllSerializedStates(),
       timestamp: new Date().toISOString(),
     })}\n\n`
   );
@@ -1971,55 +2693,14 @@ app.get(['/api/db/status', '/api/supabase/status'], async (_req, res) => {
   }
 });
 
-// Upsert Strategy Trade (First Entry, Second Entry, Bookset Exits)
+// Upsert Strategy Trade (First Entry, Second Entry, Bookset Exits - idempotent)
 app.post('/api/db/trades', async (req, res) => {
   try {
     const trade = req.body;
     if (!trade || !trade.matchId) {
       return res.status(400).json({ ok: false, error: 'Missing matchId or trade payload' });
     }
-    await dbPool.query(
-      `INSERT INTO strategy_trades (
-        match_id, match_name, series_name, booking_team, batting_team, bowling_team,
-        entry_type, innings, entry_over, entry_paise, entry_decimal, entry_wickets,
-        entry_time, exit_over, exit_paise, exit_decimal, exit_time, exit_reason,
-        status, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
-      ON CONFLICT (match_id, entry_type) DO UPDATE SET
-        match_name = COALESCE(EXCLUDED.match_name, strategy_trades.match_name),
-        series_name = COALESCE(EXCLUDED.series_name, strategy_trades.series_name),
-        booking_team = COALESCE(EXCLUDED.booking_team, strategy_trades.booking_team),
-        batting_team = COALESCE(EXCLUDED.batting_team, strategy_trades.batting_team),
-        bowling_team = COALESCE(EXCLUDED.bowling_team, strategy_trades.bowling_team),
-        exit_over = COALESCE(EXCLUDED.exit_over, strategy_trades.exit_over),
-        exit_paise = COALESCE(EXCLUDED.exit_paise, strategy_trades.exit_paise),
-        exit_decimal = COALESCE(EXCLUDED.exit_decimal, strategy_trades.exit_decimal),
-        exit_time = COALESCE(EXCLUDED.exit_time, strategy_trades.exit_time),
-        exit_reason = COALESCE(EXCLUDED.exit_reason, strategy_trades.exit_reason),
-        status = EXCLUDED.status,
-        updated_at = NOW()`,
-      [
-        trade.matchId,
-        trade.matchName || null,
-        trade.seriesName || null,
-        trade.bookingTeam || 'Unknown Booking Team',
-        trade.battingTeam || 'Unknown Batting Team',
-        trade.bowlingTeam || 'Unknown Bowling Team',
-        trade.entryType,
-        trade.innings,
-        trade.entryOver,
-        trade.entryPaise,
-        trade.entryDecimal,
-        trade.entryWickets || 0,
-        trade.entryTime ? new Date(trade.entryTime).toISOString() : new Date().toISOString(),
-        trade.exitOver ?? null,
-        trade.exitPaise ?? null,
-        trade.exitDecimal ?? null,
-        trade.exitTime ? new Date(trade.exitTime).toISOString() : null,
-        trade.exitReason ?? null,
-        trade.status || 'ACTIVE',
-      ]
-    );
+    await upsertTradeIdempotent(trade);
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -2400,121 +3081,71 @@ app.get('/api/db/timeline/:matchId', async (req, res) => {
   }
 });
 
-// Upsert Strategy Signal
+// Upsert Strategy Signal (idempotent via event_dedupe_hash)
 app.post('/api/db/signals', async (req, res) => {
   try {
-    const signal = req.body;
+    const signal = req.body as StrategySignal;
     if (!signal?.matchId) {
       return res.status(400).json({ ok: false, error: 'Missing signal or matchId' });
     }
-    const matchLookup = await dbPool.query('SELECT id FROM matches WHERE external_match_id = $1 LIMIT 1', [signal.matchId]);
-    const matchUuid = matchLookup.rows[0]?.id;
-    if (!matchUuid) {
-      return res.status(404).json({ ok: false, error: 'Match not found in database' });
-    }
-    const dedupeHash = `${signal.matchId}-${signal.signalType}-${signal.status}-${signal.currentInnings}-${signal.currentOver}-${signal.relevantOdds?.decimalOdds ?? 'null'}-${signal.relevantOdds?.opposingTeamOdds ?? 'null'}`;
-    await dbPool.query(
-      `INSERT INTO strategy_signals (
-        match_id, event_dedupe_hash, signal_type, status, current_innings, current_over,
-        ball_number, measured_team, decimal_odds, previous_decimal_odds, odds_delta,
-        opposing_team_odds, rule_evaluated, explanation, metadata, timestamp
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-      ON CONFLICT (event_dedupe_hash) DO NOTHING`,
-      [
-        matchUuid,
-        dedupeHash,
-        signal.signalType,
-        signal.status,
-        signal.currentInnings,
-        signal.currentOver,
-        signal.ballNumber || 0,
-        signal.relevantOdds?.measuredTeam || null,
-        signal.relevantOdds?.decimalOdds ?? null,
-        signal.relevantOdds?.previousDecimalOdds ?? null,
-        signal.relevantOdds?.oddsDelta ?? null,
-        signal.relevantOdds?.opposingTeamOdds ?? null,
-        signal.ruleEvaluated || '',
-        signal.explanation || '',
-        JSON.stringify(signal.metadata || {}),
-        signal.timestamp ? new Date(signal.timestamp).toISOString() : new Date().toISOString(),
-      ]
-    );
+    const dedupeHash = `${signal.matchId}:${signal.signalType}:${signal.status}:${signal.currentInnings}:${signal.currentOver}:${signal.ballNumber || 0}:${signal.relevantOdds?.decimalOdds ?? 'null'}:${signal.relevantOdds?.opposingTeamOdds ?? 'null'}`.slice(0, 160);
+    await pgStrategyStorageAdapter.insertSignal(signal, dedupeHash);
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Upsert Trade Position
+// Upsert Trade Position (idempotent)
 app.post('/api/db/positions', async (req, res) => {
   try {
-    const position = req.body;
+    const position = req.body as TradePosition;
     if (!position?.matchId) {
       return res.status(400).json({ ok: false, error: 'Missing position or matchId' });
     }
-    const matchLookup = await dbPool.query('SELECT id FROM matches WHERE external_match_id = $1 LIMIT 1', [position.matchId]);
-    const matchUuid = matchLookup.rows[0]?.id;
-    if (!matchUuid) {
-      return res.status(404).json({ ok: false, error: 'Match not found in database' });
-    }
-    await dbPool.query(
-      `INSERT INTO trade_positions (
-        match_id, position_type, status, candidate_signal_id, entry_odds, entry_timestamp,
-        entry_over, entry_innings, entry_wickets, exit_odds, exit_timestamp, exit_over,
-        bookset_signal_id, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-      ON CONFLICT (match_id, position_type) DO UPDATE SET
-        status = EXCLUDED.status,
-        candidate_signal_id = COALESCE(EXCLUDED.candidate_signal_id, trade_positions.candidate_signal_id),
-        entry_odds = COALESCE(EXCLUDED.entry_odds, trade_positions.entry_odds),
-        entry_timestamp = COALESCE(EXCLUDED.entry_timestamp, trade_positions.entry_timestamp),
-        entry_over = COALESCE(EXCLUDED.entry_over, trade_positions.entry_over),
-        entry_innings = COALESCE(EXCLUDED.entry_innings, trade_positions.entry_innings),
-        entry_wickets = COALESCE(EXCLUDED.entry_wickets, trade_positions.entry_wickets),
-        exit_odds = COALESCE(EXCLUDED.exit_odds, trade_positions.exit_odds),
-        exit_timestamp = COALESCE(EXCLUDED.exit_timestamp, trade_positions.exit_timestamp),
-        exit_over = COALESCE(EXCLUDED.exit_over, trade_positions.exit_over),
-        bookset_signal_id = COALESCE(EXCLUDED.bookset_signal_id, trade_positions.bookset_signal_id),
-        updated_at = NOW()`,
-      [
-        matchUuid,
-        position.positionType,
-        position.status,
-        position.candidateSignalId || null,
-        position.entryOdds ?? null,
-        position.entryTimestamp ? new Date(position.entryTimestamp).toISOString() : null,
-        position.entryOver ?? null,
-        position.entryInnings ?? null,
-        position.entryWickets ?? null,
-        position.exitOdds ?? null,
-        position.exitTimestamp ? new Date(position.exitTimestamp).toISOString() : null,
-        position.exitOver ?? null,
-        position.booksetSignalId || null,
-      ]
-    );
+    await pgStrategyStorageAdapter.upsertPosition(position);
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Load Match Strategy (Positions, Signals, Trades)
+// Load Match Strategy (Positions, Signals, Trades, and Authoritative Strategy State)
 app.get('/api/db/match-strategy/:matchId', async (req, res) => {
-  try {
-    const { matchId } = req.params;
-    const tradesRes = await dbPool.query('SELECT * FROM strategy_trades WHERE match_id = $1 ORDER BY created_at DESC', [matchId]);
+  const { matchId } = req.params;
+  const memState = strategyCoordinator.engine.hasState(matchId)
+    ? strategyCoordinator.engine.serializeState(matchId)
+    : null;
 
-    const matchLookup = await dbPool.query('SELECT id FROM matches WHERE external_match_id = $1 LIMIT 1', [matchId]);
+  try {
+    const tradesRes = await dbPool.query(
+      'SELECT * FROM strategy_trades WHERE match_id = $1 ORDER BY created_at DESC',
+      [matchId]
+    );
+    const snapRes = await dbPool.query(
+      'SELECT state FROM strategy_match_states WHERE match_id = $1 LIMIT 1',
+      [matchId]
+    );
+
+    const matchLookup = await dbPool.query(
+      'SELECT id FROM matches WHERE external_match_id = $1 LIMIT 1',
+      [matchId]
+    );
     const matchUuid = matchLookup.rows[0]?.id;
 
     let positions: any[] = [];
     let signals: any[] = [];
 
     if (matchUuid) {
-      const posRes = await dbPool.query('SELECT * FROM trade_positions WHERE match_id = $1', [matchUuid]);
+      const posRes = await dbPool.query('SELECT * FROM trade_positions WHERE match_id = $1', [
+        matchUuid,
+      ]);
       positions = posRes.rows;
 
-      const sigRes = await dbPool.query('SELECT * FROM strategy_signals WHERE match_id = $1 ORDER BY timestamp DESC LIMIT 100', [matchUuid]);
+      const sigRes = await dbPool.query(
+        'SELECT * FROM strategy_signals WHERE match_id = $1 ORDER BY timestamp DESC LIMIT 2000',
+        [matchUuid]
+      );
       signals = sigRes.rows;
     }
 
@@ -2523,10 +3154,117 @@ app.get('/api/db/match-strategy/:matchId', async (req, res) => {
       positions,
       signals,
       trades: tradesRes.rows,
+      strategyState: memState || snapRes.rows[0]?.state || null,
     });
   } catch (err: any) {
-    return res.status(500).json({ ok: false, error: err.message, positions: [], signals: [], trades: [] });
+    // Offline fallback: return authoritative in-memory state if DB is temporarily unreachable
+    return res.status(memState ? 200 : 500).json({
+      ok: Boolean(memState),
+      error: memState ? undefined : err.message,
+      positions: [],
+      signals: [],
+      trades: [],
+      strategyState: memState,
+    });
   }
+});
+
+// Authoritative Server Strategy States & Diagnostics
+app.get('/api/strategy/state', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return res.json({
+    ok: true,
+    strategyAlertsEnabled: STRATEGY_ALERTS_ENABLED,
+    leaderActive: hasPgAdvisoryLock || !isDbAvailable,
+    pendingOutbox: strategyCoordinator.getPendingCounts(),
+    states: strategyCoordinator.engine.getAllSerializedStates(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Server-Saved Manual Override: Entry
+app.post('/api/strategy/:matchId/override-entry', async (req, res) => {
+  const { matchId } = req.params;
+  const body = req.body || {};
+  const positionType = (body.positionType === 'SECOND_ENTRY' ? 'SECOND_ENTRY' : 'FIRST_ENTRY') as PositionType;
+  const entryOdds = Number(body.entryOdds);
+  if (!matchId || !entryOdds || isNaN(entryOdds) || entryOdds <= 1) {
+    return res.status(400).json({ ok: false, error: 'Valid matchId and entryOdds (> 1.0) required' });
+  }
+
+  const state = await strategyCoordinator.recordManualEntry({
+    matchId,
+    positionType,
+    entryOdds,
+    innings: Number(body.innings) || 1,
+    over: Number(body.over) || 0,
+    wickets: Number(body.wickets) || 0,
+    bookingTeam: body.bookingTeam || 'Manual Override',
+    battingTeam: body.battingTeam || 'Batting Team',
+    bowlingTeam: body.bowlingTeam || 'Bowling Team',
+    matchName: body.matchName,
+    seriesName: body.seriesName,
+    dbAvailable: isDbAvailable,
+  });
+
+  broadcastToClients({
+    type: 'update',
+    matches: matchStore.matches,
+    oddsByMatch: getSerializedOddsMap(),
+    strategyStates: strategyCoordinator.engine.getAllSerializedStates(),
+    timestamp: new Date().toISOString(),
+  });
+
+  return res.json({ ok: true, state });
+});
+
+// Server-Saved Manual Override: Exit
+app.post('/api/strategy/:matchId/override-exit', async (req, res) => {
+  const { matchId } = req.params;
+  const body = req.body || {};
+  const positionType = (body.positionType === 'SECOND_ENTRY' ? 'SECOND_ENTRY' : 'FIRST_ENTRY') as PositionType;
+  const exitOdds = Number(body.exitOdds);
+  if (!matchId || !exitOdds || isNaN(exitOdds) || exitOdds <= 1) {
+    return res.status(400).json({ ok: false, error: 'Valid matchId and exitOdds (> 1.0) required' });
+  }
+
+  const state = await strategyCoordinator.recordManualExit({
+    matchId,
+    positionType,
+    exitOdds,
+    over: Number(body.over) || 0,
+    exitReason: body.exitReason,
+    dbAvailable: isDbAvailable,
+  });
+
+  broadcastToClients({
+    type: 'update',
+    matches: matchStore.matches,
+    oddsByMatch: getSerializedOddsMap(),
+    strategyStates: strategyCoordinator.engine.getAllSerializedStates(),
+    timestamp: new Date().toISOString(),
+  });
+
+  return res.json({ ok: true, state });
+});
+
+// Server-Saved Manual Override: Reset Match Strategy State
+app.post('/api/strategy/:matchId/reset', async (req, res) => {
+  const { matchId } = req.params;
+  if (!matchId) {
+    return res.status(400).json({ ok: false, error: 'Missing matchId' });
+  }
+  const state = await strategyCoordinator.resetMatch(matchId);
+
+  broadcastToClients({
+    type: 'update',
+    matches: matchStore.matches,
+    oddsByMatch: getSerializedOddsMap(),
+    strategyStates: strategyCoordinator.engine.getAllSerializedStates(),
+    timestamp: new Date().toISOString(),
+  });
+
+  return res.json({ ok: true, state });
 });
 
 // Telegram Config from app_settings

@@ -30,15 +30,16 @@ import { MatchOddsState, OddsTick } from '../types/odds';
 import { KNOWN_TEAMS } from '../data/cricketMapping';
 import {
   strategyEngine,
-  StrategySignal,
   calculateOpposingOdds,
-  DEFAULT_STRATEGY_CONFIG,
 } from '../services/strategy';
+import { SerializedMatchStrategyState } from '../services/strategy/types';
 import {
-  syncStrategySignalToSupabase,
-  syncTradePositionToSupabase,
   loadMatchStrategyFromSupabase,
-  syncStrategyTradeToDb,
+  fetchMatchTimelineFromDb,
+  sendManualOverrideEntry,
+  sendManualOverrideExit,
+  sendManualStrategyReset,
+  MatchTimelineTick,
 } from '../services/supabaseSyncService';
 
 interface MatchAnalysisPageProps {
@@ -46,6 +47,8 @@ interface MatchAnalysisPageProps {
   match?: ParsedCricketMatch;
   oddsState?: MatchOddsState;
   allMatches?: ParsedCricketMatch[];
+  strategyVersion?: number;
+  onStrategyStateSync?: (snapshot: SerializedMatchStrategyState) => void;
   onBack: () => void;
   onSelectMatch: (matchId: string) => void;
   onRefreshOdds?: (matchId: string) => Promise<void>;
@@ -56,6 +59,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   match,
   oddsState,
   allMatches = [],
+  strategyVersion = 0,
+  onStrategyStateSync,
   onBack,
   onSelectMatch,
   onRefreshOdds,
@@ -64,6 +69,11 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   const [freshnessSec, setFreshnessSec] = useState<number>(0);
   const [evaluationTick, setEvaluationTick] = useState<number>(0);
   const [signalFilter, setSignalFilter] = useState<'all' | 'candidates' | 'rejected' | 'events'>('all');
+  const [timelineTicks, setTimelineTicks] = useState<MatchTimelineTick[]>([]);
+  const [missedTicks, setMissedTicks] = useState<number>(0);
+  const [timelineMode, setTimelineMode] = useState<'balls' | 'ticks'>('balls');
+  const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
+  const [overridePending, setOverridePending] = useState<boolean>(false);
 
   const isLive = match?.status === 'live';
   const isCompleted = match?.status === 'completed';
@@ -181,101 +191,123 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   };
 
   // =========================================================================
-  // STRATEGY ENGINE INTEGRATION (Strict separation: UI only reads engine outputs)
+  // SERVER-DRIVEN STRATEGY STATE & FULL HISTORY HYDRATION (Read-Only Browser)
   // =========================================================================
   const strategyState = useMemo(() => {
     return strategyEngine.getState(matchId);
-  }, [matchId, evaluationTick]);
+  }, [matchId, evaluationTick, strategyVersion]);
 
-  // Requirement 6: Load persisted trade positions, historical signals, and dedicated strategy trades from Supabase on mount
+  const hydrateFromServerDb = useCallback(
+    async (showSpinner = false) => {
+      if (!matchId) return;
+      if (showSpinner) setIsLoadingHistory(true);
+      try {
+        const [{ positions, signals, trades, strategyState: serverSnap }, timelineRes] =
+          await Promise.all([
+            loadMatchStrategyFromSupabase(matchId),
+            fetchMatchTimelineFromDb(matchId, { order: 'desc', limit: 20000 }),
+          ]);
+
+        if (serverSnap) {
+          strategyEngine.hydrateState(matchId, serverSnap);
+        }
+
+        const state = strategyEngine.getState(matchId);
+
+        if (trades && trades.length > 0) {
+          const firstTrade = trades.find((t) => t.entryType === 'FIRST_ENTRY');
+          if (firstTrade) {
+            state.firstEntryTrade = firstTrade;
+            if (!state.bookingTeamName) state.bookingTeamName = firstTrade.bookingTeam;
+            if (firstTrade.status === 'ACTIVE') {
+              if (state.stage === 'WAITING_FOR_CONFIRMATION') state.stage = 'ACTIVE_FIRST_ENTRY';
+              state.firstEntryPosition.status = 'RECORDED_ENTRY';
+              state.firstEntryPosition.entryOdds = firstTrade.entryDecimal;
+              state.firstEntryPosition.entryOver = firstTrade.entryOver;
+              state.firstEntryPosition.entryInnings = firstTrade.innings;
+              state.firstEntryPosition.entryWickets = firstTrade.entryWickets;
+              state.firstEntryPosition.entryTimestamp = firstTrade.entryTime;
+            } else if (firstTrade.status === 'BOOKSET_COMPLETED') {
+              if (
+                state.stage === 'WAITING_FOR_CONFIRMATION' ||
+                state.stage === 'ACTIVE_FIRST_ENTRY'
+              ) {
+                state.stage = 'FIRST_BOOKSET_COMPLETED';
+              }
+              state.firstEntryPosition.status = 'RECORDED_EXIT';
+              state.firstEntryPosition.entryOdds =
+                state.firstEntryPosition.entryOdds ?? firstTrade.entryDecimal;
+              state.firstEntryPosition.entryOver =
+                state.firstEntryPosition.entryOver ?? firstTrade.entryOver;
+              state.firstEntryPosition.entryInnings =
+                state.firstEntryPosition.entryInnings ?? firstTrade.innings;
+              state.firstEntryPosition.entryWickets =
+                state.firstEntryPosition.entryWickets ?? firstTrade.entryWickets;
+              state.firstEntryPosition.exitOdds = firstTrade.exitDecimal;
+              state.firstEntryPosition.exitOver = firstTrade.exitOver;
+              state.firstEntryPosition.exitTimestamp = firstTrade.exitTime;
+            }
+          }
+          const secondTrade = trades.find((t) => t.entryType === 'SECOND_ENTRY');
+          if (secondTrade) {
+            state.secondEntryTrade = secondTrade;
+            if (secondTrade.status === 'ACTIVE') {
+              state.stage = 'ACTIVE_SECOND_ENTRY';
+              state.secondEntryPosition.status = 'RECORDED_ENTRY';
+              state.secondEntryPosition.entryOdds = secondTrade.entryDecimal;
+              state.secondEntryPosition.entryOver = secondTrade.entryOver;
+              state.secondEntryPosition.entryInnings = secondTrade.innings;
+              state.secondEntryPosition.entryWickets = secondTrade.entryWickets;
+              state.secondEntryPosition.entryTimestamp = secondTrade.entryTime;
+            } else if (secondTrade.status === 'BOOKSET_COMPLETED') {
+              state.stage = 'FULL_BOOKSET_COMPLETED';
+              state.secondEntryPosition.status = 'RECORDED_EXIT';
+              state.secondEntryPosition.entryOdds =
+                state.secondEntryPosition.entryOdds ?? secondTrade.entryDecimal;
+              state.secondEntryPosition.entryOver =
+                state.secondEntryPosition.entryOver ?? secondTrade.entryOver;
+              state.secondEntryPosition.exitOdds = secondTrade.exitDecimal;
+              state.secondEntryPosition.exitOver = secondTrade.exitOver;
+              state.secondEntryPosition.exitTimestamp = secondTrade.exitTime;
+            }
+          }
+        }
+
+        positions.forEach((pos) => {
+          if (pos.positionType === 'FIRST_ENTRY' && pos.status !== 'NONE') {
+            state.firstEntryPosition = { ...state.firstEntryPosition, ...pos };
+          } else if (pos.positionType === 'SECOND_ENTRY' && pos.status !== 'NONE') {
+            state.secondEntryPosition = { ...state.secondEntryPosition, ...pos };
+          }
+        });
+
+        if (signals.length > 0 && state.signalsHistory.length < signals.length) {
+          state.signalsHistory = signals;
+        }
+
+        setTimelineTicks(timelineRes.data || []);
+        setMissedTicks(timelineRes.missedTicks || 0);
+        setEvaluationTick((prev) => prev + 1);
+      } finally {
+        if (showSpinner) setIsLoadingHistory(false);
+      }
+    },
+    [matchId]
+  );
+
+  // Load full saved history (ball 1 to now) on mount / match change, then stay synced
+  useEffect(() => {
+    hydrateFromServerDb(true).catch(() => {});
+  }, [hydrateFromServerDb]);
+
   useEffect(() => {
     if (!matchId) return;
-    loadMatchStrategyFromSupabase(matchId).then(({ positions, signals, trades }) => {
-      const state = strategyEngine.getState(matchId);
-      
-      // Rehydrate persisted trades from Supabase strategy_trades table
-      if (trades && trades.length > 0) {
-        const firstTrade = trades.find((t) => t.entryType === 'FIRST_ENTRY');
-        if (firstTrade) {
-          state.firstEntryTrade = firstTrade;
-          state.bookingTeamName = firstTrade.bookingTeam;
-          if (firstTrade.status === 'ACTIVE') {
-            state.stage = 'ACTIVE_FIRST_ENTRY';
-            state.firstEntryPosition.status = 'RECORDED_ENTRY';
-            state.firstEntryPosition.entryOdds = firstTrade.entryDecimal;
-            state.firstEntryPosition.entryOver = firstTrade.entryOver;
-            state.firstEntryPosition.entryInnings = firstTrade.innings;
-            state.firstEntryPosition.entryWickets = firstTrade.entryWickets;
-            state.firstEntryPosition.entryTimestamp = firstTrade.entryTime;
-          } else if (firstTrade.status === 'BOOKSET_COMPLETED') {
-            state.stage = 'FIRST_BOOKSET_COMPLETED';
-            state.firstEntryPosition.status = 'RECORDED_EXIT';
-            state.firstEntryPosition.exitOdds = firstTrade.exitDecimal;
-            state.firstEntryPosition.exitOver = firstTrade.exitOver;
-            state.firstEntryPosition.exitTimestamp = firstTrade.exitTime;
-          }
-        }
-        const secondTrade = trades.find((t) => t.entryType === 'SECOND_ENTRY');
-        if (secondTrade) {
-          state.secondEntryTrade = secondTrade;
-          if (secondTrade.status === 'ACTIVE') {
-            state.stage = 'ACTIVE_SECOND_ENTRY';
-            state.secondEntryPosition.status = 'RECORDED_ENTRY';
-          } else if (secondTrade.status === 'BOOKSET_COMPLETED') {
-            state.stage = 'FULL_BOOKSET_COMPLETED';
-            state.secondEntryPosition.status = 'RECORDED_EXIT';
-          }
-        }
-      }
-
-      positions.forEach((pos) => {
-        if (pos.positionType === 'FIRST_ENTRY' && pos.status !== 'NONE') {
-          state.firstEntryPosition = { ...state.firstEntryPosition, ...pos };
-        } else if (pos.positionType === 'SECOND_ENTRY' && pos.status !== 'NONE') {
-          state.secondEntryPosition = { ...state.secondEntryPosition, ...pos };
-        }
-      });
-      if (signals.length > 0 && state.signalsHistory.length === 0) {
-        state.signalsHistory = signals;
-      }
-      setEvaluationTick((prev) => prev + 1);
-    }).catch(() => {});
-  }, [matchId]);
-
-  // Evaluate strategy rules whenever match or odds change
-  useEffect(() => {
-    if (!match || !oddsState) return;
-    const isStale = isLive && freshnessSec > 15;
-    const newSignals = strategyEngine.evaluateMatch(match, oddsState, undefined, { isStale });
-    if (newSignals && newSignals.length > 0) {
-      newSignals.forEach((sig) => {
-        syncStrategySignalToSupabase(sig).catch(() => {});
-      });
-    }
-
-    // Ensure active trade is saved in DB if newly created
-    const state = strategyEngine.getState(matchId);
-    if (state.firstEntryTrade && (state.stage === 'ACTIVE_FIRST_ENTRY' || state.stage === 'FIRST_BOOKSET_COMPLETED')) {
-      syncStrategyTradeToDb(state.firstEntryTrade).catch(() => {});
-    }
-    if (state.secondEntryTrade && (state.stage === 'ACTIVE_SECOND_ENTRY' || state.stage === 'FULL_BOOKSET_COMPLETED')) {
-      syncStrategyTradeToDb(state.secondEntryTrade).catch(() => {});
-    }
-
-    setEvaluationTick((prev) => prev + 1);
-  }, [
-    match?.id,
-    match?.team1Score?.runs,
-    match?.team1Score?.wickets,
-    match?.team1Score?.overs,
-    match?.team2Score?.runs,
-    match?.team2Score?.wickets,
-    match?.team2Score?.overs,
-    oddsState?.odds?.bookmaker?.decimalBack,
-    oddsState?.odds?.bookmaker?.decimalLay,
-    oddsState?.lastUpdated,
-    freshnessSec > 15,
-  ]);
+    const pollMs = isLive ? 2500 : 10000;
+    const timer = setInterval(() => {
+      hydrateFromServerDb(false).catch(() => {});
+    }, pollMs);
+    return () => clearInterval(timer);
+  }, [matchId, isLive, hydrateFromServerDb]);
 
   // Extract latest signal outputs for each rule
   const signals = strategyState.signalsHistory;
@@ -347,106 +379,122 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     return calculateOpposingOdds(bookmaker?.decimalBack);
   }, [bookmaker?.decimalBack]);
 
-  // Position management actions (Manual/Simulated trade recording)
-  const handleRecordFirstEntry = () => {
-    if (!bookmaker?.decimalBack || !match) return;
-    const currentInnings = match.team2Score ? 2 : 1;
-    const currentOver = activeScore ? activeScore.overs : 0;
-    const currentWickets = activeScore ? activeScore.wickets : 0;
-    const matchTitle = match.matchTitlePrefix
-      ? `${match.team1.shortName} vs ${match.team2.shortName}`
-      : `${match.team1.name || match.team1.shortName} vs ${match.team2.name || match.team2.shortName}`;
-    const battingName = currentInnings === 2 ? match.team2.shortName || match.team2.name : match.team1.shortName || match.team1.name;
-    const bowlingName = currentInnings === 2 ? match.team1.shortName || match.team1.name : match.team2.shortName || match.team2.name;
+  // Manual Overrides (persisted on server.ts and broadcast via SSE)
+  const handleRecordFirstEntry = async () => {
+    if (!bookmaker?.decimalBack || !match || overridePending) return;
+    setOverridePending(true);
+    try {
+      const currentInnings = match.team2Score ? 2 : 1;
+      const currentOver = activeScore ? activeScore.overs : 0;
+      const currentWickets = activeScore ? activeScore.wickets : 0;
+      const matchTitle = `${team1Short} vs ${team2Short}`;
+      const battingName = currentInnings === 2 ? team2Short : team1Short;
+      const bowlingName = currentInnings === 2 ? team1Short : team2Short;
 
-    const pos = strategyEngine.recordEntry(
-      matchId,
-      'FIRST_ENTRY',
-      bookmaker.decimalBack,
-      currentInnings,
-      currentOver,
-      currentWickets,
-      new Date(),
-      strategyState.bookingTeamName || battingName,
-      battingName,
-      bowlingName,
-      matchTitle,
-      match.seriesName
-    );
-    syncTradePositionToSupabase(pos).catch(() => {});
-    const state = strategyEngine.getState(matchId);
-    if (state.firstEntryTrade) {
-      syncStrategyTradeToDb(state.firstEntryTrade).catch(() => {});
+      const updated = await sendManualOverrideEntry(matchId, {
+        positionType: 'FIRST_ENTRY',
+        entryOdds: bookmaker.decimalBack,
+        innings: currentInnings,
+        over: currentOver,
+        wickets: currentWickets,
+        bookingTeam: strategyState.bookingTeamName || battingName,
+        battingTeam: battingName,
+        bowlingTeam: bowlingName,
+        matchName: matchTitle,
+        seriesName: match.seriesName,
+      });
+      if (updated) {
+        strategyEngine.hydrateState(matchId, updated);
+        onStrategyStateSync?.(updated);
+      }
+      setEvaluationTick((prev) => prev + 1);
+    } finally {
+      setOverridePending(false);
     }
-    setEvaluationTick((prev) => prev + 1);
   };
 
-  const handleRecordFirstExit = () => {
-    if (!bookmaker?.decimalLay || !match) return;
-    const currentOver = activeScore ? activeScore.overs : 0;
-    const pos = strategyEngine.recordExit(matchId, 'FIRST_ENTRY', bookmaker.decimalLay, currentOver);
-    syncTradePositionToSupabase(pos).catch(() => {});
-    const state = strategyEngine.getState(matchId);
-    if (state.firstEntryTrade) {
-      syncStrategyTradeToDb(state.firstEntryTrade).catch(() => {});
+  const handleRecordFirstExit = async () => {
+    if (!bookmaker?.decimalLay || !match || overridePending) return;
+    setOverridePending(true);
+    try {
+      const currentOver = activeScore ? activeScore.overs : 0;
+      const updated = await sendManualOverrideExit(matchId, {
+        positionType: 'FIRST_ENTRY',
+        exitOdds: bookmaker.decimalLay,
+        over: currentOver,
+        exitReason: 'FIRST_BOOKSET_45_55',
+      });
+      if (updated) {
+        strategyEngine.hydrateState(matchId, updated);
+        onStrategyStateSync?.(updated);
+      }
+      setEvaluationTick((prev) => prev + 1);
+    } finally {
+      setOverridePending(false);
     }
-    setEvaluationTick((prev) => prev + 1);
   };
 
-  const handleRecordSecondEntry = () => {
-    if (!opposingOdds || !match) return;
-    const currentInnings = match.team2Score ? 2 : 1;
-    const currentOver = activeScore ? activeScore.overs : 0;
-    const currentWickets = activeScore ? activeScore.wickets : 0;
-    const matchTitle = match.matchTitlePrefix
-      ? `${match.team1.shortName} vs ${match.team2.shortName}`
-      : `${match.team1.name || match.team1.shortName} vs ${match.team2.name || match.team2.shortName}`;
-    const battingName = currentInnings === 2 ? match.team2.shortName || match.team2.name : match.team1.shortName || match.team1.name;
-    const bowlingName = currentInnings === 2 ? match.team1.shortName || match.team1.name : match.team2.shortName || match.team2.name;
+  const handleRecordSecondEntry = async () => {
+    if (!opposingOdds || !match || overridePending) return;
+    setOverridePending(true);
+    try {
+      const currentInnings = match.team2Score ? 2 : 1;
+      const currentOver = activeScore ? activeScore.overs : 0;
+      const currentWickets = activeScore ? activeScore.wickets : 0;
+      const matchTitle = `${team1Short} vs ${team2Short}`;
+      const battingName = currentInnings === 2 ? team2Short : team1Short;
+      const bowlingName = currentInnings === 2 ? team1Short : team2Short;
 
-    const pos = strategyEngine.recordEntry(
-      matchId,
-      'SECOND_ENTRY',
-      opposingOdds,
-      currentInnings,
-      currentOver,
-      currentWickets,
-      new Date(),
-      strategyState.bookingTeamName || battingName,
-      battingName,
-      bowlingName,
-      matchTitle,
-      match.seriesName
-    );
-    syncTradePositionToSupabase(pos).catch(() => {});
-    const state = strategyEngine.getState(matchId);
-    if (state.secondEntryTrade) {
-      syncStrategyTradeToDb(state.secondEntryTrade).catch(() => {});
+      const updated = await sendManualOverrideEntry(matchId, {
+        positionType: 'SECOND_ENTRY',
+        entryOdds: opposingOdds,
+        innings: currentInnings,
+        over: currentOver,
+        wickets: currentWickets,
+        bookingTeam: strategyState.bookingTeamName || battingName,
+        battingTeam: battingName,
+        bowlingTeam: bowlingName,
+        matchName: matchTitle,
+        seriesName: match.seriesName,
+      });
+      if (updated) {
+        strategyEngine.hydrateState(matchId, updated);
+        onStrategyStateSync?.(updated);
+      }
+      setEvaluationTick((prev) => prev + 1);
+    } finally {
+      setOverridePending(false);
     }
-    setEvaluationTick((prev) => prev + 1);
   };
 
-  const handleResetStrategyState = () => {
-    strategyEngine.resetState(matchId);
-    setEvaluationTick((prev) => prev + 1);
+  const handleResetStrategyState = async () => {
+    if (overridePending) return;
+    setOverridePending(true);
+    try {
+      const updated = await sendManualStrategyReset(matchId);
+      if (updated) {
+        strategyEngine.hydrateState(matchId, updated);
+        onStrategyStateSync?.(updated);
+      } else {
+        strategyEngine.resetState(matchId);
+      }
+      setEvaluationTick((prev) => prev + 1);
+    } finally {
+      setOverridePending(false);
+    }
   };
 
-  // Quick boundary shift test dispatcher (for real-time manual testing)
-  const handleTestBoundaryShift = (type: 'FOUR' | 'SIX', movementAmount: number) => {
-    if (!match) return;
-    const currentInnings = match.team2Score ? 2 : 1;
-    const currentOver = activeScore ? activeScore.overs : 0;
-    strategyEngine.evaluateAbnormalActivity({
-      matchId,
-      boundaryType: type,
-      oddsMovement: movementAmount,
-      currentInnings,
-      currentOver,
-      measuredTeam: oddsState?.odds?.favoriteTeamName || 'Favorite',
-      decimalOdds: bookmaker?.decimalBack ?? null,
-    });
-    setEvaluationTick((prev) => prev + 1);
-  };
+  const displayedTimelineRows = useMemo(() => {
+    if (timelineMode === 'balls') {
+      return timelineTicks.filter((t) => t.is_new_ball);
+    }
+    return timelineTicks;
+  }, [timelineTicks, timelineMode]);
+
+  const legalBallsSavedCount = useMemo(
+    () => timelineTicks.filter((t) => t.is_new_ball).length,
+    [timelineTicks]
+  );
 
   const renderStatusBadge = (status?: string) => {
     if (status === 'PASS') {
@@ -1004,21 +1052,25 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
         {/* ======================================================== */}
         <section className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl relative space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-2">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="w-2 h-2 rounded-full bg-amber-400" />
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Section C: Entry/Exit Strategy Engine
+                Section C: Server Strategy Engine (Read-Only UI)
               </h2>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-700/40">
+                24/7 Server Evaluated
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={handleResetStrategyState}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-400 hover:text-white bg-slate-950 border border-slate-800 hover:bg-slate-800 rounded-lg transition-colors"
-                title="Reset strategy state for this match"
+                disabled={overridePending}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-400 hover:text-white bg-slate-950 border border-slate-800 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-50"
+                title="Manual Override: Reset server strategy state for this match"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reset Strategy State</span>
+                <span>Manual Override: Reset</span>
               </button>
             </div>
           </div>
@@ -1125,19 +1177,26 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   </span>
                 </div>
                 {strategyState.firstEntryPosition.status !== 'RECORDED_ENTRY' &&
-                strategyState.stage !== 'ACTIVE_FIRST_ENTRY' ? (
+                strategyState.firstEntryPosition.status !== 'RECORDED_EXIT' &&
+                strategyState.stage !== 'ACTIVE_FIRST_ENTRY' &&
+                strategyState.stage !== 'FIRST_BOOKSET_COMPLETED' ? (
                   <button
                     type="button"
                     onClick={handleRecordFirstEntry}
-                    disabled={!bookmaker?.decimalBack}
+                    disabled={!bookmaker?.decimalBack || overridePending}
                     className="px-2.5 py-1 text-xs font-semibold text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-600/50 rounded-lg transition-colors disabled:opacity-50"
+                    title="Manual Override (saved on server)"
                   >
-                    Record 1st Entry
+                    Manual Override: 1st Entry
                   </button>
                 ) : (
                   <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-800/80">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Active & Held</span>
+                    <span>
+                      {strategyState.firstEntryPosition.status === 'RECORDED_EXIT'
+                        ? 'Bookset Completed'
+                        : 'Active & Held'}
+                    </span>
                   </span>
                 )}
               </div>
@@ -1199,23 +1258,26 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 </div>
               </div>
 
-              {/* Action: Record 2nd Entry */}
+              {/* Action: Server-Saved Manual Override for 2nd Entry */}
               <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-500">
-                  {strategyState.secondEntryPosition.status === 'RECORDED_ENTRY'
-                    ? `2nd Entered @ ${strategyState.secondEntryPosition.entryOdds}`
-                    : 'Candidate status only'}
+                <span className="text-[11px] text-slate-400">
+                  {strategyState.secondEntryPosition.status === 'RECORDED_ENTRY' ||
+                  strategyState.secondEntryPosition.status === 'RECORDED_EXIT'
+                    ? `2nd Entered @ ${strategyState.secondEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.secondEntryPosition.entryOdds ?? '—'} (${strategyState.secondEntryTrade?.entryPaise ?? Math.round(((strategyState.secondEntryPosition.entryOdds ?? 1) - 1) * 100)}p) • ${strategyState.secondEntryTrade?.entryOver ?? strategyState.secondEntryPosition.entryOver ?? '—'} ov`
+                    : 'Server monitoring automatic 2nd entry'}
                 </span>
-                {strategyState.secondEntryPosition.status !== 'RECORDED_ENTRY' && (
-                  <button
-                    type="button"
-                    onClick={handleRecordSecondEntry}
-                    disabled={!opposingOdds}
-                    className="px-2.5 py-1 text-xs font-semibold text-blue-300 bg-blue-950/60 hover:bg-blue-900/80 border border-blue-600/50 rounded-lg transition-colors disabled:opacity-50"
-                  >
-                    Record 2nd Entry
-                  </button>
-                )}
+                {strategyState.secondEntryPosition.status !== 'RECORDED_ENTRY' &&
+                  strategyState.secondEntryPosition.status !== 'RECORDED_EXIT' && (
+                    <button
+                      type="button"
+                      onClick={handleRecordSecondEntry}
+                      disabled={!opposingOdds || overridePending}
+                      className="px-2.5 py-1 text-xs font-semibold text-blue-300 bg-blue-950/60 hover:bg-blue-900/80 border border-blue-600/50 rounded-lg transition-colors disabled:opacity-50"
+                      title="Manual Override (saved on server)"
+                    >
+                      Manual Override: 2nd Entry
+                    </button>
+                  )}
               </div>
             </div>
 
@@ -1259,21 +1321,22 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 </div>
               </div>
 
-              {/* Action: Record Exit */}
+              {/* Action: Server-Saved Manual Override Exit */}
               <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-500">
+                <span className="text-[11px] text-slate-400">
                   {strategyState.firstEntryPosition.status === 'RECORDED_EXIT'
-                    ? `Exited @ ${strategyState.firstEntryPosition.exitOdds}`
-                    : 'Awaiting exit criteria'}
+                    ? `1st Exited @ ${strategyState.firstEntryTrade?.exitDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.exitOdds ?? '—'} (${strategyState.firstEntryTrade?.exitOver ?? strategyState.firstEntryPosition.exitOver ?? '—'} ov)`
+                    : 'Awaiting automatic server exit'}
                 </span>
                 {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' && (
                   <button
                     type="button"
                     onClick={handleRecordFirstExit}
-                    disabled={!bookmaker?.decimalLay}
-                    className="px-2.5 py-1 text-xs font-semibold text-purple-300 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-600/50 rounded-lg transition-colors"
+                    disabled={!bookmaker?.decimalLay || overridePending}
+                    className="px-2.5 py-1 text-xs font-semibold text-purple-300 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-600/50 rounded-lg transition-colors disabled:opacity-50"
+                    title="Manual Override (saved on server)"
                   >
-                    Record 1st Exit
+                    Manual Override: 1st Exit
                   </button>
                 )}
               </div>
@@ -1314,45 +1377,10 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 </div>
               </div>
 
-              {/* Boundary Test Buttons */}
-              <div className="mt-4 pt-3 border-t border-slate-800/60">
-                <div className="text-[11px] text-slate-400 mb-2 flex items-center justify-between">
-                  <span>Simulate boundary shift test:</span>
-                </div>
-                <div className="grid grid-cols-4 gap-1.5 text-[10px] font-mono">
-                  <button
-                    type="button"
-                    onClick={() => handleTestBoundaryShift('FOUR', 0.10)}
-                    className="px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded text-slate-300"
-                    title="Four: 0.10 movement (Should FAIL)"
-                  >
-                    4: 0.10 (FAIL)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleTestBoundaryShift('FOUR', 0.11)}
-                    className="px-2 py-1 bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-600/40 rounded text-emerald-300 font-bold"
-                    title="Four: 0.11 movement (Should PASS)"
-                  >
-                    4: 0.11 (PASS)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleTestBoundaryShift('SIX', 0.17)}
-                    className="px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded text-slate-300"
-                    title="Six: 0.17 movement (Should FAIL)"
-                  >
-                    6: 0.17 (FAIL)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleTestBoundaryShift('SIX', 0.18)}
-                    className="px-2 py-1 bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-600/40 rounded text-emerald-300 font-bold"
-                    title="Six: 0.18 movement (Should PASS)"
-                  >
-                    6: 0.18 (PASS)
-                  </button>
-                </div>
+              {/* Read-Only Server Boundary Status Footer */}
+              <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
+                <span>Booking Team: <strong className="text-slate-200">{strategyState.bookingTeamName || 'Pending 1st boundary'}</strong></span>
+                <span className="font-mono text-emerald-400">Server Auto-Eval (1s)</span>
               </div>
             </div>
           </div>
@@ -1480,6 +1508,113 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                         <td className="py-2 px-2.5 whitespace-nowrap">{renderStatusBadge(sig.status)}</td>
                         <td className="py-2 px-2.5 text-slate-300 max-w-[360px]" title={sig.explanation}>
                           <p className="line-clamp-2 leading-relaxed">{sig.explanation}</p>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          {/* Append-Only Saved Timeline History (Ball 1 to Now) */}
+          <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b border-slate-800/60 gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Database className="w-4 h-4 text-blue-400" />
+                <span className="font-bold uppercase tracking-wider text-slate-300 text-xs">
+                  Saved Match Timeline History ({legalBallsSavedCount} balls • {timelineTicks.length} 1s ticks)
+                </span>
+                {missedTicks > 0 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-700/50">
+                    Missed Ticks: {missedTicks}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setTimelineMode('balls')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    timelineMode === 'balls'
+                      ? 'bg-blue-950/80 text-blue-300 border border-blue-600/60'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Ball-by-Ball ({legalBallsSavedCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTimelineMode('ticks')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    timelineMode === 'ticks'
+                      ? 'bg-slate-800 text-white border border-slate-700'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  All 1s Ticks ({timelineTicks.length})
+                </button>
+              </div>
+            </div>
+
+            {isLoadingHistory && timelineTicks.length === 0 ? (
+              <div className="py-6 text-center text-slate-500 text-xs">
+                Loading full saved timeline history from PostgreSQL...
+              </div>
+            ) : displayedTimelineRows.length === 0 ? (
+              <div className="py-6 text-center text-slate-500 text-xs italic">
+                No saved timeline ticks in PostgreSQL yet for this match.
+              </div>
+            ) : (
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full text-xs font-mono text-left">
+                  <thead className="text-[11px] text-slate-400 border-b border-slate-800 sticky top-0 bg-slate-950">
+                    <tr>
+                      <th className="py-2 px-2">Time</th>
+                      <th className="py-2 px-2">Inn / Ov</th>
+                      <th className="py-2 px-2">Score</th>
+                      <th className="py-2 px-2">Control / Fav</th>
+                      <th className="py-2 px-2">Back / Lay</th>
+                      <th className="py-2 px-2">Raw</th>
+                      <th className="py-2 px-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/50">
+                    {displayedTimelineRows.slice(0, 100).map((t) => (
+                      <tr key={t.id} className="hover:bg-slate-900/60 transition-colors">
+                        <td className="py-1.5 px-2 text-slate-400 whitespace-nowrap">
+                          {new Date(t.recorded_at).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                          })}
+                        </td>
+                        <td className="py-1.5 px-2 text-slate-300 whitespace-nowrap">
+                          Inn {t.innings} • {t.overs} ({t.legal_ball_count}b)
+                        </td>
+                        <td className="py-1.5 px-2 text-white whitespace-nowrap">
+                          {t.runs}/{t.wickets}
+                          {t.is_new_ball && t.runs_on_ball > 0 && (
+                            <span className="ml-1.5 text-[10px] px-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-700/40">
+                              +{t.runs_on_ball}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 px-2 text-slate-300 whitespace-nowrap">
+                          <span className={t.control === 'BATTING' ? 'text-emerald-400' : t.control === 'BOWLING' ? 'text-amber-400' : 'text-slate-400'}>
+                            {t.control}
+                          </span>
+                          {t.favorite_team ? ` (${t.favorite_team})` : ''}
+                        </td>
+                        <td className="py-1.5 px-2 text-blue-300 whitespace-nowrap">
+                          {t.back_rate !== null ? `${t.back_rate}/${t.lay_rate ?? '—'}` : '—'}
+                          {t.decimal_back !== null ? ` (${Number(t.decimal_back).toFixed(2)})` : ''}
+                        </td>
+                        <td className="py-1.5 px-2 text-slate-400 whitespace-nowrap">
+                          {t.raw_rate_string || '—'}
+                        </td>
+                        <td className="py-1.5 px-2 text-slate-400 whitespace-nowrap">
+                          {t.result_text || t.match_status}
                         </td>
                       </tr>
                     ))}

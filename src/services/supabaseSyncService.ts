@@ -7,17 +7,51 @@
 
 import { ParsedCricketMatch, TeamInfo, ParsedInningsScore } from '../types/cricket';
 import { MatchOddsState } from '../types/odds';
-import { StrategySignal, TradePosition, StrategyTradeRecord } from './strategy/types';
+import {
+  StrategySignal,
+  TradePosition,
+  StrategyTradeRecord,
+  SerializedMatchStrategyState,
+  PositionType,
+} from './strategy/types';
 import { TelegramConfig } from './telegramService';
-import { strategyEngine } from './strategy/engine';
-import { isLocalDbConfigured } from './supabaseClient';
 
-// Auto-register listener so every recorded trade (entry or exit) is synced to Local PostgreSQL
-strategyEngine.onTrade((trade) => {
-  syncStrategyTradeToDb(trade).catch((err) => {
-    console.warn('[PostgreSQL] strategyEngine.onTrade sync error:', err);
-  });
-});
+export interface MatchTimelineTick {
+  id: number;
+  match_id: string;
+  series_name: string | null;
+  innings: number;
+  overs: number;
+  legal_ball_count: number;
+  runs: number;
+  wickets: number;
+  batting_team: string | null;
+  bowling_team: string | null;
+  favorite_team: string | null;
+  control: 'BATTING' | 'BOWLING' | 'UNKNOWN';
+  back_rate: number | null;
+  lay_rate: number | null;
+  decimal_back: number | null;
+  decimal_lay: number | null;
+  control_team_odds: number | null;
+  raw_rate_string: string | null;
+  session_data: any;
+  match_status: string;
+  result_text: string | null;
+  is_new_ball: boolean;
+  runs_on_ball: number;
+  score_fetched_at: string | null;
+  odds_fetched_at: string | null;
+  recorded_at: string;
+}
+
+export interface TimelineResponse {
+  ok: boolean;
+  matchId: string;
+  missedTicks: number;
+  count: number;
+  data: MatchTimelineTick[];
+}
 
 /**
  * Migration Result Metrics
@@ -366,20 +400,142 @@ export async function fetchMatchesFromSupabase(): Promise<ParsedCricketMatch[]> 
 }
 
 /**
- * Loads historical trade positions, signals, and trades for a match from Local PostgreSQL
+ * Fetches saved append-only 1-second & ball-by-ball timeline ticks for a match
+ */
+export async function fetchMatchTimelineFromDb(
+  matchId: string,
+  opts?: { ballsOnly?: boolean; order?: 'asc' | 'desc'; limit?: number }
+): Promise<TimelineResponse> {
+  if (!matchId) {
+    return { ok: false, matchId: '', missedTicks: 0, count: 0, data: [] };
+  }
+  try {
+    const params = new URLSearchParams();
+    if (opts?.ballsOnly) params.set('ballsOnly', 'true');
+    if (opts?.order) params.set('order', opts.order);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    const url = `/api/db/timeline/${encodeURIComponent(matchId)}${qs ? `?${qs}` : ''}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      return { ok: false, matchId, missedTicks: 0, count: 0, data: [] };
+    }
+    const json = await res.json();
+    return {
+      ok: Boolean(json.ok),
+      matchId: json.matchId || matchId,
+      missedTicks: Number(json.missedTicks || 0),
+      count: Number(json.count || 0),
+      data: Array.isArray(json.data) ? json.data : [],
+    };
+  } catch (err) {
+    console.warn('fetchMatchTimelineFromDb error:', err);
+    return { ok: false, matchId, missedTicks: 0, count: 0, data: [] };
+  }
+}
+
+/**
+ * Fetches authoritative server-side strategy states for all tracked matches
+ */
+export async function fetchServerStrategyStates(): Promise<{
+  strategyAlertsEnabled: boolean;
+  states: Record<string, SerializedMatchStrategyState>;
+}> {
+  try {
+    const res = await fetch('/api/strategy/state');
+    if (!res.ok) return { strategyAlertsEnabled: false, states: {} };
+    const json = await res.json();
+    return {
+      strategyAlertsEnabled: Boolean(json.strategyAlertsEnabled),
+      states: json.states || {},
+    };
+  } catch (err) {
+    console.warn('fetchServerStrategyStates error:', err);
+    return { strategyAlertsEnabled: false, states: {} };
+  }
+}
+
+/**
+ * Server-Saved Manual Override: Record Entry on backend PostgreSQL
+ */
+export async function sendManualOverrideEntry(
+  matchId: string,
+  payload: {
+    positionType: PositionType;
+    entryOdds: number;
+    innings: number;
+    over: number;
+    wickets: number;
+    bookingTeam: string;
+    battingTeam: string;
+    bowlingTeam: string;
+    matchName?: string;
+    seriesName?: string;
+  }
+): Promise<SerializedMatchStrategyState | null> {
+  const res = await fetch(`/api/strategy/${encodeURIComponent(matchId)}/override-entry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) return null;
+  const json = await res.json();
+  return json.state || null;
+}
+
+/**
+ * Server-Saved Manual Override: Record Exit on backend PostgreSQL
+ */
+export async function sendManualOverrideExit(
+  matchId: string,
+  payload: {
+    positionType: PositionType;
+    exitOdds: number;
+    over: number;
+    exitReason?: string;
+  }
+): Promise<SerializedMatchStrategyState | null> {
+  const res = await fetch(`/api/strategy/${encodeURIComponent(matchId)}/override-exit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) return null;
+  const json = await res.json();
+  return json.state || null;
+}
+
+/**
+ * Server-Saved Manual Override: Reset Match Strategy State on backend PostgreSQL
+ */
+export async function sendManualStrategyReset(
+  matchId: string
+): Promise<SerializedMatchStrategyState | null> {
+  const res = await fetch(`/api/strategy/${encodeURIComponent(matchId)}/reset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) return null;
+  const json = await res.json();
+  return json.state || null;
+}
+
+/**
+ * Loads historical trade positions, signals, trades, and serialized strategy state for a match from Local PostgreSQL
  */
 export async function loadMatchStrategyFromSupabase(matchId: string): Promise<{
   positions: TradePosition[];
   signals: StrategySignal[];
   trades: StrategyTradeRecord[];
+  strategyState: SerializedMatchStrategyState | null;
 }> {
   if (!matchId) {
-    return { positions: [], signals: [], trades: [] };
+    return { positions: [], signals: [], trades: [], strategyState: null };
   }
 
   try {
     const res = await fetch(`/api/db/match-strategy/${encodeURIComponent(matchId)}`);
-    if (!res.ok) return { positions: [], signals: [], trades: [] };
+    if (!res.ok) return { positions: [], signals: [], trades: [], strategyState: null };
     const json = await res.json();
 
     const positions: TradePosition[] = (json.positions || []).map((p: any) => ({
@@ -388,14 +544,14 @@ export async function loadMatchStrategyFromSupabase(matchId: string): Promise<{
       positionType: p.position_type,
       status: p.status,
       candidateSignalId: p.candidate_signal_id || undefined,
-      entryOdds: p.entry_odds ? Number(p.entry_odds) : undefined,
+      entryOdds: p.entry_odds !== null && p.entry_odds !== undefined ? Number(p.entry_odds) : undefined,
       entryTimestamp: p.entry_timestamp ? new Date(p.entry_timestamp) : undefined,
-      entryOver: p.entry_over ? Number(p.entry_over) : undefined,
-      entryInnings: p.entry_innings || undefined,
+      entryOver: p.entry_over !== null && p.entry_over !== undefined ? Number(p.entry_over) : undefined,
+      entryInnings: p.entry_innings !== null && p.entry_innings !== undefined ? Number(p.entry_innings) : undefined,
       entryWickets: p.entry_wickets ?? undefined,
-      exitOdds: p.exit_odds ? Number(p.exit_odds) : undefined,
+      exitOdds: p.exit_odds !== null && p.exit_odds !== undefined ? Number(p.exit_odds) : undefined,
       exitTimestamp: p.exit_timestamp ? new Date(p.exit_timestamp) : undefined,
-      exitOver: p.exit_over ? Number(p.exit_over) : undefined,
+      exitOver: p.exit_over !== null && p.exit_over !== undefined ? Number(p.exit_over) : undefined,
       booksetSignalId: p.bookset_signal_id || undefined,
     }));
 
@@ -409,10 +565,16 @@ export async function loadMatchStrategyFromSupabase(matchId: string): Promise<{
       ballNumber: s.ball_number || 0,
       relevantOdds: {
         measuredTeam: s.measured_team || '',
-        decimalOdds: s.decimal_odds ? Number(s.decimal_odds) : null,
-        previousDecimalOdds: s.previous_decimal_odds ? Number(s.previous_decimal_odds) : null,
-        oddsDelta: s.odds_delta ? Number(s.odds_delta) : null,
-        opposingTeamOdds: s.opposing_team_odds ? Number(s.opposing_team_odds) : null,
+        decimalOdds: s.decimal_odds !== null && s.decimal_odds !== undefined ? Number(s.decimal_odds) : null,
+        previousDecimalOdds:
+          s.previous_decimal_odds !== null && s.previous_decimal_odds !== undefined
+            ? Number(s.previous_decimal_odds)
+            : null,
+        oddsDelta: s.odds_delta !== null && s.odds_delta !== undefined ? Number(s.odds_delta) : null,
+        opposingTeamOdds:
+          s.opposing_team_odds !== null && s.opposing_team_odds !== undefined
+            ? Number(s.opposing_team_odds)
+            : null,
       },
       ruleEvaluated: s.rule_evaluated,
       status: s.status,
@@ -435,9 +597,10 @@ export async function loadMatchStrategyFromSupabase(matchId: string): Promise<{
       entryDecimal: Number(row.entry_decimal),
       entryWickets: Number(row.entry_wickets || 0),
       entryTime: new Date(row.entry_time),
-      exitOver: row.exit_over ? Number(row.exit_over) : undefined,
-      exitPaise: row.exit_paise ? Number(row.exit_paise) : undefined,
-      exitDecimal: row.exit_decimal ? Number(row.exit_decimal) : undefined,
+      exitOver: row.exit_over !== null && row.exit_over !== undefined ? Number(row.exit_over) : undefined,
+      exitPaise: row.exit_paise !== null && row.exit_paise !== undefined ? Number(row.exit_paise) : undefined,
+      exitDecimal:
+        row.exit_decimal !== null && row.exit_decimal !== undefined ? Number(row.exit_decimal) : undefined,
       exitTime: row.exit_time ? new Date(row.exit_time) : undefined,
       exitReason: row.exit_reason,
       status: row.status,
@@ -445,10 +608,15 @@ export async function loadMatchStrategyFromSupabase(matchId: string): Promise<{
       updatedAt: new Date(row.updated_at),
     }));
 
-    return { positions, signals, trades };
+    return {
+      positions,
+      signals,
+      trades,
+      strategyState: (json.strategyState as SerializedMatchStrategyState) || null,
+    };
   } catch (err) {
     console.warn('loadMatchStrategyFromSupabase error:', err);
-    return { positions: [], signals: [], trades: [] };
+    return { positions: [], signals: [], trades: [], strategyState: null };
   }
 }
 
