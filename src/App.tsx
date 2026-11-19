@@ -22,14 +22,14 @@ import { StatsHeader } from './components/StatsHeader';
 import { FilterBar } from './components/FilterBar';
 import { MatchCard } from './components/MatchCard';
 import { MatchDetailModal } from './components/MatchDetailModal';
-import { OnlineScriptModal } from './components/OnlineScriptModal';
-import { ApiInspectorModal } from './components/ApiInspectorModal';
 import { MatchAnalysisPage } from './components/MatchAnalysisPage';
 import { EntryPossibilitiesModal } from './components/EntryPossibilitiesModal';
+import { AdminApp } from './components/admin/AdminApp';
 import { useOddsManager } from './hooks/useOddsManager';
 import { strategyEngine, detectTeamInControl, isWithinEntryWindow } from './services/strategy/engine';
 import { SerializedMatchStrategyState } from './services/strategy/types';
 import { clearLegacyTelegramLocalStorage } from './services/telegramService';
+import { fetchPublicSiteConfig, PublicSiteConfig } from './services/adminApi';
 import {
   fetchMatchesFromSupabase,
   fetchStrategyTradesFromDb,
@@ -49,6 +49,24 @@ export default function App() {
   const [latencyMs, setLatencyMs] = useState<number>(8);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [, setTickCounter] = useState<number>(0);
+
+  // Route detection for hidden /admin console (never linked publicly)
+  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/');
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    const onPopState = () => {
+      setIsAdminRoute(
+        window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/')
+      );
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   // Theme & Shell Navigation State
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -74,10 +92,28 @@ export default function App() {
     }
   }, []);
 
-  // Configuration - 1-second live tick rate
-  const [countryCode, setCountryCode] = useState<string>('IN');
+  // Configuration - 1-second live tick rate (respects visitor local overrides, falls back to /api/public/config)
+  const [countryCode, setCountryCode] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('crex_user_cc');
+      if (saved && /^[A-Za-z]{2,6}$/.test(saved.trim())) return saved.trim().toUpperCase();
+    } catch {
+      // ignore storage errors
+    }
+    return 'IN';
+  });
   const [autoRefreshInterval] = useState<number>(1);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('crex_user_sound');
+      if (saved === 'true') return true;
+      if (saved === 'false') return false;
+    } catch {
+      // ignore storage errors
+    }
+    return true;
+  });
+  const [publicConfig, setPublicConfig] = useState<PublicSiteConfig | null>(null);
 
   // Filters
   const [activeTab, setActiveTab] = useState<'all' | 'live' | 'upcoming' | 'completed'>('all');
@@ -86,8 +122,6 @@ export default function App() {
 
   // Modals
   const [selectedMatch, setSelectedMatch] = useState<ParsedCricketMatch | null>(null);
-  const [isScriptModalOpen, setIsScriptModalOpen] = useState<boolean>(false);
-  const [isInspectorModalOpen, setIsInspectorModalOpen] = useState<boolean>(false);
   const [isEntryRadarOpen, setIsEntryRadarOpen] = useState<boolean>(false);
 
   // Authoritative Server SSE State (Read-only browser mirror)
@@ -124,8 +158,9 @@ export default function App() {
     []
   );
 
-  // Rehydrate persisted strategy states & trades from PostgreSQL on mount
+  // Rehydrate persisted strategy states & trades from PostgreSQL on mount (public views only)
   useEffect(() => {
+    if (isAdminRoute) return;
     fetchServerStrategyStates()
       .then((res) => {
         if (res?.states) applyServerStrategyStates(res.states);
@@ -186,7 +221,7 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }, [applyServerStrategyStates]);
+  }, [applyServerStrategyStates, isAdminRoute]);
 
   // Dedicated Match Analysis View Routing
   const [activeAnalysisMatchId, setActiveAnalysisMatchId] = useState<string | null>(() => {
@@ -234,6 +269,35 @@ export default function App() {
   useEffect(() => {
     clearLegacyTelegramLocalStorage();
   }, []);
+
+  // Load admin-managed public defaults & maintenance banner from GET /api/public/config
+  useEffect(() => {
+    if (isAdminRoute) return;
+    let active = true;
+    fetchPublicSiteConfig().then((cfg) => {
+      if (!active || !cfg) return;
+      setPublicConfig({
+        defaultCountryCode: cfg.defaultCountryCode,
+        defaultSoundEnabled: cfg.defaultSoundEnabled,
+        maintenanceBannerEnabled: cfg.maintenanceBannerEnabled,
+        maintenanceBannerText: cfg.maintenanceBannerText,
+      });
+      try {
+        if (!localStorage.getItem('crex_user_cc') && cfg.defaultCountryCode) {
+          setCountryCode(cfg.defaultCountryCode);
+        }
+        if (localStorage.getItem('crex_user_sound') === null) {
+          setSoundEnabled(cfg.defaultSoundEnabled);
+        }
+      } catch {
+        setCountryCode(cfg.defaultCountryCode);
+        setSoundEnabled(cfg.defaultSoundEnabled);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [isAdminRoute]);
 
   const inFlightRef = useRef<boolean>(false);
 
@@ -338,6 +402,7 @@ export default function App() {
   }, [matches, oddsByMatchId, recordedFirstEntries, strategyVersion]);
 
   useEffect(() => {
+    if (isAdminRoute) return;
     fetchMatchesFromSupabase()
       .then((savedMatches) => {
         if (savedMatches.length > 0) {
@@ -348,10 +413,11 @@ export default function App() {
       .catch(() => {});
 
     loadMatches(false);
-  }, [loadMatches]);
+  }, [loadMatches, isAdminRoute]);
 
-  // Authoritative SSE Stream from server.ts
+  // Authoritative SSE Stream from server.ts (public views only)
   useEffect(() => {
+    if (isAdminRoute) return;
     if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
 
     const eventSource = new EventSource('/api/live-stream');
@@ -407,11 +473,11 @@ export default function App() {
     return () => {
       eventSource.close();
     };
-  }, [applyServerStrategyStates]);
+  }, [applyServerStrategyStates, isAdminRoute]);
 
   // Active 1-Second Fallback Engine
   useEffect(() => {
-    if (autoRefreshInterval <= 0) return;
+    if (isAdminRoute || autoRefreshInterval <= 0) return;
 
     let countdown = autoRefreshInterval;
     const timer = setInterval(() => {
@@ -425,7 +491,7 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [autoRefreshInterval, loadMatches, isSseConnected, countryCode]);
+  }, [autoRefreshInterval, loadMatches, isSseConnected, countryCode, isAdminRoute]);
 
   // Filtered Matches
   const filteredMatches = useMemo(() => {
@@ -452,30 +518,16 @@ export default function App() {
 
   const liveMatchesCount = matches.filter((m) => m.status === 'live').length;
 
+  // Dedicated Admin Console Route (/admin)
+  if (isAdminRoute) {
+    return <AdminApp theme={theme} onThemeChange={handleThemeChange} />;
+  }
+
   const sharedModals = (
     <>
       <MatchDetailModal
         match={selectedMatch}
         onClose={() => setSelectedMatch(null)}
-      />
-
-      <OnlineScriptModal
-        isOpen={isScriptModalOpen}
-        onClose={() => setIsScriptModalOpen(false)}
-        countryCode={countryCode}
-      />
-
-      <ApiInspectorModal
-        isOpen={isInspectorModalOpen}
-        onClose={() => setIsInspectorModalOpen(false)}
-        initialPayload={`{"cc":"${countryCode}"}`}
-        rawData={rawData}
-        onPayloadSend={async (newCc) => {
-          setCountryCode(newCc);
-          await loadMatches(false, newCc);
-        }}
-        isFetching={isFetching}
-        latencyMs={latencyMs}
       />
 
       <EntryPossibilitiesModal
@@ -489,6 +541,20 @@ export default function App() {
     </>
   );
 
+  const maintenanceBanner =
+    publicConfig?.maintenanceBannerEnabled && publicConfig.maintenanceBannerText.trim() ? (
+      <div
+        role="status"
+        aria-live="polite"
+        className="w-full bg-[var(--warn-bg)] border-b border-[var(--warn-bd)] text-[var(--warn-tx)] px-4 py-2.5 text-xs font-medium"
+      >
+        <div className="max-w-[1280px] mx-auto flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" strokeWidth={1.8} />
+          <span>{publicConfig.maintenanceBannerText.trim()}</span>
+        </div>
+      </div>
+    ) : null;
+
   // Dedicated Match Analysis View
   if (activeAnalysisMatchId) {
     const analysisMatch =
@@ -496,6 +562,7 @@ export default function App() {
       allServerMatches.find((m) => m.id === activeAnalysisMatchId);
     return (
       <div className="min-h-screen bg-[var(--bg)] text-[var(--tx)] flex flex-col">
+        {maintenanceBanner}
         <MatchAnalysisPage
           matchId={activeAnalysisMatchId}
           match={analysisMatch}
@@ -527,7 +594,6 @@ export default function App() {
         sport={sport}
         onSelectSport={setSport}
         onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
-        onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
         entryOpportunitiesCount={entryOpportunitiesCount}
       />
 
@@ -541,6 +607,7 @@ export default function App() {
 
       {/* Main Content Column */}
       <div className="flex-1 min-w-0 flex flex-col min-h-screen">
+        {maintenanceBanner}
         <main
           id="main-content"
           tabIndex={-1}
@@ -554,7 +621,6 @@ export default function App() {
             theme={theme}
             onThemeChange={handleThemeChange}
             onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
-            onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
             entryOpportunitiesCount={entryOpportunitiesCount}
             liveCount={liveMatchesCount}
             searchQuery={searchQuery}
@@ -569,10 +635,23 @@ export default function App() {
               theme={theme}
               onThemeChange={handleThemeChange}
               soundEnabled={soundEnabled}
-              onToggleSound={() => setSoundEnabled(!soundEnabled)}
+              onToggleSound={() => {
+                const next = !soundEnabled;
+                setSoundEnabled(next);
+                try {
+                  localStorage.setItem('crex_user_sound', String(next));
+                } catch {
+                  // ignore
+                }
+              }}
               countryCode={countryCode}
               onCountryCodeChange={(code) => {
                 setCountryCode(code);
+                try {
+                  localStorage.setItem('crex_user_cc', code);
+                } catch {
+                  // ignore
+                }
                 loadMatches(false, code);
               }}
               isFetching={isFetching}
@@ -580,8 +659,6 @@ export default function App() {
               isSseActive={isSseConnected}
               latencyMs={latencyMs}
               lastUpdated={lastUpdated}
-              onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
-              onOpenScriptModal={() => setIsScriptModalOpen(true)}
             />
           ) : (
             <>

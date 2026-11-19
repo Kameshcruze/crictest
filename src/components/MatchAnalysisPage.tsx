@@ -1161,6 +1161,12 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                         ? 'RECORDED_ENTRY'
                         : strategyState.firstEntryPosition.status}
                     </span>
+                    {(strategyState.firstEntryTrade?.isManual ||
+                      strategyState.firstEntryTrade?.source === 'MANUAL') && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[var(--purple-bg)] text-[var(--purple-tx)] border border-[var(--purple-bd)]">
+                        MANUAL
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -1273,6 +1279,12 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     >
                       {strategyState.secondEntryPosition.status}
                     </span>
+                    {(strategyState.secondEntryTrade?.isManual ||
+                      strategyState.secondEntryTrade?.source === 'MANUAL') && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[var(--purple-bg)] text-[var(--purple-tx)] border border-[var(--purple-bd)]">
+                        MANUAL
+                      </span>
+                    )}
                   </div>
                 </div>
 

@@ -15,6 +15,23 @@ import {
   runOneTimeTelegramTokenMigration,
   saveTelegramToDb,
 } from './server/telegramConfig';
+import {
+  createActionCooldownLimiter,
+  sanitizeCountryCode,
+} from './server/adminRateLimit';
+import {
+  AdminSiteSettings,
+  DEFAULT_ADMIN_SITE_SETTINGS,
+  READ_ONLY_REFRESH_INTERVALS,
+  StrategyAlertsStatus,
+  clearStrategyAlertsOverrideInDb,
+  loadAdminSiteSettingsFromDb,
+  loadStrategyAlertsStatusFromDb,
+  sanitizeSeriesFilterList,
+  saveAdminSiteSettingsToDb,
+  saveStrategyAlertsOverrideToDb,
+  toPublicSiteConfig,
+} from './server/appSettingsConfig';
 import { parseBookmakerRate, parseSessionMarkets, transformGetSV3Response } from './src/services/oddsApi';
 import { parseInningsScore, isValidActiveSecondInningsScore } from './src/services/cricketApi';
 import { resolveTeam, resolveSeries, resolveVenue } from './src/data/cricketMapping';
@@ -36,17 +53,25 @@ import {
 dotenv.config();
 
 /**
- * Strategy Telegram Alerts Flag (Phase 2: OFF by default until Phase 3 is ready)
+ * Strategy Telegram Alerts Flag:
+ * Env STRATEGY_ALERTS_ENABLED is the default; Admin -> Strategy can override it in
+ * app_settings['strategy_alerts_config'] with immediate effect (no restart required).
  */
-const STRATEGY_ALERTS_ENABLED = process.env.STRATEGY_ALERTS_ENABLED === 'true';
+const ENV_STRATEGY_ALERTS_DEFAULT = process.env.STRATEGY_ALERTS_ENABLED === 'true';
+
+let activeStrategyAlertsStatus: StrategyAlertsStatus = {
+  enabled: ENV_STRATEGY_ALERTS_DEFAULT,
+  source: 'env',
+  envDefault: ENV_STRATEGY_ALERTS_DEFAULT,
+  updatedAt: null,
+};
 
 /**
- * Series Filter Configuration (Optional)
- * Leave empty [] to track, save 1-second timeline ticks, and serve EVERY live match the server sees.
- * To restrict to specific series, add names or keys here, e.g.:
- *   const ALLOWED_SERIES_FILTER: string[] = ['WBBL', 'Big Bash', 'Abu Dhabi T10', '2KG', '2IO'];
+ * Dynamic Site Settings & Series Filter (stored in app_settings['public_site_config']).
+ * Leave allowedSeriesFilter empty [] to track and serve EVERY live match the server sees.
  */
-const ALLOWED_SERIES_FILTER: string[] = [];
+let activeSiteSettings: AdminSiteSettings = { ...DEFAULT_ADMIN_SITE_SETTINGS };
+let ALLOWED_SERIES_FILTER: string[] = [];
 
 const { Pool } = pg;
 
@@ -238,6 +263,7 @@ async function testDbConnection(isRetry = false) {
     isDbAvailable = true;
     hasLoggedDbOffline = false;
     await reloadTelegramConfigFromDb();
+    await reloadAppSettingsFromDb();
     logTelegramStartupStatusOnce();
 
     // Rehydrate strategy engine state from PostgreSQL without firing alerts or duplicates
@@ -260,7 +286,9 @@ async function testDbConnection(isRetry = false) {
     console.log(`[PostgreSQL] Connected to: "${res.rows[0].db_name}" (${safeUrl})`);
     console.log(`[PostgreSQL] Series Filter: ${ALLOWED_SERIES_FILTER.length === 0 ? 'ALL LIVE MATCHES' : ALLOWED_SERIES_FILTER.join(', ')}`);
     console.log(`[PostgreSQL] Timeline Table: match_timeline_ticks READY`);
-    console.log(`[Strategy Engine] Server-side 1s loop active | STRATEGY_ALERTS_ENABLED=${STRATEGY_ALERTS_ENABLED}`);
+    console.log(
+      `[Strategy Engine] Server-side 1s loop active | strategyAlerts=${activeStrategyAlertsStatus.enabled} (source=${activeStrategyAlertsStatus.source}, envDefault=${ENV_STRATEGY_ALERTS_DEFAULT})`
+    );
     console.log(`[PostgreSQL] Server Time: ${res.rows[0].now}`);
     console.log(`======================================================\n`);
   } catch (err: any) {
@@ -319,6 +347,18 @@ app.use(express.json({ limit: '256kb' }));
 
 // Same-origin is always allowed; ALLOWED_ORIGINS controls additional cross-origin access only
 app.use(adminAuth.corsMiddleware);
+
+// Prevent search engine indexing of /admin routes at the HTTP header level
+app.use(['/admin', '/admin/*'], (_req, res, next) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  next();
+});
+
+const SERVER_STARTED_AT = Date.now();
+
+// Per-action 10-second cooldown rate limiter for admin Telegram send & broadcast actions
+const adminSendLimiter = createActionCooldownLimiter({ windowMs: 10_000 });
 
 // Admin Authentication Endpoints
 app.post('/api/admin/login', adminAuth.handleLogin);
@@ -410,12 +450,34 @@ async function reloadTelegramConfigFromDb() {
   }
 }
 
+async function reloadAppSettingsFromDb() {
+  try {
+    const [loadedSite, loadedAlerts] = await Promise.all([
+      loadAdminSiteSettingsFromDb(dbPool),
+      loadStrategyAlertsStatusFromDb(dbPool, ENV_STRATEGY_ALERTS_DEFAULT),
+    ]);
+    if (loadedSite) {
+      activeSiteSettings = loadedSite;
+      ALLOWED_SERIES_FILTER = [...loadedSite.allowedSeriesFilter];
+    }
+    activeStrategyAlertsStatus = loadedAlerts;
+    if (typeof strategyCoordinator !== 'undefined') {
+      strategyCoordinator.setStrategyAlertsEnabled(loadedAlerts.enabled);
+    }
+  } catch {
+    // Non-blocking if database is offline or starting up
+  }
+}
+
 // Initial config hydration and background periodic refresh every 30s
-reloadTelegramConfigFromDb().finally(() => {
+Promise.all([reloadTelegramConfigFromDb(), reloadAppSettingsFromDb()]).finally(() => {
   // If DB was offline on startup, still log once after 3s so operators see Telegram status clearly
   setTimeout(logTelegramStartupStatusOnce, 3000);
 });
-setInterval(reloadTelegramConfigFromDb, 30000);
+setInterval(() => {
+  void reloadTelegramConfigFromDb();
+  void reloadAppSettingsFromDb();
+}, 30000);
 
 async function sendTelegramBroadcast(htmlText: string) {
   const creds = getEffectiveTelegramCredentials();
@@ -655,13 +717,16 @@ let isLiveOddsRunning = false;
 let isTimelineLoopRunning = false;
 
 /**
- * Configurable Series Filter:
- * If ALLOWED_SERIES_FILTER is empty [], permits EVERY live match the server sees.
- * Otherwise only permits matches whose series key or name matches an entry in ALLOWED_SERIES_FILTER.
+ * Configurable Series Filter matcher (shared by live filtering & Admin preview-series).
+ * If filterList is empty [], permits EVERY live match the server sees.
  */
-function isAllowedTournament(item: any, mapping?: { series?: any[] }): boolean {
+function matchesSeriesFilter(
+  item: any,
+  filterList: string[],
+  mapping?: { series?: any[] }
+): boolean {
   if (!item) return false;
-  if (ALLOWED_SERIES_FILTER.length === 0) return true;
+  if (filterList.length === 0) return true;
 
   const rawQ = String(item.q || item.seriesKey || '').replace(/^\^/, '').toUpperCase();
   const seriesName = String(item.sfullname || item.sname || item.seriesName || '').toLowerCase();
@@ -682,10 +747,14 @@ function isAllowedTournament(item: any, mapping?: { series?: any[] }): boolean {
   }
 
   const combined = `${rawQ.toLowerCase()} ${seriesName} ${mappedSeriesName} ${fName} ${fo}`.toLowerCase();
-  return ALLOWED_SERIES_FILTER.some((entry) => {
+  return filterList.some((entry) => {
     const norm = entry.trim().toLowerCase();
     return norm.length > 0 && combined.includes(norm);
   });
+}
+
+function isAllowedTournament(item: any, mapping?: { series?: any[] }): boolean {
+  return matchesSeriesFilter(item, ALLOWED_SERIES_FILTER, mapping);
 }
 
 // Per-match fetch timestamps, score-change timestamps, ball/run snapshots, and missed tick counters
@@ -1942,9 +2011,9 @@ const pgStrategyStorageAdapter: StrategyStorageAdapter = {
 const strategyCoordinator = new StrategyPersistenceCoordinator({
   engine: new CricketStrategyEngine(),
   storage: pgStrategyStorageAdapter,
-  strategyAlertsEnabled: STRATEGY_ALERTS_ENABLED,
+  strategyAlertsEnabled: activeStrategyAlertsStatus.enabled,
   onStrategyAlert: async ({ kind, trade, match }) => {
-    if (!STRATEGY_ALERTS_ENABLED) return;
+    if (!activeStrategyAlertsStatus.enabled) return;
     if (!activeTelegramConfig.enabled || !activeTelegramConfig.notifyStrategyEntries) return;
 
     const dbKey = `tele_strategy:${trade.matchId}:${trade.entryType}:${trade.status}`;
@@ -2557,9 +2626,10 @@ app.get('/api/live-stream', (req, res) => {
 // High-speed endpoint: Responds immediately from memory in < 1ms
 app.all(['/api/top-matches', '/api/v2/getTopMatches'], async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const safeCc = sanitizeCountryCode(req.body?.cc ?? req.query?.cc, 'IN');
 
   if (Object.keys(matchStore.matches).length === 0) {
-    await Promise.all([syncGoscorerApi(req.body?.cc || 'IN'), syncCrexPool()]);
+    await Promise.all([syncGoscorerApi(safeCc), syncCrexPool()]);
   }
 
   res.json({
@@ -2645,106 +2715,192 @@ app.all(['/api/cron', '/api/telegram/cron'], adminAuth.requireCronSecret, async 
   });
 });
 
-// Admin Telegram Test Endpoint (uses server-configured token & chatId, never requires a token in request body)
-app.post('/api/admin/telegram/test', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  await reloadTelegramConfigFromDb();
-  const creds = getEffectiveTelegramCredentials();
+// Admin Telegram Test Endpoint (uses server-configured token & chatId, rate-limited 1 per 10s)
+app.post(
+  '/api/admin/telegram/test',
+  adminAuth.requireAdmin,
+  adminSendLimiter.middleware('telegram:test', 'Telegram test message'),
+  async (req: AuthenticatedAdminRequest, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    await reloadTelegramConfigFromDb();
+    const creds = getEffectiveTelegramCredentials();
 
-  if (!creds.configured || !creds.token) {
-    return res.status(400).json({
-      ok: false,
-      status: 'not configured',
-      error: 'Telegram bot token is not configured on the server',
-    });
+    if (!creds.configured || !creds.token) {
+      return res.status(400).json({
+        ok: false,
+        status: 'not configured',
+        error: 'Telegram bot token is not configured on the server',
+      });
+    }
+
+    const targetChatId = (typeof req.body?.chatId === 'string' && req.body.chatId.trim()) || creds.chatId;
+    if (!targetChatId) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Telegram chat ID is not configured',
+      });
+    }
+
+    const customText = typeof req.body?.text === 'string' && req.body.text.trim() ? req.body.text.trim() : null;
+    const timestamp = new Date().toISOString();
+    const text =
+      customText ||
+      `🏏 <b>Crex Live Scorer — Admin Test Message</b>\n\n` +
+        `✅ Server-side Telegram delivery is working.\n` +
+        `🔐 Token source: <code>${creds.source}</code> (****${creds.tokenLast4})\n` +
+        `⏰ <i>${timestamp}</i>`;
+
+    try {
+      const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: targetChatId,
+          text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      });
+      const data = await tgRes.json();
+      void adminAuth.recordAdminAudit(
+        'TELEGRAM_TEST',
+        '/api/admin/telegram/test',
+        { ok: tgRes.ok, status: tgRes.status, tokenSource: creds.source, chatIdSuffix: targetChatId.slice(-4) },
+        req.adminUser?.ip || adminAuth.getClientIp(req)
+      );
+      return res.status(tgRes.status).json(data);
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   }
+);
 
-  const targetChatId = (typeof req.body?.chatId === 'string' && req.body.chatId.trim()) || creds.chatId;
-  if (!targetChatId) {
-    return res.status(400).json({
-      ok: false,
-      error: 'Telegram chat ID is not configured',
-    });
+// Admin Manual Broadcast Endpoint (Admin only, requires confirm: true, rate-limited 1 per 10s, logged to admin_audit_log)
+app.post(
+  '/api/admin/telegram/broadcast',
+  adminAuth.requireAdmin,
+  adminSendLimiter.middleware('telegram:broadcast', 'Telegram broadcast'),
+  async (req: AuthenticatedAdminRequest, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+
+    if (body.confirm !== true) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Explicit confirmation (confirm: true) is required to send a broadcast',
+      });
+    }
+
+    if (!text) {
+      return res.status(400).json({ ok: false, error: 'Broadcast message text is required' });
+    }
+
+    if (text.length > 4000) {
+      return res.status(400).json({ ok: false, error: 'Broadcast message must be 4000 characters or fewer' });
+    }
+
+    await reloadTelegramConfigFromDb();
+    const creds = getEffectiveTelegramCredentials();
+
+    if (!creds.configured || !creds.token) {
+      return res.status(400).json({
+        ok: false,
+        status: 'not configured',
+        error: 'Telegram bot token is not configured on the server',
+      });
+    }
+
+    const targetChatId = (typeof body.chatId === 'string' && body.chatId.trim()) || creds.chatId;
+    if (!targetChatId) {
+      return res.status(400).json({ ok: false, error: 'Telegram chat ID is not configured' });
+    }
+
+    try {
+      const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: targetChatId,
+          text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      });
+      const data = await tgRes.json();
+      void adminAuth.recordAdminAudit(
+        'TELEGRAM_MANUAL_BROADCAST',
+        '/api/admin/telegram/broadcast',
+        {
+          ok: tgRes.ok,
+          status: tgRes.status,
+          tokenSource: creds.source,
+          messageLength: text.length,
+          chatIdSuffix: targetChatId.slice(-4),
+        },
+        req.adminUser?.ip || adminAuth.getClientIp(req)
+      );
+      return res.status(tgRes.status).json(data);
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   }
+);
 
-  const customText = typeof req.body?.text === 'string' && req.body.text.trim() ? req.body.text.trim() : null;
-  const timestamp = new Date().toISOString();
-  const text =
-    customText ||
-    `🏏 <b>Crex Live Scorer — Admin Test Message</b>\n\n` +
-      `✅ Server-side Telegram delivery is working.\n` +
-      `🔐 Token source: <code>${creds.source}</code> (****${creds.tokenLast4})\n` +
-      `⏰ <i>${timestamp}</i>`;
+// Telegram Bot Dispatch Proxy (Admin only, server-configured token only, rate-limited 1 per 10s)
+app.post(
+  '/api/telegram/send',
+  adminAuth.requireAdmin,
+  adminSendLimiter.middleware('telegram:send', 'Telegram send'),
+  async (req: AuthenticatedAdminRequest, res) => {
+    const { chatId, text } = req.body || {};
+    await reloadTelegramConfigFromDb();
+    const creds = getEffectiveTelegramCredentials();
 
-  try {
-    const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: targetChatId,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-    });
-    const data = await tgRes.json();
-    void adminAuth.recordAdminAudit(
-      'TELEGRAM_TEST',
-      '/api/admin/telegram/test',
-      { ok: tgRes.ok, status: tgRes.status, tokenSource: creds.source },
-      req.adminUser?.ip || adminAuth.getClientIp(req)
-    );
-    return res.status(tgRes.status).json(data);
-  } catch (err: any) {
-    return res.status(500).json({ ok: false, error: err.message });
+    if (!creds.configured || !creds.token) {
+      return res.status(400).json({ ok: false, error: 'Telegram bot token is not configured on the server' });
+    }
+
+    const targetChatId = (typeof chatId === 'string' && chatId.trim()) || creds.chatId;
+    if (!targetChatId) {
+      return res.status(400).json({ ok: false, error: 'Telegram chat ID is not configured' });
+    }
+
+    if (!text) {
+      return res.status(400).json({ ok: false, error: 'Missing message text' });
+    }
+
+    try {
+      const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: targetChatId,
+          text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      });
+      const data = await tgRes.json();
+      void adminAuth.recordAdminAudit(
+        'TELEGRAM_SEND',
+        '/api/telegram/send',
+        { ok: tgRes.ok, status: tgRes.status, messageLength: String(text).length },
+        req.adminUser?.ip || adminAuth.getClientIp(req)
+      );
+      return res.status(tgRes.status).json(data);
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   }
-});
+);
 
-// Telegram Bot Dispatch Proxy (Admin only, server-configured token only)
-app.post('/api/telegram/send', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
-  const { chatId, text } = req.body || {};
-  await reloadTelegramConfigFromDb();
-  const creds = getEffectiveTelegramCredentials();
-
-  if (!creds.configured || !creds.token) {
-    return res.status(400).json({ ok: false, error: 'Telegram bot token is not configured on the server' });
-  }
-
-  const targetChatId = (typeof chatId === 'string' && chatId.trim()) || creds.chatId;
-  if (!targetChatId) {
-    return res.status(400).json({ ok: false, error: 'Telegram chat ID is not configured' });
-  }
-
-  if (!text) {
-    return res.status(400).json({ ok: false, error: 'Missing message text' });
-  }
-
-  try {
-    const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: targetChatId,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-    });
-    const data = await tgRes.json();
-    void adminAuth.recordAdminAudit(
-      'TELEGRAM_SEND',
-      '/api/telegram/send',
-      { ok: tgRes.ok, status: tgRes.status, messageLength: String(text).length },
-      req.adminUser?.ip || adminAuth.getClientIp(req)
-    );
-    return res.status(tgRes.status).json(data);
-  } catch (err: any) {
-    return res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// Endpoint to test an over completion alert directly (Admin only, server-configured token only)
-app.post('/api/telegram/test-over', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+// Endpoint to test an over completion alert directly (Admin only, server-configured token only, rate-limited 1 per 10s)
+app.post(
+  '/api/telegram/test-over',
+  adminAuth.requireAdmin,
+  adminSendLimiter.middleware('telegram:test-over', 'Telegram over test'),
+  async (req: AuthenticatedAdminRequest, res) => {
   const { chatId, matchId } = req.body || {};
   await reloadTelegramConfigFromDb();
   const creds = getEffectiveTelegramCredentials();
@@ -2800,9 +2956,10 @@ app.post('/api/telegram/test-over', adminAuth.requireAdmin, async (req: Authenti
     );
     return res.status(tgRes.status).json(data);
   } catch (err: any) {
-    return res.status(500).json({ ok: false, error: err.message });
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   }
-});
+);
 
 // Trigger initial connection greeting on boot (only when Telegram is configured & enabled)
 setTimeout(() => {
@@ -3371,10 +3528,20 @@ app.get('/api/strategy/state', (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   return res.json({
     ok: true,
-    strategyAlertsEnabled: STRATEGY_ALERTS_ENABLED,
+    strategyAlertsEnabled: activeStrategyAlertsStatus.enabled,
     leaderActive: hasPgAdvisoryLock || !isDbAvailable,
     pendingOutbox: strategyCoordinator.getPendingCounts(),
     states: strategyCoordinator.engine.getAllSerializedStates(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Public Read-Only Site Defaults & Maintenance Banner (zero secrets)
+app.get('/api/public/config', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return res.json({
+    ok: true,
+    ...toPublicSiteConfig(activeSiteSettings),
     timestamp: new Date().toISOString(),
   });
 });
@@ -3565,6 +3732,476 @@ app.get('/api/db/app-settings/first-entries', adminAuth.requireAdmin, async (_re
   }
 });
 
+// ============================================================================
+// Admin Panel Endpoints (Phase 3 — All Admin-Only)
+// ============================================================================
+
+// Admin System Overview & Health
+app.get('/api/admin/overview', adminAuth.requireAdmin, async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  await reloadTelegramConfigFromDb();
+
+  const allMatches = Object.entries(matchStore.matches);
+  const liveMatchesCount = allMatches.filter(([, m]) => (m.j || m.k) && !m.finishTime).length;
+  const strategyStates = strategyCoordinator.engine.getAllSerializedStates();
+
+  let dbSummary = {
+    connected: false,
+    matchesCount: 0,
+    teamsCount: 0,
+    positionsCount: 0,
+    tradesCount: 0,
+    error: null as string | null,
+  };
+
+  try {
+    const client = await dbPool.connect();
+    const [mRes, tRes, pRes, trRes] = await Promise.all([
+      client.query('SELECT count(*) AS count FROM matches'),
+      client.query('SELECT count(*) AS count FROM teams'),
+      client.query('SELECT count(*) AS count FROM trade_positions'),
+      client.query('SELECT count(*) AS count FROM strategy_trades'),
+    ]);
+    client.release();
+    dbSummary = {
+      connected: true,
+      matchesCount: parseInt(mRes.rows[0]?.count || '0', 10),
+      teamsCount: parseInt(tRes.rows[0]?.count || '0', 10),
+      positionsCount: parseInt(pRes.rows[0]?.count || '0', 10),
+      tradesCount: parseInt(trRes.rows[0]?.count || '0', 10),
+      error: null,
+    };
+  } catch (err: any) {
+    dbSummary.error = err.message || 'Database unavailable';
+  }
+
+  return res.json({
+    ok: true,
+    server: {
+      uptimeSec: Math.floor((Date.now() - SERVER_STARTED_AT) / 1000),
+      nodeEnv: process.env.NODE_ENV || 'development',
+      cookieSecure: adminAuth.cookieSecure,
+      trustProxy: adminAuth.trustProxy,
+      sseClientsCount: sseClients.size,
+      activeSessionsCount: adminAuth.getActiveSessionCount(),
+      lastFeedSyncAt: matchStore.lastUpdated ? new Date(matchStore.lastUpdated).toISOString() : null,
+    },
+    matches: {
+      total: allMatches.length,
+      live: liveMatchesCount,
+    },
+    db: dbSummary,
+    strategy: {
+      alertsEnabled: activeStrategyAlertsStatus.enabled,
+      alertsSource: activeStrategyAlertsStatus.source,
+      alertsEnvDefault: activeStrategyAlertsStatus.envDefault,
+      leaderActive: hasPgAdvisoryLock || !isDbAvailable,
+      pendingOutbox: strategyCoordinator.getPendingCounts(),
+      trackedStatesCount: Object.keys(strategyStates).length,
+    },
+    telegram: getSafeTelegramStatus(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Admin Site Settings (GET & POST — takes effect immediately without restart)
+app.get('/api/admin/settings', adminAuth.requireAdmin, async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  await reloadAppSettingsFromDb();
+  const liveCount = Object.values(matchStore.matches).filter(
+    (m: any) => (m.j || m.k || m.d === 1) && !m.finishTime && m.d !== 2
+  ).length;
+  return res.json({
+    ok: true,
+    data: activeSiteSettings,
+    refreshIntervals: READ_ONLY_REFRESH_INTERVALS,
+    liveMatchesCount: liveCount,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post('/api/admin/settings/preview-series', adminAuth.requireAdmin, (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const rawList = req.body?.allowedSeriesFilter;
+  if (!Array.isArray(rawList)) {
+    return res.status(400).json({ ok: false, error: 'allowedSeriesFilter must be an array of strings' });
+  }
+  const candidateFilter = sanitizeSeriesFilterList(rawList);
+  const excludedLive: Array<{ id: string; title: string; seriesName: string; format: string }> = [];
+  let totalLive = 0;
+  let includedLive = 0;
+
+  for (const [id, raw] of Object.entries(matchStore.matches)) {
+    const isFinished = Boolean(raw.finishTime || raw.d === 2);
+    const isLive = !isFinished && Boolean(raw.j || raw.k || raw.d === 1);
+    if (!isLive) continue;
+    totalLive++;
+
+    if (matchesSeriesFilter(raw, candidateFilter, matchStore.mapping)) {
+      includedLive++;
+    } else {
+      const t1 = resolveFullTeamInfo(raw.b, raw.t1Name || raw.team1, raw.t1Sname);
+      const t2 = resolveFullTeamInfo(raw.c, raw.t2Name || raw.team2, raw.t2Sname);
+      excludedLive.push({
+        id,
+        title: `${t1.shortName} vs ${t2.shortName}`,
+        seriesName: resolveSeriesNameFromMapping(raw),
+        format: raw.fo || raw.t || 'Match',
+      });
+    }
+  }
+
+  return res.json({
+    ok: true,
+    allowedSeriesFilter: candidateFilter,
+    totalLive,
+    includedLive,
+    excludedLive,
+  });
+});
+
+app.post('/api/admin/settings', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+
+  if (
+    body.defaultCountryCode !== undefined &&
+    (typeof body.defaultCountryCode !== 'string' || !/^[a-zA-Z]{2,6}$/.test(body.defaultCountryCode.trim()))
+  ) {
+    return res.status(400).json({ ok: false, error: 'defaultCountryCode must be 2 to 6 letters (e.g. IN)' });
+  }
+
+  if (body.allowedSeriesFilter !== undefined && !Array.isArray(body.allowedSeriesFilter)) {
+    return res.status(400).json({ ok: false, error: 'allowedSeriesFilter must be an array of strings' });
+  }
+
+  const prevFilter = [...ALLOWED_SERIES_FILTER];
+  try {
+    const saved = await saveAdminSiteSettingsToDb(dbPool, activeSiteSettings, body);
+    activeSiteSettings = saved;
+    ALLOWED_SERIES_FILTER = [...saved.allowedSeriesFilter];
+
+    // Apply series filter changes immediately to in-memory matchStore without restart
+    let prunedCount = 0;
+    if (ALLOWED_SERIES_FILTER.length > 0) {
+      for (const [id, m] of Object.entries(matchStore.matches)) {
+        if (!isAllowedTournament(m, matchStore.mapping)) {
+          delete matchStore.matches[id];
+          prunedCount++;
+        }
+      }
+    }
+
+    const filterChanged = JSON.stringify(prevFilter) !== JSON.stringify(ALLOWED_SERIES_FILTER);
+    if (filterChanged && (ALLOWED_SERIES_FILTER.length === 0 || prunedCount === 0)) {
+      void syncGoscorerApi(activeSiteSettings.defaultCountryCode);
+    }
+
+    if (prunedCount > 0) {
+      broadcastToClients({
+        type: 'update',
+        matches: matchStore.matches,
+        oddsByMatch: getSerializedOddsMap(),
+        strategyStates: strategyCoordinator.engine.getAllSerializedStates(),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    void adminAuth.recordAdminAudit(
+      'ADMIN_SETTINGS_UPDATE',
+      'public_site_config',
+      {
+        defaultCountryCode: saved.defaultCountryCode,
+        defaultSoundEnabled: saved.defaultSoundEnabled,
+        allowedSeriesFilter: saved.allowedSeriesFilter,
+        maintenanceBannerEnabled: saved.maintenanceBannerEnabled,
+        maintenanceBannerLength: saved.maintenanceBannerText.length,
+        prunedMatchesCount: prunedCount,
+      },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
+
+    return res.json({
+      ok: true,
+      data: activeSiteSettings,
+      refreshIntervals: READ_ONLY_REFRESH_INTERVALS,
+      prunedMatchesCount: prunedCount,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin Master Strategy-Alerts Switch (DB override over env default; effective immediately without restart)
+app.post('/api/admin/strategy/alerts', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+  const previousEnabled = activeStrategyAlertsStatus.enabled;
+  const previousSource = activeStrategyAlertsStatus.source;
+
+  try {
+    if (body.resetToEnvDefault === true) {
+      const nextStatus = await clearStrategyAlertsOverrideInDb(dbPool, ENV_STRATEGY_ALERTS_DEFAULT);
+      activeStrategyAlertsStatus = nextStatus;
+      strategyCoordinator.setStrategyAlertsEnabled(nextStatus.enabled);
+
+      void adminAuth.recordAdminAudit(
+        'STRATEGY_ALERTS_TOGGLE',
+        'strategy_alerts_config',
+        {
+          action: 'reset_to_env_default',
+          previousEnabled,
+          previousSource,
+          enabled: nextStatus.enabled,
+          source: nextStatus.source,
+        },
+        req.adminUser?.ip || adminAuth.getClientIp(req)
+      );
+
+      return res.json({ ok: true, strategyAlerts: nextStatus });
+    }
+
+    if (typeof body.enabled !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'enabled (boolean) is required' });
+    }
+
+    if (body.enabled === true && body.confirm !== true) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Explicit confirmation (confirm: true) is required to enable live strategy alerts',
+      });
+    }
+
+    const nextStatus = await saveStrategyAlertsOverrideToDb(
+      dbPool,
+      body.enabled,
+      ENV_STRATEGY_ALERTS_DEFAULT
+    );
+    activeStrategyAlertsStatus = nextStatus;
+    strategyCoordinator.setStrategyAlertsEnabled(nextStatus.enabled);
+
+    void adminAuth.recordAdminAudit(
+      'STRATEGY_ALERTS_TOGGLE',
+      'strategy_alerts_config',
+      {
+        previousEnabled,
+        previousSource,
+        enabled: nextStatus.enabled,
+        source: nextStatus.source,
+      },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
+
+    return res.json({ ok: true, strategyAlerts: nextStatus });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin Strategy Rules (Read-Only — Single Source of Truth directly from real engine config) + Active Match Strategy Snapshots
+app.get('/api/admin/strategy/rules', adminAuth.requireAdmin, async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  await reloadAppSettingsFromDb();
+  const engineConfig = strategyCoordinator.engine.getConfig();
+  const states = strategyCoordinator.engine.getAllSerializedStates();
+  const oddsMap = getSerializedOddsMap();
+
+  const matches = Object.entries(matchStore.matches).map(([id, raw]) => {
+    const t1 = resolveFullTeamInfo(raw.b, raw.t1Name || raw.team1, raw.t1Sname);
+    const t2 = resolveFullTeamInfo(raw.c, raw.t2Name || raw.team2, raw.t2Sname);
+    const seriesName = resolveSeriesNameFromMapping(raw);
+    const isFinished = Boolean(raw.finishTime || raw.d === 2);
+    const isLive = !isFinished && Boolean(raw.j || raw.k || raw.d === 1);
+    const odds = oddsMap[id];
+    const inn1 = parseInningsScore(raw.j, 1);
+    const inn2 = isValidActiveSecondInningsScore(raw.k);
+    const activeScore = inn2 || inn1;
+    const currentInnings = inn2 ? 2 : 1;
+
+    return {
+      id,
+      title: `${t1.shortName} vs ${t2.shortName}`,
+      team1: t1.shortName,
+      team2: t2.shortName,
+      team1Name: t1.name,
+      team2Name: t2.name,
+      seriesName,
+      format: raw.fo || raw.t || 'Match',
+      status: isFinished ? 'completed' : isLive ? 'live' : 'upcoming',
+      innings: currentInnings,
+      over: activeScore?.overs ?? 0,
+      wickets: activeScore?.wickets ?? 0,
+      score1: raw.j || null,
+      score2: raw.k || null,
+      decimalBack: odds?.odds?.bookmaker?.decimalBack ?? null,
+      decimalLay: odds?.odds?.bookmaker?.decimalLay ?? null,
+      favTeam: odds?.odds?.favoriteTeamName || odds?.odds?.favoriteTeamKey || null,
+      state: states[id] || null,
+    };
+  });
+
+  // Sort live first, then matches with strategy state
+  matches.sort((a, b) => {
+    const pA = a.status === 'live' ? 0 : a.state ? 1 : 2;
+    const pB = b.status === 'live' ? 0 : b.state ? 1 : 2;
+    return pA - pB;
+  });
+
+  return res.json({
+    ok: true,
+    rules: engineConfig,
+    strategyAlerts: activeStrategyAlertsStatus,
+    strategyAlertsEnabled: activeStrategyAlertsStatus.enabled,
+    leaderActive: hasPgAdvisoryLock || !isDbAvailable,
+    pendingOutbox: strategyCoordinator.getPendingCounts(),
+    matches,
+    states,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Admin Diagnostics: Live Server-Side Odds Cache & Health per Match
+app.get('/api/admin/diagnostics/odds', adminAuth.requireAdmin, (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const now = Date.now();
+  const oddsMap = getSerializedOddsMap();
+
+  const items = Object.entries(matchStore.matches).map(([id, raw]) => {
+    const t1 = resolveFullTeamInfo(raw.b, raw.t1Name || raw.team1, raw.t1Sname);
+    const t2 = resolveFullTeamInfo(raw.c, raw.t2Name || raw.team2, raw.t2Sname);
+    const cachedEntry = serverOddsCache.get(id);
+    const odds = oddsMap[id];
+    const isFinished = Boolean(raw.finishTime || raw.d === 2);
+    const isLive = !isFinished && Boolean(raw.j || raw.k || raw.d === 1);
+    const matchStatus: 'live' | 'upcoming' | 'completed' = isFinished
+      ? 'completed'
+      : isLive
+      ? 'live'
+      : 'upcoming';
+    const rawStatus = odds?.status;
+    const oddsStatus =
+      rawStatus === 'success'
+        ? 'READY'
+        : rawStatus === 'error'
+        ? 'ERROR'
+        : rawStatus
+        ? rawStatus.toUpperCase()
+        : cachedEntry?.data
+        ? 'READY'
+        : 'LOADING';
+
+    return {
+      matchId: id,
+      title: `${t1.shortName} vs ${t2.shortName}`,
+      seriesName: resolveSeriesNameFromMapping(raw),
+      format: raw.fo || raw.t || 'Match',
+      matchStatus,
+      score1: raw.j || null,
+      score2: raw.k || null,
+      cached: Boolean(cachedEntry?.data),
+      cacheAgeMs: cachedEntry?.timestamp ? Math.max(0, now - cachedEntry.timestamp) : null,
+      oddsStatus,
+      lastSuccessAt: odds?.lastUpdated ? new Date(odds.lastUpdated).toISOString() : null,
+      consecutiveMisses: 0,
+      errorMessage: odds?.error || null,
+      favTeam: odds?.odds?.favoriteTeamName || odds?.odds?.favoriteTeamKey || null,
+      backRate: odds?.odds?.bookmaker?.backRate ?? null,
+      layRate: odds?.odds?.bookmaker?.layRate ?? null,
+      decimalBack: odds?.odds?.bookmaker?.decimalBack ?? null,
+      decimalLay: odds?.odds?.bookmaker?.decimalLay ?? null,
+      rawF: cachedEntry?.data?.F ?? null,
+      rawFlb: raw.flb ?? null,
+      rawSnapshot: cachedEntry?.data ?? null,
+    };
+  });
+
+  const prio: Record<'live' | 'upcoming' | 'completed', number> = {
+    live: 0,
+    upcoming: 1,
+    completed: 2,
+  };
+  items.sort((a, b) => prio[a.matchStatus] - prio[b.matchStatus]);
+
+  return res.json({
+    ok: true,
+    totalMatches: items.length,
+    cachedOddsCount: items.filter((i) => i.cached).length,
+    items,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Admin Diagnostics: API Raw Inspector (strict cc validation — NEVER fetches arbitrary URLs)
+app.post('/api/admin/diagnostics/raw-top-matches', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const rawCc = req.body?.cc;
+  if (rawCc !== undefined && (typeof rawCc !== 'string' || !/^[a-zA-Z]{2,6}$/.test(rawCc.trim()))) {
+    return res.status(400).json({ ok: false, error: 'Country code (cc) must be 2 to 6 letters (e.g. IN, UK, AU)' });
+  }
+  const safeCc = sanitizeCountryCode(rawCc, 'IN');
+  const forceRefresh = req.body?.forceRefresh === true;
+  const startedAt = Date.now();
+
+  if (forceRefresh || Object.keys(matchStore.matches).length === 0) {
+    await syncGoscorerApi(safeCc);
+  }
+
+  const latencyMs = Date.now() - startedAt;
+  void adminAuth.recordAdminAudit(
+    'DIAGNOSTICS_RAW_INSPECT',
+    '/api/admin/diagnostics/raw-top-matches',
+    { cc: safeCc, forceRefresh, count: Object.keys(matchStore.matches).length },
+    req.adminUser?.ip || adminAuth.getClientIp(req)
+  );
+
+  return res.json({
+    ok: true,
+    cc: safeCc,
+    latencyMs,
+    totalCount: Object.keys(matchStore.matches).length,
+    matches: matchStore.matches,
+    timestamp: new Date(matchStore.lastUpdated || Date.now()).toISOString(),
+  });
+});
+
+// Admin Audit Log (reads PostgreSQL admin_audit_log with in-memory fallback)
+app.get('/api/admin/audit-log', adminAuth.requireAdmin, async (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const rawLimit = parseInt(String(req.query.limit || '100'), 10);
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 250) : 100;
+  const actionFilter = typeof req.query.action === 'string' && req.query.action.trim() ? req.query.action.trim() : null;
+
+  try {
+    const query = actionFilter
+      ? `SELECT id, at, ip, action, target, details FROM admin_audit_log WHERE action = $1 ORDER BY at DESC LIMIT $2`
+      : `SELECT id, at, ip, action, target, details FROM admin_audit_log ORDER BY at DESC LIMIT $1`;
+    const params = actionFilter ? [actionFilter, limit] : [limit];
+    const result = await dbPool.query(query, params);
+    return res.json({
+      ok: true,
+      source: 'postgres',
+      entries: result.rows.map((r: any) => ({
+        id: r.id,
+        at: r.at instanceof Date ? r.at.toISOString() : String(r.at),
+        ip: r.ip || 'unknown',
+        action: r.action,
+        target: r.target,
+        details: r.details || {},
+      })),
+    });
+  } catch {
+    const memEntries = adminAuth
+      .getRecentAuditEntries()
+      .filter((e) => (!actionFilter ? true : e.action === actionFilter))
+      .slice(0, limit);
+    return res.json({
+      ok: true,
+      source: 'memory',
+      entries: memEntries,
+    });
+  }
+});
+
 // Mount Vite or serve static files
 async function startServer() {
   if (!isProduction) {
@@ -3575,8 +4212,16 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    // Serve SPA index.html for all non-API routes (including /admin and /admin/*)
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ ok: false, error: 'API endpoint not found' });
+      }
+      if (req.path === '/admin' || req.path.startsWith('/admin/')) {
+        res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+      return res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
 

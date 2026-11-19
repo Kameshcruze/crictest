@@ -6,10 +6,7 @@ import {
   VolumeX,
   RefreshCw,
   Globe,
-  Code2,
-  Cloud,
   Wifi,
-  ChevronRight,
 } from 'lucide-react';
 import { ThemeMode } from './ThemeToggle';
 
@@ -25,8 +22,6 @@ interface SettingsViewProps {
   isSseActive: boolean;
   latencyMs: number;
   lastUpdated: Date;
-  onOpenInspectorModal: () => void;
-  onOpenScriptModal: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -41,8 +36,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   isSseActive,
   latencyMs,
   lastUpdated,
-  onOpenInspectorModal,
-  onOpenScriptModal,
 }) => {
   const [ccDraft, setCcDraft] = React.useState(countryCode);
 
@@ -213,43 +206,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <span>{isFetching ? 'Syncing...' : 'Refresh Now'}</span>
             </button>
           </div>
-        </div>
-      </section>
-
-      {/* Inspector & Developer Tools */}
-      <section
-        className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5"
-        style={{ boxShadow: 'var(--card-shadow)' }}
-      >
-        <h2 className="text-sm font-bold text-[var(--tx)]">Inspector Tools</h2>
-        <p className="text-xs text-[var(--mu)] mt-0.5 mb-3">
-          Inspect live Crex API JSON payloads and cloud runner scripts.
-        </p>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <button
-            type="button"
-            onClick={onOpenInspectorModal}
-            className="flex items-center justify-between p-3 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] text-left transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <Code2 className="w-4 h-4 text-[var(--rdt)]" />
-              <span className="text-xs font-semibold text-[var(--tx)]">API Raw Inspector</span>
-            </div>
-            <ChevronRight className="w-4 h-4 text-[var(--mu)]" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenScriptModal}
-            className="flex items-center justify-between p-3 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--blu)] border border-[var(--bd)] text-left transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <Cloud className="w-4 h-4 text-[var(--blut)]" />
-              <span className="text-xs font-semibold text-[var(--tx)]">Online Scripts</span>
-            </div>
-            <ChevronRight className="w-4 h-4 text-[var(--mu)]" />
-          </button>
         </div>
       </section>
     </div>

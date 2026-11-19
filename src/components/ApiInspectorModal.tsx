@@ -126,7 +126,7 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
                   POST
                 </span>
                 <span className="text-xs font-mono text-[var(--tx)] truncate">
-                  {API_ENDPOINT}
+                  /api/admin/diagnostics/raw-top-matches → {API_ENDPOINT}
                 </span>
               </div>
               <div className="flex items-center gap-2 shrink-0">

@@ -37,7 +37,6 @@ interface AppShellNavProps {
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
   onOpenEntryRadarModal: () => void;
-  onOpenInspectorModal: () => void;
   entryOpportunitiesCount: number;
   liveCount: number;
   searchQuery: string;
@@ -57,7 +56,6 @@ export const DesktopSidebar: React.FC<
     | 'sport'
     | 'onSelectSport'
     | 'onOpenEntryRadarModal'
-    | 'onOpenInspectorModal'
     | 'entryOpportunitiesCount'
   >
 > = ({
@@ -66,7 +64,6 @@ export const DesktopSidebar: React.FC<
   sport,
   onSelectSport,
   onOpenEntryRadarModal,
-  onOpenInspectorModal,
   entryOpportunitiesCount,
 }) => {
   return (
@@ -160,17 +157,6 @@ export const DesktopSidebar: React.FC<
             <span>Settings</span>
           </button>
         </nav>
-      </div>
-
-      {/* Plain Bottom Utility Links */}
-      <div className="space-y-2 text-[11px] px-1">
-        <button
-          type="button"
-          onClick={onOpenInspectorModal}
-          className="block w-full text-left text-[var(--mu)] hover:text-[var(--tx)] transition-colors font-medium rounded"
-        >
-          API Raw Inspector
-        </button>
       </div>
     </aside>
   );
@@ -288,7 +274,7 @@ export const TopHeaderBar: React.FC<AppShellNavProps> = ({
           </div>
           <p className="text-xs text-[var(--mu)] mt-0.5">
             {activeNav === 'settings'
-              ? 'Preferences, live feed & diagnostics'
+              ? 'Appearance, sound alerts & live feed'
               : `Cricket · ${liveCount} live now`}
           </p>
         </div>
@@ -376,7 +362,7 @@ export const TopHeaderBar: React.FC<AppShellNavProps> = ({
               )}
             </div>
             <p className="text-[11px] text-[var(--mu)] leading-tight">
-              {activeNav === 'settings' ? 'Preferences & Tools' : 'Live'}
+              {activeNav === 'settings' ? 'Preferences' : 'Live'}
             </p>
           </div>
         </div>
