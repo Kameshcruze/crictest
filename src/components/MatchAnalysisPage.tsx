@@ -25,6 +25,7 @@ import {
   RotateCcw,
   Database,
 } from 'lucide-react';
+import { ThemeToggle, ThemeMode } from './ThemeToggle';
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState, OddsTick } from '../types/odds';
 import { KNOWN_TEAMS } from '../data/cricketMapping';
@@ -52,6 +53,8 @@ interface MatchAnalysisPageProps {
   onBack: () => void;
   onSelectMatch: (matchId: string) => void;
   onRefreshOdds?: (matchId: string) => Promise<void>;
+  theme?: ThemeMode;
+  onThemeChange?: (theme: ThemeMode) => void;
 }
 
 export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
@@ -64,6 +67,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   onBack,
   onSelectMatch,
   onRefreshOdds,
+  theme,
+  onThemeChange,
 }) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [freshnessSec, setFreshnessSec] = useState<number>(0);
@@ -184,10 +189,10 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
 
   // Freshness badge coloring
   const getFreshnessColor = () => {
-    if (!oddsState?.lastUpdated) return 'text-slate-400 bg-slate-800 border-slate-700';
-    if (freshnessSec <= 4) return 'text-emerald-400 bg-emerald-950/60 border-emerald-500/40';
-    if (freshnessSec <= 15) return 'text-amber-400 bg-amber-950/60 border-amber-500/40';
-    return 'text-rose-400 bg-rose-950/60 border-rose-500/40 animate-pulse';
+    if (!oddsState?.lastUpdated) return 'text-[var(--mu)] bg-[var(--sf-2)] border-[var(--bd)]';
+    if (freshnessSec <= 4) return 'text-[var(--ok-tx)] bg-[var(--ok-bg)] border-[var(--ok-bd)]';
+    if (freshnessSec <= 15) return 'text-[var(--warn-tx)] bg-[var(--warn-bg)] border-[var(--warn-bd)]';
+    return 'text-[var(--rdt)] bg-[var(--rds)] border-[var(--rd)]/40 animate-pulse';
   };
 
   // =========================================================================
@@ -510,7 +515,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   const renderStatusBadge = (status?: string) => {
     if (status === 'PASS') {
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-500/40 text-[10px] font-bold">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)] text-[10px] font-bold">
           <Check className="w-3 h-3" />
           PASS
         </span>
@@ -518,48 +523,48 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     }
     if (status === 'FAIL') {
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-950/80 text-rose-400 border border-rose-500/40 text-[10px] font-bold">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[var(--rds)] text-[var(--rdt)] border border-[var(--rd)]/35 text-[10px] font-bold">
           <X className="w-3 h-3" />
           FAIL
         </span>
       );
     }
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 text-[10px] font-bold">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[var(--sf-2)] text-[var(--mu)] border border-[var(--bd)] text-[10px] font-bold">
         DATA UNAVAILABLE
       </span>
     );
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--tx)] flex flex-col">
       {/* Top Navigation Bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-md px-4 sm:px-6 py-3.5">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
+      <header className="sticky top-0 z-30 border-b border-[var(--bd)] bg-[var(--sf)] px-3 sm:px-6 py-3">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               type="button"
               onClick={onBack}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-300 bg-slate-900 border border-slate-800 hover:bg-slate-800 hover:text-white transition-all shadow-sm"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-[var(--tx)] bg-[var(--sf-2)] border border-[var(--bd)] hover:bg-[var(--rds)] hover:text-[var(--rdt)] transition-colors shrink-0"
               title="Return to Dashboard"
             >
-              <ArrowLeft className="w-4 h-4 text-emerald-400" />
-              <span>Dashboard</span>
+              <ArrowLeft className="w-4 h-4 text-[var(--rdt)]" />
+              <span className="hidden sm:inline">Dashboard</span>
             </button>
 
-            <div className="h-4 w-px bg-slate-800 hidden sm:block" />
+            <div className="h-4 w-px bg-[var(--bd)] hidden sm:block" />
 
-            <div className="truncate">
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                <span className="font-mono text-[11px] px-1.5 sm:px-2 py-0.5 rounded bg-[var(--sf-2)] text-[var(--mu)] border border-[var(--bd)] hidden sm:inline">
                   ID: {matchId}
                 </span>
-                <h1 className="text-sm sm:text-base font-bold text-white truncate">
+                <h1 className="text-sm sm:text-base font-bold text-[var(--tx)] truncate">
                   {match ? `${team1Short} vs ${team2Short}` : `Match ${matchId}`}
                 </h1>
                 {isLive && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[10px] font-bold uppercase tracking-wider">
-                    <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-ping" />
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--rds)] text-[var(--rdt)] text-[10px] font-bold uppercase tracking-wider shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--rdt)]" />
                     LIVE
                   </span>
                 )}
@@ -567,14 +572,14 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
           </div>
 
-          {/* Right Controls: Match Switcher & Odds Refresh */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Right Controls: Match Switcher, Theme Toggle & Odds Refresh */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {allMatches.length > 1 && (
               <select
                 aria-label="Switch active match"
                 value={matchId}
                 onChange={(e) => onSelectMatch(e.target.value)}
-                className="text-xs bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-500 font-medium max-w-[140px] sm:max-w-[200px] truncate"
+                className="text-xs bg-[var(--sf-2)] border border-[var(--bd)] text-[var(--tx)] rounded-xl px-2 sm:px-2.5 py-1.5 focus:outline-none focus:border-[var(--rd)] font-medium max-w-[115px] sm:max-w-[200px] truncate"
               >
                 {allMatches.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -584,11 +589,15 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
               </select>
             )}
 
+            {theme && onThemeChange && (
+              <ThemeToggle theme={theme} onToggle={onThemeChange} />
+            )}
+
             <button
               type="button"
               onClick={handleManualRefresh}
               disabled={isRefreshing}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 hover:bg-emerald-900/40 transition-all disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-[var(--rdt)] bg-[var(--rds)] border border-[var(--rd)]/30 hover:opacity-90 transition-opacity disabled:opacity-50"
               title="Refresh live odds for this match"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
@@ -599,188 +608,184 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
       </header>
 
       {/* Main Content: Organized in Sections A, B, C */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 space-y-5 sm:space-y-6">
         {/* ======================================================== */}
         {/* SECTION A: MATCH INFORMATION                            */}
         {/* ======================================================== */}
-        <section className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl relative overflow-hidden">
-          <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-blue-500 to-indigo-500" />
-
-          {/* Section Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-4 border-b border-slate-800 gap-2">
+        <section
+          className="bg-[var(--sf)] border border-[var(--bd)] rounded-2xl p-4 sm:p-6 relative overflow-hidden"
+          style={{ boxShadow: 'var(--card-shadow)' }}
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3.5 mb-4 border-b border-[var(--bd)] gap-2">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-[var(--rd)]" />
+              <h2 className="text-xs font-bold uppercase tracking-wider text-[var(--mu)]">
                 Section A: Match Information
               </h2>
             </div>
-            <div className="flex items-center gap-2 text-xs text-slate-400">
+            <div className="flex items-center gap-2 flex-wrap text-xs text-[var(--mu)]">
               <span>{match?.seriesName || 'Series details'}</span>
               <span>•</span>
               <span>{match?.venueName || 'Venue'}</span>
               <span>•</span>
-              <span className="px-2 py-0.5 rounded bg-slate-800 font-mono text-[11px] text-slate-300">
+              <span className="px-2 py-0.5 rounded bg-[var(--sf-2)] border border-[var(--bd)] font-mono text-[11px] text-[var(--tx)]">
                 {match?.format || 'Format'}
               </span>
             </div>
           </div>
 
           {!match ? (
-            <div className="py-8 text-center text-slate-400 text-sm">
-              <AlertTriangle className="w-8 h-8 text-amber-400 mx-auto mb-2" />
+            <div className="py-8 text-center text-[var(--mu)] text-sm">
+              <AlertTriangle className="w-8 h-8 text-[var(--warn-tx)] mx-auto mb-2" />
               Match record {matchId} is loading or not present in the current feed.
             </div>
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Teams & Scoreboard (8 cols on lg) */}
-              <div className="lg:col-span-8 space-y-4">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+              {/* Teams & Scoreboard */}
+              <div className="lg:col-span-8 space-y-3.5">
                 <div>
-                  <h3 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+                  <h3 className="text-lg sm:text-2xl font-bold text-[var(--tx)] tracking-tight">
                     {team1?.name} vs {team2?.name}
                   </h3>
                   {match.matchTitlePrefix && (
-                    <p className="text-xs text-slate-400 mt-0.5">{match.matchTitlePrefix}</p>
+                    <p className="text-xs text-[var(--mu)] mt-0.5">{match.matchTitlePrefix}</p>
                   )}
                 </div>
 
                 {/* Team 1 Score Row */}
-                <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800/80 flex items-center justify-between gap-3">
+                <div className="p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className="w-4 h-9 rounded-md shrink-0 shadow-sm"
-                      style={{ backgroundColor: team1?.color || '#3b82f6' }}
-                    />
+                    <div className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs shrink-0 bg-[var(--rds)] text-[var(--rdt)]">
+                      {team1Short.slice(0, 3)}
+                    </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-white text-base sm:text-lg">{team1Name}</span>
-                        <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                          {team1Short}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-[var(--tx)] text-sm sm:text-base truncate">
+                          {team1Name}
                         </span>
                         {match.battingTeamKey === team1?.key && (
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
                             BATTING
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-slate-400">Innings 1</p>
+                      <p className="text-xs text-[var(--mu)]">Innings 1</p>
                     </div>
                   </div>
 
-                  <div className="text-right shrink-0">
+                  <div className="text-right shrink-0 tabular-nums">
                     {t1Score ? (
                       <div>
-                        <div className="font-mono text-xl sm:text-2xl font-black text-white">
+                        <div className="text-xl sm:text-2xl font-bold text-[var(--tx)]">
                           {t1Score.runs}
-                          <span className="text-emerald-400">/{t1Score.wickets}</span>
+                          <span className="text-[var(--rdt)]">/{t1Score.wickets}</span>
                         </div>
-                        <div className="text-xs text-slate-400 font-mono">
-                          {t1Score.overs} ov ({t1Score.totalBalls} balls) • RR {t1Score.runRate.toFixed(2)}
+                        <div className="text-[11px] sm:text-xs text-[var(--mu)]">
+                          {t1Score.overs} ov ({t1Score.totalBalls}b) • RR {t1Score.runRate.toFixed(2)}
                         </div>
                       </div>
                     ) : (
-                      <span className="text-xs text-slate-500 italic">Yet to bat</span>
+                      <span className="text-xs text-[var(--mu)] italic">Yet to bat</span>
                     )}
                   </div>
                 </div>
 
                 {/* Team 2 Score Row */}
-                <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800/80 flex items-center justify-between gap-3">
+                <div className="p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className="w-4 h-9 rounded-md shrink-0 shadow-sm"
-                      style={{ backgroundColor: team2?.color || '#ef4444' }}
-                    />
+                    <div className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs shrink-0 bg-[var(--rds)] text-[var(--rdt)]">
+                      {team2Short.slice(0, 3)}
+                    </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-white text-base sm:text-lg">{team2Name}</span>
-                        <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                          {team2Short}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-[var(--tx)] text-sm sm:text-base truncate">
+                          {team2Name}
                         </span>
                         {match.battingTeamKey === team2?.key && (
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
                             BATTING
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-slate-400">Innings 2</p>
+                      <p className="text-xs text-[var(--mu)]">Innings 2</p>
                     </div>
                   </div>
 
-                  <div className="text-right shrink-0">
+                  <div className="text-right shrink-0 tabular-nums">
                     {t2Score ? (
                       <div>
-                        <div className="font-mono text-xl sm:text-2xl font-black text-white">
+                        <div className="text-xl sm:text-2xl font-bold text-[var(--tx)]">
                           {t2Score.runs}
-                          <span className="text-emerald-400">/{t2Score.wickets}</span>
+                          <span className="text-[var(--rdt)]">/{t2Score.wickets}</span>
                         </div>
-                        <div className="text-xs text-slate-400 font-mono">
-                          {t2Score.overs} ov ({t2Score.totalBalls} balls) • RR {t2Score.runRate.toFixed(2)}
+                        <div className="text-[11px] sm:text-xs text-[var(--mu)]">
+                          {t2Score.overs} ov ({t2Score.totalBalls}b) • RR {t2Score.runRate.toFixed(2)}
                         </div>
                       </div>
                     ) : (
-                      <span className="text-xs text-slate-500 italic">Yet to bat</span>
+                      <span className="text-xs text-[var(--mu)] italic">Yet to bat</span>
                     )}
                   </div>
                 </div>
 
                 {/* Live Equation / Result Banner */}
-                <div className="p-3 rounded-xl bg-gradient-to-r from-slate-950 to-slate-900 border border-slate-800 flex items-center gap-2.5 text-xs">
-                  <Activity className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span className="font-semibold text-slate-200">
+                <div className="p-3 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/25 flex items-center gap-2.5 text-xs">
+                  <Activity className="w-4 h-4 text-[var(--rdt)] shrink-0" />
+                  <span className="font-semibold text-[var(--rdt)]">
                     {match.resultText || match.sessionText || match.statusLabel || 'Match status live'}
                   </span>
                 </div>
               </div>
 
-              {/* Match Telemetry Cards (4 cols on lg) */}
+              {/* Match Telemetry Cards */}
               <div className="lg:col-span-4 grid grid-cols-2 lg:grid-cols-1 gap-3">
-                <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                  <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                <div className="p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">
+                  <div className="text-[11px] font-semibold text-[var(--mu)] uppercase tracking-wider mb-1">
                     Match Status
                   </div>
                   <div className="flex items-center gap-2">
                     <span
                       className={`w-2.5 h-2.5 rounded-full ${
-                        isLive ? 'bg-rose-500 animate-pulse' : isCompleted ? 'bg-emerald-400' : 'bg-amber-400'
+                        isLive ? 'bg-[var(--rd)] animate-pulse' : isCompleted ? 'bg-[var(--ok-tx)]' : 'bg-[var(--warn-tx)]'
                       }`}
                     />
-                    <span className="text-sm font-bold text-white capitalize">{match.status}</span>
+                    <span className="text-sm font-bold text-[var(--tx)] capitalize">{match.status}</span>
                   </div>
-                  <div className="text-xs text-slate-400 mt-1">
+                  <div className="text-xs text-[var(--mu)] mt-1">
                     {isUpcoming ? formatStartTime(match.startTime) : match.statusLabel}
                   </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                  <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                <div className="p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">
+                  <div className="text-[11px] font-semibold text-[var(--mu)] uppercase tracking-wider mb-1">
                     Over & Ball
                   </div>
-                  <div className="font-mono text-lg font-bold text-emerald-400">
+                  <div className="text-lg font-bold text-[var(--ok-tx)] tabular-nums">
                     {activeScore ? `${activeScore.overs} ov` : '0.0 ov'}
                   </div>
-                  <div className="text-xs text-slate-400 mt-0.5">
+                  <div className="text-xs text-[var(--mu)] mt-0.5 tabular-nums">
                     {activeScore
-                      ? `${activeScore.totalBalls} total balls (${activeScore.ballsInOver} in this over)`
+                      ? `${activeScore.totalBalls} balls (${activeScore.ballsInOver} in over)`
                       : 'Match scheduled'}
                   </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 col-span-2 lg:col-span-1">
-                  <div className="flex items-center justify-between text-xs text-slate-400 pb-1 mb-1 border-b border-slate-800/60">
+                <div className="p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] col-span-2 lg:col-span-1">
+                  <div className="flex items-center justify-between text-xs text-[var(--mu)] pb-1 mb-1 border-b border-[var(--bd)]">
                     <span>Target: {match.target ? `${match.target} runs` : 'N/A'}</span>
                     <span>Format: {match.format}</span>
                   </div>
-                  <div className="flex items-center justify-between text-xs font-mono pt-1">
+                  <div className="flex items-center justify-between text-xs pt-1 tabular-nums">
                     <div>
-                      <span className="text-slate-400">CRR: </span>
-                      <span className="font-bold text-white">
+                      <span className="text-[var(--mu)]">CRR: </span>
+                      <span className="font-bold text-[var(--tx)]">
                         {match.currentRunRate ? match.currentRunRate.toFixed(2) : activeScore?.runRate.toFixed(2) || '0.00'}
                       </span>
                     </div>
                     {match.requiredRunRate ? (
                       <div>
-                        <span className="text-slate-400">REQ: </span>
-                        <span className="font-bold text-amber-400">{match.requiredRunRate.toFixed(2)}</span>
+                        <span className="text-[var(--mu)]">REQ: </span>
+                        <span className="font-bold text-[var(--warn-tx)]">{match.requiredRunRate.toFixed(2)}</span>
                       </div>
                     ) : null}
                   </div>
@@ -793,37 +798,35 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
         {/* ======================================================== */}
         {/* SECTION B: LIVE ODDS                                     */}
         {/* ======================================================== */}
-        <section className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl relative">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-4 border-b border-slate-800 gap-2">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-blue-400" />
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+        <section
+          className="bg-[var(--sf)] border border-[var(--bd)] rounded-2xl p-4 sm:p-6 relative"
+          style={{ boxShadow: 'var(--card-shadow)' }}
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3.5 mb-4 border-b border-[var(--bd)] gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="w-2 h-2 rounded-full bg-[var(--blut)]" />
+              <h2 className="text-xs font-bold uppercase tracking-wider text-[var(--mu)]">
                 Section B: Live Odds
               </h2>
               {oddsState && (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--sf-2)] border border-[var(--bd)] text-[var(--mu)]">
                   Key: {oddsState.maskedKey}
                 </span>
               )}
             </div>
 
-            {/* Freshness & Timestamp Badge */}
             <div className="flex items-center gap-2">
               <div
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-medium border ${getFreshnessColor()}`}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border tabular-nums ${getFreshnessColor()}`}
               >
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    freshnessSec <= 4 ? 'bg-emerald-400 animate-pulse' : freshnessSec <= 15 ? 'bg-amber-400' : 'bg-rose-400'
-                  }`}
-                />
+                <span className="w-2 h-2 rounded-full bg-current" />
                 <span>
                   {oddsState?.lastUpdated ? `Freshness: ${freshnessSec}s ago` : 'No live ticks yet'}
                 </span>
               </div>
 
               {oddsState?.lastUpdated && (
-                <div className="text-[11px] text-slate-400 hidden sm:flex items-center gap-1">
+                <div className="text-[11px] text-[var(--mu)] hidden sm:flex items-center gap-1 tabular-nums">
                   <Clock className="w-3.5 h-3.5" />
                   <span>{new Date(oddsState.lastUpdated).toLocaleTimeString()}</span>
                 </div>
@@ -831,15 +834,14 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
           </div>
 
-          {/* Requirement 4 & 11: Error States & Staleness Banners */}
+          {/* Error States & Staleness Banners */}
           <div className="space-y-3 mb-4">
-            {/* 1. Missing Odds Key Alert */}
             {isMissingKey && (
-              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-rose-950/40 border border-rose-800/60 text-xs">
-                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/35 text-xs">
+                <AlertTriangle className="w-4 h-4 text-[var(--rdt)] shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="font-bold text-rose-300">Missing Odds Key</h4>
-                  <p className="text-rose-400/90 mt-0.5">
+                  <h4 className="font-bold text-[var(--rdt)]">Missing Odds Key</h4>
+                  <p className="text-[var(--tx)] mt-0.5">
                     No odds key could be resolved for match &quot;{matchId}&quot;.
                     Goscorer getSV3 endpoint requires a verified key provided by the Crex match payload.
                   </p>
@@ -847,14 +849,13 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
               </div>
             )}
 
-            {/* 2. API Request Failure Alert */}
             {isFailedRequest && (
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3.5 rounded-xl bg-rose-950/40 border border-rose-800/60 text-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3.5 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/35 text-xs">
                 <div className="flex items-start gap-3">
-                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <AlertTriangle className="w-4 h-4 text-[var(--rdt)] shrink-0 mt-0.5" />
                   <div>
-                    <h4 className="font-bold text-rose-300">Odds API Request Failed</h4>
-                    <p className="text-rose-400/90 mt-0.5">
+                    <h4 className="font-bold text-[var(--rdt)]">Odds API Request Failed</h4>
+                    <p className="text-[var(--tx)] mt-0.5">
                       {oddsState?.error || 'Unable to retrieve data from getSV3 endpoint'}. Crex match scorecard continues updating independently.
                     </p>
                   </div>
@@ -863,46 +864,43 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   type="button"
                   onClick={handleManualRefresh}
                   disabled={isRefreshing}
-                  className="px-3 py-1.5 rounded-lg bg-rose-900/80 hover:bg-rose-800 text-rose-100 font-semibold border border-rose-700 shrink-0 transition-colors self-start sm:self-auto"
+                  className="px-3 py-1.5 rounded-lg bg-[var(--rd)] text-white font-semibold shrink-0 transition-opacity hover:opacity-90 self-start sm:self-auto"
                 >
                   {isRefreshing ? 'Retrying...' : 'Retry Odds Request'}
                 </button>
               </div>
             )}
 
-            {/* 3. Stale Odds Alert */}
             {isStaleOdds && (
-              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-amber-950/40 border border-amber-700/60 text-xs">
-                <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5 animate-pulse" />
+              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-[var(--warn-bg)] border border-[var(--warn-bd)] text-xs">
+                <Clock className="w-4 h-4 text-[var(--warn-tx)] shrink-0 mt-0.5 animate-pulse" />
                 <div>
-                  <h4 className="font-bold text-amber-300">Stale Odds Warning ({freshnessSec}s elapsed)</h4>
-                  <p className="text-amber-300/80 mt-0.5">
-                    No new bookmaker rate tick received for {freshnessSec} seconds. Rate updates may be paused between balls/overs. Strategy engine has flagged incoming signals for staleness risk.
+                  <h4 className="font-bold text-[var(--warn-tx)]">Stale Odds Warning ({freshnessSec}s elapsed)</h4>
+                  <p className="text-[var(--tx)] mt-0.5">
+                    No new bookmaker rate tick received for {freshnessSec} seconds. Rate updates may be paused between balls/overs.
                   </p>
                 </div>
               </div>
             )}
 
-            {/* 4. Suspended Market / Invalid Rate Alert */}
             {isInvalidResponse && (
-              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-slate-950/70 border border-amber-800/50 text-xs">
-                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--warn-bd)] text-xs">
+                <ShieldAlert className="w-4 h-4 text-[var(--warn-tx)] shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="font-bold text-amber-300">Market Suspended</h4>
-                  <p className="text-slate-400 mt-0.5">
+                  <h4 className="font-bold text-[var(--warn-tx)]">Market Suspended</h4>
+                  <p className="text-[var(--mu)] mt-0.5">
                     Bookmaker rate is currently suspended (quoted rate: &quot;{bookmaker?.rawRateString || '0-0'}&quot;). Entry signals remain in standby until active back/lay rates are quoted.
                   </p>
                 </div>
               </div>
             )}
 
-            {/* 5. Unavailable Match Events Notice */}
             {isMatchEventsUnavailable && (
-              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-slate-950/70 border border-blue-900/40 text-xs">
-                <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--info-bd)] text-xs">
+                <Info className="w-4 h-4 text-[var(--blut)] shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="font-bold text-slate-300">Scorecard Events Standing By</h4>
-                  <p className="text-slate-400 mt-0.5">
+                  <h4 className="font-bold text-[var(--tx)]">Scorecard Events Standing By</h4>
+                  <p className="text-[var(--mu)] mt-0.5">
                     Live scorecard events (overs, wickets, balls) have not commenced yet. Strategy engine is standing by for active balls.
                   </p>
                 </div>
@@ -911,110 +909,110 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
           </div>
 
           {oddsState?.status === 'loading' && !oddsState.odds ? (
-            <div className="py-12 text-center text-slate-400">
-              <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin mx-auto mb-2" />
+            <div className="py-12 text-center text-[var(--mu)]">
+              <RefreshCw className="w-8 h-8 text-[var(--rdt)] animate-spin mx-auto mb-2" />
               <p className="text-sm font-medium">Retrieving live odds stream for key {oddsState.maskedKey}...</p>
             </div>
           ) : oddsState?.status === 'error' && !oddsState.odds ? (
-            <div className="py-8 text-center bg-rose-950/20 border border-rose-900/50 rounded-xl p-4">
-              <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto mb-2" />
-              <p className="text-sm font-bold text-rose-300">Failed to retrieve odds</p>
-              <p className="text-xs text-rose-400/80 mt-1">{oddsState.error || 'Network error'}</p>
+            <div className="py-8 text-center bg-[var(--rds)] border border-[var(--rd)]/30 rounded-xl p-4">
+              <AlertTriangle className="w-8 h-8 text-[var(--rdt)] mx-auto mb-2" />
+              <p className="text-sm font-bold text-[var(--rdt)]">Failed to retrieve odds</p>
+              <p className="text-xs text-[var(--mu)] mt-1">{oddsState.error || 'Network error'}</p>
             </div>
           ) : !bookmaker ? (
-            <div className="py-8 text-center text-slate-500 text-sm">
-              <Info className="w-8 h-8 mx-auto mb-2 text-slate-600" />
+            <div className="py-8 text-center text-[var(--mu)] text-sm">
+              <Info className="w-8 h-8 mx-auto mb-2 opacity-60" />
               No live bookmaker odds available for this match key at this time.
             </div>
           ) : (
-            <div className="space-y-6">
-              {/* Primary Odds Cards: Back & Lay Prices */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="space-y-5">
+              {/* Primary Odds Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
                 {/* Back Price Card */}
-                <div className="p-4 rounded-xl bg-blue-950/40 border border-blue-800/50 shadow-inner">
-                  <div className="flex items-center justify-between text-xs text-blue-300 font-semibold mb-1">
+                <div className="p-4 rounded-xl bg-[var(--blu)] border border-[var(--info-bd)]">
+                  <div className="flex items-center justify-between text-xs text-[var(--blut)] font-semibold mb-1">
                     <span>BACK (LAGAI)</span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-900/60 text-blue-200">
-                      Decimal: {bookmaker.decimalBack ?? '—'}
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--sf)] text-[var(--blut)]">
+                      Dec: {bookmaker.decimalBack ?? '—'}
                     </span>
                   </div>
-                  <div className="font-mono text-3xl sm:text-4xl font-black text-blue-200">
+                  <div className="text-3xl font-bold text-[var(--blut)] tabular-nums">
                     {bookmaker.backRate !== null ? bookmaker.backRate : '—'}
                   </div>
-                  <div className="text-xs text-blue-400/80 mt-1 flex items-center justify-between">
+                  <div className="text-xs text-[var(--mu)] mt-1 flex items-center justify-between">
                     <span>{oddsState?.odds?.favoriteTeamName || 'Favorite'}</span>
                     <span className="font-mono text-[11px]">Paise Rate</span>
                   </div>
                 </div>
 
                 {/* Lay Price Card */}
-                <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-800/50 shadow-inner">
-                  <div className="flex items-center justify-between text-xs text-rose-300 font-semibold mb-1">
+                <div className="p-4 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/30">
+                  <div className="flex items-center justify-between text-xs text-[var(--rdt)] font-semibold mb-1">
                     <span>LAY (KHAI)</span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-900/60 text-rose-200">
-                      Decimal: {bookmaker.decimalLay ?? '—'}
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--sf)] text-[var(--rdt)]">
+                      Dec: {bookmaker.decimalLay ?? '—'}
                     </span>
                   </div>
-                  <div className="font-mono text-3xl sm:text-4xl font-black text-rose-200">
+                  <div className="text-3xl font-bold text-[var(--rdt)] tabular-nums">
                     {bookmaker.layRate !== null ? bookmaker.layRate : '—'}
                   </div>
-                  <div className="text-xs text-rose-400/80 mt-1 flex items-center justify-between">
+                  <div className="text-xs text-[var(--mu)] mt-1 flex items-center justify-between tabular-nums">
                     <span>Spread: {bookmaker.spread !== null ? `${bookmaker.spread} pt` : '—'}</span>
                     <span className="font-mono text-[11px]">Paise Rate</span>
                   </div>
                 </div>
 
                 {/* Previous vs Current Odds */}
-                <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                  <div className="text-xs text-slate-400 font-semibold mb-1">
+                <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">
+                  <div className="text-xs text-[var(--mu)] font-semibold mb-1.5">
                     PREVIOUS VS CURRENT
                   </div>
-                  <div className="space-y-1.5 font-mono">
+                  <div className="space-y-1.5 font-mono tabular-nums">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="text-slate-400">Current Rate:</span>
-                      <span className="font-bold text-white text-sm">
+                      <span className="text-[var(--mu)]">Current Rate:</span>
+                      <span className="font-bold text-[var(--tx)] text-sm">
                         {bookmaker.rawRateString || '—'}
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-xs">
-                      <span className="text-slate-400">Previous Rate:</span>
-                      <span className="font-semibold text-slate-400 text-sm">
+                      <span className="text-[var(--mu)]">Previous Rate:</span>
+                      <span className="font-semibold text-[var(--mu)] text-sm">
                         {oddsState?.previousOdds?.bookmaker.rawRateString || 'First tick'}
                       </span>
                     </div>
-                    <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-800">
-                      <span className="text-slate-500">Total Updates:</span>
-                      <span className="text-slate-300">{oddsState?.recordsCount || 0}</span>
+                    <div className="flex items-center justify-between text-xs pt-1 border-t border-[var(--bd)]">
+                      <span className="text-[var(--mu)]">Total Updates:</span>
+                      <span className="text-[var(--tx)] font-semibold">{oddsState?.recordsCount || 0}</span>
                     </div>
                   </div>
                 </div>
 
                 {/* Odds Movement */}
-                <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                  <div className="text-xs text-slate-400 font-semibold mb-1">
+                <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">
+                  <div className="text-xs text-[var(--mu)] font-semibold mb-1.5">
                     ODDS MOVEMENT
                   </div>
                   <div className="flex items-center gap-2 mt-1">
                     {movement?.direction === 'up' ? (
-                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/80 text-emerald-300 border border-emerald-500/30 text-xs font-bold">
-                        <TrendingUp className="w-4 h-4 text-emerald-400" />
+                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)] text-xs font-bold">
+                        <TrendingUp className="w-4 h-4" />
                         <span>DRIFTING UP (+{movement.deltaBack} pts)</span>
                       </div>
                     ) : movement?.direction === 'down' ? (
-                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-950/80 text-rose-300 border border-rose-500/30 text-xs font-bold">
-                        <TrendingDown className="w-4 h-4 text-rose-400" />
+                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--rds)] text-[var(--rdt)] border border-[var(--rd)]/30 text-xs font-bold">
+                        <TrendingDown className="w-4 h-4" />
                         <span>FIRMING DOWN ({movement.deltaBack} pts)</span>
                       </div>
                     ) : (
-                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 border border-slate-700 text-xs font-medium">
-                        <Minus className="w-4 h-4 text-slate-400" />
-                        <span>STABLE (0 pts change)</span>
+                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--sf)] text-[var(--mu)] border border-[var(--bd)] text-xs font-medium">
+                        <Minus className="w-4 h-4" />
+                        <span>STABLE (0 pts)</span>
                       </div>
                     )}
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-2">
+                  <p className="text-[11px] text-[var(--mu)] mt-2">
                     {bookmaker.isSuspended ? (
-                      <span className="text-amber-400 font-semibold">Market suspended (0-0)</span>
+                      <span className="text-[var(--warn-tx)] font-semibold">Market suspended (0-0)</span>
                     ) : (
                       <span>Active trading market</span>
                     )}
@@ -1024,12 +1022,12 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
 
               {/* Sessions */}
               {sessions.length > 0 && (
-                <div className="p-4 rounded-xl bg-slate-950/40 border border-slate-800/80">
+                <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">
                   <div className="flex items-center justify-between mb-3">
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--mu)]">
                       Session Lines (Fancy)
                     </span>
-                    <span className="text-[11px] text-slate-500 font-mono">
+                    <span className="text-[11px] text-[var(--mu)] font-mono">
                       {sessions.length} market{sessions.length > 1 ? 's' : ''} available
                     </span>
                   </div>
@@ -1037,17 +1035,17 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     {sessions.map((sess, idx) => (
                       <div
                         key={idx}
-                        className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between"
+                        className="p-2.5 rounded-lg bg-[var(--sf)] border border-[var(--bd)] flex items-center justify-between"
                       >
                         <div>
-                          <div className="text-[11px] text-slate-400">{sess.overs} Overs</div>
-                          <div className="font-mono text-xs text-slate-500">{sess.rawString}</div>
+                          <div className="text-[11px] text-[var(--mu)]">{sess.overs} Overs</div>
+                          <div className="font-mono text-xs text-[var(--mu)]">{sess.rawString}</div>
                         </div>
-                        <div className="text-right font-mono">
-                          <div className="text-sm font-bold text-white">
+                        <div className="text-right font-mono tabular-nums">
+                          <div className="text-sm font-bold text-[var(--tx)]">
                             {sess.low} - {sess.high}
                           </div>
-                          <div className="text-[10px] text-slate-400">Spread: {sess.spread}</div>
+                          <div className="text-[10px] text-[var(--mu)]">Spread: {sess.spread}</div>
                         </div>
                       </div>
                     ))}
@@ -1059,16 +1057,19 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
         </section>
 
         {/* ======================================================== */}
-        {/* SECTION C: ENTRY/EXIT ANALYSIS (Phase 6 Engine Driven)  */}
+        {/* SECTION C: ENTRY/EXIT ANALYSIS                           */}
         {/* ======================================================== */}
-        <section className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl relative space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-2">
+        <section
+          className="bg-[var(--sf)] border border-[var(--bd)] rounded-2xl p-4 sm:p-6 relative space-y-5"
+          style={{ boxShadow: 'var(--card-shadow)' }}
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3.5 border-b border-[var(--bd)] gap-2">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="w-2 h-2 rounded-full bg-amber-400" />
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-[var(--warn-tx)]" />
+              <h2 className="text-xs font-bold uppercase tracking-wider text-[var(--mu)]">
                 Section C: Server Strategy Engine (Read-Only UI)
               </h2>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-700/40">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
                 24/7 Server Evaluated
               </span>
             </div>
@@ -1077,7 +1078,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 type="button"
                 onClick={handleResetStrategyState}
                 disabled={overridePending}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-slate-400 hover:text-white bg-slate-950 border border-slate-800 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-50"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[var(--tx)] bg-[var(--sf-2)] border border-[var(--bd)] hover:bg-[var(--rds)] hover:text-[var(--rdt)] rounded-lg transition-colors disabled:opacity-50"
                 title="Manual Override: Reset server strategy state for this match"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
@@ -1089,45 +1090,45 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
           {/* 4 Strategy Rule Cards */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* 1. FIRST-ENTRY STATUS */}
-            <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 flex flex-col justify-between">
+            <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] flex flex-col justify-between">
               <div>
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2">
-                    <Target className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                    <Target className="w-4 h-4 text-[var(--ok-tx)]" />
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--tx)]">
                       1. First-Entry Status
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
                     strategyState.stage === 'ACTIVE_FIRST_ENTRY' ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-950/90 text-emerald-300 border border-emerald-600 shadow-sm shadow-emerald-950">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
+                        <CheckCircle2 className="w-3 h-3" />
                         <span>ENTERED (HELD)</span>
                       </span>
                     ) : strategyState.stage === 'FIRST_BOOKSET_COMPLETED' ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-950/90 text-emerald-300 border border-emerald-600">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
+                        <CheckCircle2 className="w-3 h-3" />
                         <span>BOOKSET SECURED</span>
                       </span>
                     ) : strategyState.stage === 'CONFIRMED_PENDING_85' ||
                       strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED' ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-950/90 text-blue-300 border border-blue-600">
-                        <Clock className="w-3 h-3 text-blue-400" />
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-[var(--blu)] text-[var(--blut)] border border-[var(--info-bd)]">
+                        <Clock className="w-3 h-3" />
                         <span>CANDIDATE (HELD)</span>
                       </span>
                     ) : (
                       renderStatusBadge(firstEntrySignal?.status)
                     )}
                     <span
-                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
                         strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
                         strategyState.stage === 'ACTIVE_FIRST_ENTRY'
-                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-600 font-bold'
+                          ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)] font-bold'
                           : strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED' ||
                             strategyState.stage === 'CONFIRMED_PENDING_85'
-                          ? 'bg-blue-950 text-blue-300 border border-blue-600'
-                          : 'bg-slate-800 text-slate-400'
+                          ? 'bg-[var(--blu)] text-[var(--blut)] border-[var(--info-bd)]'
+                          : 'bg-[var(--sf)] text-[var(--mu)] border-[var(--bd)]'
                       }`}
                     >
                       {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
@@ -1139,27 +1140,27 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 </div>
 
                 <div className="space-y-2 mt-3 text-xs">
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Qualifying Condition:</span>
-                    <span className="text-slate-200 font-semibold">BATTING &gt;= 85p</span>
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono">
+                    <span className="text-[var(--mu)]">Qualifying Condition:</span>
+                    <span className="text-[var(--tx)] font-semibold">BATTING &gt;= 85p</span>
                   </div>
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Control &amp; Odds:</span>
-                    <span className="font-bold text-blue-300">
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono tabular-nums">
+                    <span className="text-[var(--mu)]">Control &amp; Odds:</span>
+                    <span className="font-bold text-[var(--blut)]">
                       {controlInfo.teamInControl}{' '}
                       {controlInfo.currentPaise !== null
                         ? `${controlInfo.currentPaise}p (${bookmaker?.decimalBack?.toFixed(2) ?? (1 + controlInfo.currentPaise / 100).toFixed(2)})`
                         : '—'}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
-                    <span className="text-slate-400">Entry Window Limit:</span>
-                    <span className="text-slate-300">
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)]">
+                    <span className="text-[var(--mu)]">Entry Window Limit:</span>
+                    <span className="text-[var(--tx)] font-medium">
                       {match?.team2Score ? 'Inn 2 (< 6.0 ov)' : 'Inn 1 (< 10.0 ov)'}
                     </span>
                   </div>
-                  <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
-                    <span className="text-slate-400 font-semibold">Engine Evaluation: </span>
+                  <div className="p-2.5 rounded-lg bg-[var(--sf)] border border-[var(--bd)] text-[11px] text-[var(--tx)]">
+                    <span className="text-[var(--mu)] font-semibold">Engine Evaluation: </span>
                     {strategyState.stage === 'ACTIVE_FIRST_ENTRY' ||
                     strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
                       ? `FIRST ENTRY ACTIVE & HELD: Entered at ${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.85) - 1) * 100)} paise (${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds?.toFixed(2) ?? '1.85'}). Holding until pre-wicket BATTING <= 55p or Bookset (BOWLING > 85 paise).`
@@ -1175,10 +1176,9 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 </div>
               </div>
 
-              {/* Action: Distinguish Candidate vs Recorded Trade */}
-              <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between gap-2">
+              <div className="mt-4 pt-3 border-t border-[var(--bd)] flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-col">
-                  <span className="text-[11px] text-slate-400 font-medium">
+                  <span className="text-[11px] text-[var(--mu)] font-medium">
                     {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' ||
                     strategyState.stage === 'ACTIVE_FIRST_ENTRY'
                       ? `Entered @ ${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds} (${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.86) - 1) * 100)}p) • ${strategyState.firstEntryTrade?.entryWickets ?? strategyState.firstEntryPosition.entryWickets ?? 0} wkts`
@@ -1186,8 +1186,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                       ? 'Candidate signal qualified (manual override available)'
                       : 'Candidate signal only (trade not recorded)'}
                   </span>
-                  <span className="text-[10px] text-slate-500 flex items-center gap-1 mt-0.5">
-                    <Database className="w-2.5 h-2.5 text-emerald-400" />
+                  <span className="text-[10px] text-[var(--mu)] flex items-center gap-1 mt-0.5">
+                    <Database className="w-2.5 h-2.5 text-[var(--ok-tx)]" />
                     <span>
                       {strategyState.firstEntryTrade ? 'Saved in PostgreSQL strategy_trades' : 'Database Ready'}
                     </span>
@@ -1203,14 +1203,14 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     type="button"
                     onClick={handleRecordFirstEntry}
                     disabled={!bookmaker?.decimalBack || overridePending}
-                    className="px-2.5 py-1 text-xs font-semibold text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-600/50 rounded-lg transition-colors disabled:opacity-50"
+                    className="px-2.5 py-1 text-xs font-semibold text-[var(--ok-tx)] bg-[var(--ok-bg)] border border-[var(--ok-bd)] rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
                     title="Manual Override (saved on server)"
                   >
                     Manual Override: 1st Entry
                   </button>
                 ) : (
-                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-800/80">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--ok-tx)] bg-[var(--ok-bg)] px-2.5 py-1 rounded-lg border border-[var(--ok-bd)]">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
                     <span>
                       {strategyState.firstEntryPosition.status === 'RECORDED_EXIT'
                         ? 'Bookset Completed'
@@ -1222,24 +1222,24 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
 
             {/* 2. SECOND-ENTRY STATUS */}
-            <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 flex flex-col justify-between">
+            <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] flex flex-col justify-between">
               <div>
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2">
-                    <Zap className="w-4 h-4 text-blue-400" />
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                    <Zap className="w-4 h-4 text-[var(--blut)]" />
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--tx)]">
                       2. Second-Entry Status
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     {renderStatusBadge(secondEntrySignal?.status)}
                     <span
-                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
                         strategyState.secondEntryPosition.status === 'RECORDED_ENTRY'
-                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-600'
+                          ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
                           : strategyState.secondEntryPosition.status === 'CANDIDATE_DETECTED'
-                          ? 'bg-blue-950 text-blue-300 border border-blue-600'
-                          : 'bg-slate-800 text-slate-400'
+                          ? 'bg-[var(--blu)] text-[var(--blut)] border-[var(--info-bd)]'
+                          : 'bg-[var(--sf)] text-[var(--mu)] border-[var(--bd)]'
                       }`}
                     >
                       {strategyState.secondEntryPosition.status}
@@ -1248,15 +1248,15 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 </div>
 
                 <div className="space-y-2 mt-3 text-xs">
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Wicket Dependency:</span>
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono tabular-nums">
+                    <span className="text-[var(--mu)]">Wicket Dependency:</span>
                     <span
                       className={`font-semibold ${
                         strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
                           ? (activeScore?.wickets || 0) > (strategyState.firstEntryPosition.entryWickets || 0)
-                            ? 'text-emerald-400'
-                            : 'text-amber-400'
-                          : 'text-slate-500'
+                            ? 'text-[var(--ok-tx)]'
+                            : 'text-[var(--warn-tx)]'
+                          : 'text-[var(--mu)]'
                       }`}
                     >
                       {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY'
@@ -1264,24 +1264,23 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                         : 'Requires prior 1st entry'}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Bowling Control Trigger:</span>
-                    <span className="font-bold text-amber-300">
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono tabular-nums">
+                    <span className="text-[var(--mu)]">Bowling Control Trigger:</span>
+                    <span className="font-bold text-[var(--warn-tx)] text-right">
                       {controlInfo.teamInControl === 'BOWLING' && controlInfo.currentPaise !== null
                         ? `BOWLING ${controlInfo.currentPaise}p (< 65p target)`
                         : `${controlInfo.teamInControl} ${controlInfo.currentPaise !== null ? `${controlInfo.currentPaise}p` : '—'} (needs BOWLING < 65p)`}
                     </span>
                   </div>
-                  <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
-                    <span className="text-slate-400 font-semibold">Engine Evaluation: </span>
+                  <div className="p-2.5 rounded-lg bg-[var(--sf)] border border-[var(--bd)] text-[11px] text-[var(--tx)]">
+                    <span className="text-[var(--mu)] font-semibold">Engine Evaluation: </span>
                     {secondEntrySignal?.explanation || 'Awaiting wicket & BOWLING < 65p'}
                   </div>
                 </div>
               </div>
 
-              {/* Action: Server-Saved Manual Override for 2nd Entry */}
-              <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-400">
+              <div className="mt-4 pt-3 border-t border-[var(--bd)] flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] text-[var(--mu)]">
                   {strategyState.secondEntryPosition.status === 'RECORDED_ENTRY' ||
                   strategyState.secondEntryPosition.status === 'RECORDED_EXIT'
                     ? `2nd Entered @ ${strategyState.secondEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.secondEntryPosition.entryOdds ?? '—'} (${strategyState.secondEntryTrade?.entryPaise ?? Math.round(((strategyState.secondEntryPosition.entryOdds ?? 1) - 1) * 100)}p) • ${strategyState.secondEntryTrade?.entryOver ?? strategyState.secondEntryPosition.entryOver ?? '—'} ov`
@@ -1292,8 +1291,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     <button
                       type="button"
                       onClick={handleRecordSecondEntry}
-                      disabled={!controlInfo.decimalOdds && !bookmaker?.decimalBack || overridePending}
-                      className="px-2.5 py-1 text-xs font-semibold text-blue-300 bg-blue-950/60 hover:bg-blue-900/80 border border-blue-600/50 rounded-lg transition-colors disabled:opacity-50"
+                      disabled={(!controlInfo.decimalOdds && !bookmaker?.decimalBack) || overridePending}
+                      className="px-2.5 py-1 text-xs font-semibold text-[var(--blut)] bg-[var(--blu)] border border-[var(--info-bd)] rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
                       title="Manual Override (saved on server)"
                     >
                       Manual Override: 2nd Entry
@@ -1303,51 +1302,52 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
 
             {/* 3. BOOKSET / EXIT STATUS */}
-            <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 flex flex-col justify-between">
+            <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] flex flex-col justify-between">
               <div>
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-purple-400" />
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                    <Layers className="w-4 h-4 text-[var(--purple-tx)]" />
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--tx)]">
                       3. Bookset / Exit Status
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {renderStatusBadge((secondBooksetSignal || firstExit55Signal?.status === 'PASS' ? firstExit55Signal : firstBooksetSignal)?.status)}
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+                    {renderStatusBadge((secondBooksetSignal || (firstExit55Signal?.status === 'PASS' ? firstExit55Signal : firstBooksetSignal))?.status)}
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)]">
                       {strategyState.firstEntryPosition.status === 'RECORDED_EXIT' ? 'EXITED' : 'MONITORING'}
                     </span>
                   </div>
                 </div>
 
                 <div className="space-y-2 mt-3 text-xs">
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Exit Rules (1st / Both):</span>
-                    <span className="text-purple-300 font-semibold">BATTING &lt;= 55p (no wkt) | BOWLING &gt; 85p</span>
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono">
+                    <span className="text-[var(--mu)]">Exit Rules:</span>
+                    <span className="text-[var(--purple-tx)] font-semibold text-right">
+                      BATTING &lt;= 55p (no wkt) | BOWLING &gt; 85p
+                    </span>
                   </div>
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Current Control Odds:</span>
-                    <span className="text-purple-300 font-semibold">
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono tabular-nums">
+                    <span className="text-[var(--mu)]">Current Control Odds:</span>
+                    <span className="text-[var(--purple-tx)] font-semibold">
                       {controlInfo.teamInControl}{' '}
                       {controlInfo.currentPaise !== null ? `${controlInfo.currentPaise}p` : '—'}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800">
-                    <span className="text-slate-400">Window Continuity:</span>
-                    <span className="text-emerald-400 font-medium">
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)]">
+                    <span className="text-[var(--mu)]">Window Continuity:</span>
+                    <span className="text-[var(--ok-tx)] font-medium text-right">
                       Exits continuously monitored after window closes
                     </span>
                   </div>
-                  <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
-                    <span className="text-slate-400 font-semibold">Bookset Target: </span>
+                  <div className="p-2.5 rounded-lg bg-[var(--sf)] border border-[var(--bd)] text-[11px] text-[var(--tx)]">
+                    <span className="text-[var(--mu)] font-semibold">Bookset Target: </span>
                     {(secondBooksetSignal || (firstExit55Signal?.status === 'PASS' ? firstExit55Signal : firstBooksetSignal))?.explanation || 'Waiting for BATTING <= 55p (no wicket) or BOWLING > 85p'}
                   </div>
                 </div>
               </div>
 
-              {/* Action: Server-Saved Manual Override Exit */}
-              <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-400">
+              <div className="mt-4 pt-3 border-t border-[var(--bd)] flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] text-[var(--mu)]">
                   {strategyState.firstEntryPosition.status === 'RECORDED_EXIT'
                     ? `Exited @ ${strategyState.firstEntryTrade?.exitDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.exitOdds ?? '—'} (${strategyState.firstEntryTrade?.exitOver ?? strategyState.firstEntryPosition.exitOver ?? '—'} ov)`
                     : 'Awaiting automatic server exit'}
@@ -1357,7 +1357,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     type="button"
                     onClick={handleRecordFirstExit}
                     disabled={!bookmaker?.decimalLay || overridePending}
-                    className="px-2.5 py-1 text-xs font-semibold text-purple-300 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-600/50 rounded-lg transition-colors disabled:opacity-50"
+                    className="px-2.5 py-1 text-xs font-semibold text-[var(--purple-tx)] bg-[var(--purple-bg)] border border-[var(--purple-bd)] rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
                     title="Manual Override (saved on server)"
                   >
                     Manual Override: Exit
@@ -1367,67 +1367,65 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
 
             {/* 4. ABNORMAL ACTIVITY STATUS */}
-            <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 flex flex-col justify-between">
+            <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] flex flex-col justify-between">
               <div>
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2">
-                    <ShieldAlert className="w-4 h-4 text-amber-400" />
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                    <ShieldAlert className="w-4 h-4 text-[var(--warn-tx)]" />
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--tx)]">
                       4. Abnormal Activity Status
                     </span>
                   </div>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--sf)] border border-[var(--bd)] text-[var(--tx)] tabular-nums">
                     Trigger Count: {strategyState.abnormalActivityCount}
                   </span>
                 </div>
 
                 <div className="space-y-2 mt-3 text-xs">
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Four Boundary Shift Rule:</span>
-                    <span className="font-semibold text-slate-200">
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono">
+                    <span className="text-[var(--mu)]">Four Boundary Shift Rule:</span>
+                    <span className="font-semibold text-[var(--tx)]">
                       Must be &gt;= 0.11 (&lt;= 0.10 fails)
                     </span>
                   </div>
-                  <div className="flex items-center justify-between p-2 rounded bg-slate-900/80 border border-slate-800 font-mono">
-                    <span className="text-slate-400">Six Boundary Shift Rule:</span>
-                    <span className="font-semibold text-slate-200">
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--sf)] border border-[var(--bd)] font-mono">
+                    <span className="text-[var(--mu)]">Six Boundary Shift Rule:</span>
+                    <span className="font-semibold text-[var(--tx)]">
                       Must be &gt;= 0.18 (&lt;= 0.17 fails)
                     </span>
                   </div>
-                  <div className="p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300">
-                    <span className="text-slate-400 font-semibold">Latest Evaluation: </span>
+                  <div className="p-2.5 rounded-lg bg-[var(--sf)] border border-[var(--bd)] text-[11px] text-[var(--tx)]">
+                    <span className="text-[var(--mu)] font-semibold">Latest Evaluation: </span>
                     {abnormalSignal?.explanation || 'No boundary trigger evaluated yet'}
                   </div>
                 </div>
               </div>
 
-              {/* Read-Only Server Boundary Status Footer */}
-              <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
-                <span>Booking Team: <strong className="text-slate-200">{strategyState.bookingTeamName || 'Pending 1st boundary'}</strong></span>
-                <span className="font-mono text-emerald-400">Server Auto-Eval (1s)</span>
+              <div className="mt-4 pt-3 border-t border-[var(--bd)] flex items-center justify-between text-[11px] text-[var(--mu)]">
+                <span>Booking Team: <strong className="text-[var(--tx)]">{strategyState.bookingTeamName || 'Pending 1st boundary'}</strong></span>
+                <span className="font-mono text-[var(--ok-tx)] font-medium">Server Auto-Eval (1s)</span>
               </div>
             </div>
           </div>
 
-          {/* Structured Signal History Log (Requirement 8 & 9) */}
-          <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b border-slate-800/60 gap-2">
+          {/* Structured Signal History Log */}
+          <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b border-[var(--bd)] gap-2">
               <div className="flex items-center gap-2">
-                <BarChart2 className="w-4 h-4 text-emerald-400" />
-                <span className="font-bold uppercase tracking-wider text-slate-300 text-xs">
+                <BarChart2 className="w-4 h-4 text-[var(--ok-tx)]" />
+                <span className="font-bold uppercase tracking-wider text-[var(--tx)] text-xs">
                   Strategy Signals Log ({signals.length} evaluations)
                 </span>
               </div>
 
-              {/* Requirement 8: Filter Tabs (Candidates, Exits, Rejected, Wickets) */}
               <div className="flex items-center gap-1.5 flex-wrap text-xs">
                 <button
                   type="button"
                   onClick={() => setSignalFilter('all')}
                   className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                     signalFilter === 'all'
-                      ? 'bg-slate-800 text-white border border-slate-700 shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--rd)] text-white'
+                      : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)] hover:text-[var(--tx)]'
                   }`}
                 >
                   All ({signals.length})
@@ -1437,8 +1435,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   onClick={() => setSignalFilter('candidates')}
                   className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                     signalFilter === 'candidates'
-                      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-600/60 shadow-sm'
-                      : 'text-emerald-400/80 hover:text-emerald-300'
+                      ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]'
+                      : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)] hover:text-[var(--tx)]'
                   }`}
                 >
                   Candidates &amp; Exits ({candidatesCount})
@@ -1448,19 +1446,19 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   onClick={() => setSignalFilter('rejected')}
                   className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                     signalFilter === 'rejected'
-                      ? 'bg-rose-950/80 text-rose-300 border border-rose-600/60 shadow-sm'
-                      : 'text-rose-400/80 hover:text-rose-300'
+                      ? 'bg-[var(--rds)] text-[var(--rdt)] border border-[var(--rd)]/35'
+                      : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)] hover:text-[var(--tx)]'
                   }`}
                 >
-                  Rejected Conditions ({rejectedCount})
+                  Rejected ({rejectedCount})
                 </button>
                 <button
                   type="button"
                   onClick={() => setSignalFilter('events')}
                   className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                     signalFilter === 'events'
-                      ? 'bg-blue-950/80 text-blue-300 border border-blue-600/60 shadow-sm'
-                      : 'text-blue-400/80 hover:text-blue-300'
+                      ? 'bg-[var(--blu)] text-[var(--blut)] border border-[var(--info-bd)]'
+                      : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)] hover:text-[var(--tx)]'
                   }`}
                 >
                   Wickets &amp; Activity ({eventsCount})
@@ -1469,15 +1467,15 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
 
             {filteredSignals.length === 0 ? (
-              <div className="py-8 text-center text-slate-500 text-xs italic">
+              <div className="py-8 text-center text-[var(--mu)] text-xs italic">
                 {signalFilter === 'all'
                   ? 'Signals will appear as live match ticks are processed by the strategy engine.'
                   : `No signals matching the "${signalFilter}" filter yet.`}
               </div>
             ) : (
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto rounded-lg border border-[var(--bd)] bg-[var(--sf)]">
                 <table className="w-full text-xs font-mono text-left">
-                  <thead className="text-[11px] text-slate-400 border-b border-slate-800">
+                  <thead className="text-[11px] text-[var(--mu)] bg-[var(--sf-2)] border-b border-[var(--bd)]">
                     <tr>
                       <th className="py-2 px-2.5">Timestamp</th>
                       <th className="py-2 px-2.5">Signal Type</th>
@@ -1487,10 +1485,10 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                       <th className="py-2 px-2.5">Reason &amp; Evaluation</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/50">
+                  <tbody className="divide-y divide-[var(--bd)]">
                     {filteredSignals.slice(0, 30).map((sig) => (
-                      <tr key={sig.id} className="hover:bg-slate-900/60 transition-colors">
-                        <td className="py-2 px-2.5 text-slate-400 whitespace-nowrap">
+                      <tr key={sig.id} className="hover:bg-[var(--sf-2)] transition-colors">
+                        <td className="py-2 px-2.5 text-[var(--mu)] whitespace-nowrap tabular-nums">
                           {new Date(sig.timestamp).toLocaleTimeString([], {
                             hour: '2-digit',
                             minute: '2-digit',
@@ -1500,29 +1498,29 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                         <td className="py-2 px-2.5 whitespace-nowrap">
                           <div className="flex items-center gap-1.5">
                             <span
-                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold border ${
                                 sig.signalType === 'WICKET_EVENT'
-                                  ? 'bg-purple-950 text-purple-300 border border-purple-800'
+                                  ? 'bg-[var(--purple-bg)] text-[var(--purple-tx)] border-[var(--purple-bd)]'
                                   : sig.signalType.startsWith('ABNORMAL')
-                                  ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                  ? 'bg-[var(--warn-bg)] text-[var(--warn-tx)] border-[var(--warn-bd)]'
                                   : sig.status === 'PASS'
-                                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                                  : 'bg-slate-900 text-slate-300 border border-slate-800'
+                                  ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
+                                  : 'bg-[var(--sf-2)] text-[var(--tx)] border-[var(--bd)]'
                               }`}
                             >
                               {sig.signalType.replace(/_/g, ' ')}
                             </span>
                             {(sig.metadata?.isManual || sig.metadata?.source === 'MANUAL') && (
-                              <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-950 text-amber-300 border border-amber-600/60">
+                              <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-bold bg-[var(--warn-bg)] text-[var(--warn-tx)] border border-[var(--warn-bd)]">
                                 MANUAL
                               </span>
                             )}
                           </div>
                         </td>
-                        <td className="py-2 px-2.5 text-slate-400 whitespace-nowrap">
+                        <td className="py-2 px-2.5 text-[var(--mu)] whitespace-nowrap tabular-nums">
                           Inn {sig.currentInnings} • {sig.currentOver} ov
                         </td>
-                        <td className="py-2 px-2.5 text-blue-300 whitespace-nowrap">
+                        <td className="py-2 px-2.5 text-[var(--blut)] whitespace-nowrap tabular-nums">
                           {sig.relevantOdds.decimalOdds
                             ? sig.relevantOdds.decimalOdds.toFixed(2)
                             : sig.relevantOdds.opposingTeamOdds
@@ -1531,13 +1529,13 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                             ? `Δ ${sig.relevantOdds.oddsDelta.toFixed(2)}`
                             : '—'}
                           {sig.relevantOdds.isStale && (
-                            <span className="ml-1 text-[9px] text-amber-400 font-bold px-1 rounded bg-amber-950/80">
+                            <span className="ml-1 text-[9px] text-[var(--warn-tx)] font-bold px-1 rounded bg-[var(--warn-bg)]">
                               STALE
                             </span>
                           )}
                         </td>
                         <td className="py-2 px-2.5 whitespace-nowrap">{renderStatusBadge(sig.status)}</td>
-                        <td className="py-2 px-2.5 text-slate-300 max-w-[360px]" title={sig.explanation}>
+                        <td className="py-2 px-2.5 text-[var(--tx)] max-w-[360px]" title={sig.explanation}>
                           <p className="line-clamp-2 leading-relaxed">{sig.explanation}</p>
                         </td>
                       </tr>
@@ -1547,16 +1545,17 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
               </div>
             )}
           </div>
+
           {/* Append-Only Saved Timeline History (Ball 1 to Now) */}
-          <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b border-slate-800/60 gap-2">
+          <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b border-[var(--bd)] gap-2">
               <div className="flex items-center gap-2 flex-wrap">
-                <Database className="w-4 h-4 text-blue-400" />
-                <span className="font-bold uppercase tracking-wider text-slate-300 text-xs">
+                <Database className="w-4 h-4 text-[var(--blut)]" />
+                <span className="font-bold uppercase tracking-wider text-[var(--tx)] text-xs">
                   Saved Match Timeline History ({legalBallsSavedCount} balls • {timelineTicks.length} 1s ticks)
                 </span>
                 {missedTicks > 0 && (
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-700/50">
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--rds)] text-[var(--rdt)] border border-[var(--rd)]/30">
                     Missed Ticks: {missedTicks}
                   </span>
                 )}
@@ -1568,8 +1567,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   onClick={() => setTimelineMode('balls')}
                   className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                     timelineMode === 'balls'
-                      ? 'bg-blue-950/80 text-blue-300 border border-blue-600/60'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--blu)] text-[var(--blut)] border border-[var(--info-bd)]'
+                      : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)] hover:text-[var(--tx)]'
                   }`}
                 >
                   Ball-by-Ball ({legalBallsSavedCount})
@@ -1579,8 +1578,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   onClick={() => setTimelineMode('ticks')}
                   className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                     timelineMode === 'ticks'
-                      ? 'bg-slate-800 text-white border border-slate-700'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--rd)] text-white'
+                      : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)] hover:text-[var(--tx)]'
                   }`}
                 >
                   All 1s Ticks ({timelineTicks.length})
@@ -1589,17 +1588,17 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
 
             {isLoadingHistory && timelineTicks.length === 0 ? (
-              <div className="py-6 text-center text-slate-500 text-xs">
+              <div className="py-6 text-center text-[var(--mu)] text-xs">
                 Loading full saved timeline history from PostgreSQL...
               </div>
             ) : displayedTimelineRows.length === 0 ? (
-              <div className="py-6 text-center text-slate-500 text-xs italic">
+              <div className="py-6 text-center text-[var(--mu)] text-xs italic">
                 No saved timeline ticks in PostgreSQL yet for this match.
               </div>
             ) : (
-              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+              <div className="overflow-x-auto max-h-80 overflow-y-auto rounded-lg border border-[var(--bd)] bg-[var(--sf)]">
                 <table className="w-full text-xs font-mono text-left">
-                  <thead className="text-[11px] text-slate-400 border-b border-slate-800 sticky top-0 bg-slate-950">
+                  <thead className="text-[11px] text-[var(--mu)] border-b border-[var(--bd)] sticky top-0 bg-[var(--sf-2)]">
                     <tr>
                       <th className="py-2 px-2">Time</th>
                       <th className="py-2 px-2">Inn / Ov</th>
@@ -1610,41 +1609,41 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                       <th className="py-2 px-2">Status</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/50">
+                  <tbody className="divide-y divide-[var(--bd)]">
                     {displayedTimelineRows.slice(0, 100).map((t) => (
-                      <tr key={t.id} className="hover:bg-slate-900/60 transition-colors">
-                        <td className="py-1.5 px-2 text-slate-400 whitespace-nowrap">
+                      <tr key={t.id} className="hover:bg-[var(--sf-2)] transition-colors">
+                        <td className="py-1.5 px-2 text-[var(--mu)] whitespace-nowrap tabular-nums">
                           {new Date(t.recorded_at).toLocaleTimeString([], {
                             hour: '2-digit',
                             minute: '2-digit',
                             second: '2-digit',
                           })}
                         </td>
-                        <td className="py-1.5 px-2 text-slate-300 whitespace-nowrap">
+                        <td className="py-1.5 px-2 text-[var(--tx)] whitespace-nowrap tabular-nums">
                           Inn {t.innings} • {t.overs} ({t.legal_ball_count}b)
                         </td>
-                        <td className="py-1.5 px-2 text-white whitespace-nowrap">
+                        <td className="py-1.5 px-2 text-[var(--tx)] font-semibold whitespace-nowrap tabular-nums">
                           {t.runs}/{t.wickets}
                           {t.is_new_ball && t.runs_on_ball > 0 && (
-                            <span className="ml-1.5 text-[10px] px-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-700/40">
+                            <span className="ml-1.5 text-[10px] px-1 rounded bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
                               +{t.runs_on_ball}
                             </span>
                           )}
                         </td>
-                        <td className="py-1.5 px-2 text-slate-300 whitespace-nowrap">
-                          <span className={t.control === 'BATTING' ? 'text-emerald-400' : t.control === 'BOWLING' ? 'text-amber-400' : 'text-slate-400'}>
+                        <td className="py-1.5 px-2 text-[var(--tx)] whitespace-nowrap">
+                          <span className={t.control === 'BATTING' ? 'text-[var(--ok-tx)] font-semibold' : t.control === 'BOWLING' ? 'text-[var(--warn-tx)] font-semibold' : 'text-[var(--mu)]'}>
                             {t.control}
                           </span>
                           {t.favorite_team ? ` (${t.favorite_team})` : ''}
                         </td>
-                        <td className="py-1.5 px-2 text-blue-300 whitespace-nowrap">
+                        <td className="py-1.5 px-2 text-[var(--blut)] whitespace-nowrap tabular-nums">
                           {t.back_rate !== null ? `${t.back_rate}/${t.lay_rate ?? '—'}` : '—'}
                           {t.decimal_back !== null ? ` (${Number(t.decimal_back).toFixed(2)})` : ''}
                         </td>
-                        <td className="py-1.5 px-2 text-slate-400 whitespace-nowrap">
+                        <td className="py-1.5 px-2 text-[var(--mu)] whitespace-nowrap">
                           {t.raw_rate_string || '—'}
                         </td>
-                        <td className="py-1.5 px-2 text-slate-400 whitespace-nowrap">
+                        <td className="py-1.5 px-2 text-[var(--mu)] whitespace-nowrap">
                           {t.result_text || t.match_status}
                         </td>
                       </tr>
@@ -1659,3 +1658,4 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
     </div>
   );
 };
+

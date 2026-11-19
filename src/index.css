@@ -1,31 +1,120 @@
 @import "tailwindcss";
 
+:root,
+[data-theme="light"] {
+  --bg: #F4F4F6;
+  --sf: #FFFFFF;
+  --sf-2: #F8F8FA;
+  --tx: #14151A;
+  --mu: #5A5E6B;
+  --bd: #E3E4E8;
+  --rd: #D0112B;
+  --rdt: #D0112B;
+  --rds: #FDECEE;
+  --bar: #CFD2DA;
+  --blu: #E6EFFA;
+  --blut: #1B4F8F;
+
+  --ok-bg: #EAF7F0;
+  --ok-tx: #116D43;
+  --ok-bd: #B6E3CB;
+  --warn-bg: #FEF5E6;
+  --warn-tx: #9A5B06;
+  --warn-bd: #F6DA9D;
+  --info-bg: #E6EFFA;
+  --info-tx: #1B4F8F;
+  --info-bd: #C4D9F4;
+  --purple-bg: #F3EEFC;
+  --purple-tx: #5B21B6;
+  --purple-bd: #DDD0F7;
+  --overlay: rgba(20, 21, 26, 0.55);
+  --code-bg: #F4F4F6;
+  --code-tx: #14151A;
+  --card-shadow: 0 1px 2px rgba(20, 21, 26, 0.04), 0 4px 12px rgba(20, 21, 26, 0.03);
+}
+
+[data-theme="dark"] {
+  --bg: #0D0E11;
+  --sf: #17181D;
+  --sf-2: #1E2027;
+  --tx: #F3F4F6;
+  --mu: #A3A7B3;
+  --bd: #2A2C33;
+  --rd: #D91F34;
+  --rdt: #FF6B79;
+  --rds: #2A1519;
+  --bar: #3A3D47;
+  --blu: #172334;
+  --blut: #6FB0FF;
+
+  --ok-bg: #112A20;
+  --ok-tx: #4ADE80;
+  --ok-bd: #1E4D38;
+  --warn-bg: #2B2010;
+  --warn-tx: #FBBF24;
+  --warn-bd: #573E14;
+  --info-bg: #172334;
+  --info-tx: #6FB0FF;
+  --info-bd: #253B58;
+  --purple-bg: #231838;
+  --purple-tx: #C4B5FD;
+  --purple-bd: #3E2A64;
+  --overlay: rgba(0, 0, 0, 0.78);
+  --code-bg: #0D0E11;
+  --code-tx: #4ADE80;
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
 @layer base {
+  html,
   body {
-    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg);
+    color: var(--tx);
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    transition: background-color 150ms ease, color 150ms ease;
   }
-  
+
   .font-mono-numbers {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Inter', system-ui, sans-serif;
     font-variant-numeric: tabular-nums;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--rd);
+    outline-offset: 2px;
   }
 }
 
-/* Custom subtle scrollbar */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Theme-aware subtle scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.6);
+  background: var(--bg);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(51, 65, 85, 0.8);
+  background: var(--bar);
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(71, 85, 105, 1);
+  background: var(--mu);
 }

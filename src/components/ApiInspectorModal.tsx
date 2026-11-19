@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   X,
   Code2,
@@ -35,7 +35,15 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
   const [searchKey, setSearchKey] = useState('');
   const [copied, setCopied] = useState(false);
 
-  // Filter raw data keys if user searches
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [isOpen, onClose]);
+
   const filteredData = useMemo(() => {
     if (!rawData || !searchKey.trim()) return rawData;
     const q = searchKey.toLowerCase();
@@ -76,22 +84,28 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
+      style={{ backgroundColor: 'var(--overlay)' }}
+      onClick={onClose}
+    >
       <div
-        className="relative w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
+        className="relative w-full max-w-4xl bg-[var(--sf)] border border-[var(--bd)] rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
+        role="dialog"
+        aria-modal="true"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/90">
+        <div className="px-5 py-4 border-b border-[var(--bd)] flex items-center justify-between bg-[var(--sf)]">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400">
+            <div className="w-8 h-8 rounded-lg bg-[var(--rds)] flex items-center justify-center text-[var(--rdt)]">
               <Code2 className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">
+              <h2 className="text-base font-bold text-[var(--tx)]">
                 Crex API Live Inspector
               </h2>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-[var(--mu)]">
                 Inspect raw endpoint response and test payload live
               </p>
             </div>
@@ -99,7 +113,8 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+            aria-label="Close API Inspector"
+            className="p-1.5 text-[var(--mu)] hover:text-[var(--tx)] rounded-lg hover:bg-[var(--sf-2)] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -108,30 +123,30 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
         {/* Content Body */}
         <div className="p-5 flex-1 overflow-hidden flex flex-col space-y-4">
           {/* Request Config Row */}
-          <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-3">
+          <div className="bg-[var(--sf-2)] p-3.5 rounded-xl border border-[var(--bd)] space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-300 font-mono">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-[var(--ok-bg)] text-[var(--ok-tx)] font-mono shrink-0">
                   POST
                 </span>
-                <span className="text-xs font-mono text-slate-300 truncate">
+                <span className="text-xs font-mono text-[var(--tx)] truncate">
                   {API_ENDPOINT}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-400">Country Code:</span>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-xs text-[var(--mu)]">Country Code:</span>
                 <input
                   type="text"
                   value={countryCode}
                   onChange={(e) => setCountryCode(e.target.value.toUpperCase())}
-                  className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-center font-mono text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  className="w-16 bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-2 py-1 text-xs text-center font-mono text-[var(--tx)] focus:outline-none focus:border-[var(--rd)]"
                   maxLength={6}
                 />
                 <button
                   type="button"
                   onClick={handleTest}
                   disabled={isFetching}
-                  className="flex items-center gap-1.5 px-3 py-1 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-1 text-xs font-semibold text-white bg-[var(--rd)] hover:opacity-90 disabled:opacity-50 rounded-lg transition-opacity"
                 >
                   <Play className={`w-3.5 h-3.5 ${isFetching ? 'animate-spin' : ''}`} />
                   <span>{isFetching ? 'Sending...' : 'Send Request'}</span>
@@ -139,16 +154,15 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
               </div>
             </div>
 
-            {/* Request Payload Display */}
-            <div className="flex items-center justify-between text-xs text-slate-400 border-t border-slate-800/80 pt-2 font-mono">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--mu)] border-t border-[var(--bd)] pt-2 font-mono">
               <span>
-                Payload: <span className="text-emerald-400">{`{"cc": "${countryCode}"}`}</span>
+                Payload: <span className="text-[var(--tx)] font-semibold">{`{"cc": "${countryCode}"}`}</span>
               </span>
-              <div className="flex items-center gap-3">
-                <span className="text-emerald-400 flex items-center gap-1">
+              <div className="flex items-center gap-3 tabular-nums">
+                <span className="text-[var(--ok-tx)] flex items-center gap-1 font-semibold">
                   <CheckCircle2 className="w-3.5 h-3.5" /> 200 OK
                 </span>
-                <span className="text-slate-400 flex items-center gap-1">
+                <span className="text-[var(--mu)] flex items-center gap-1">
                   <Clock className="w-3.5 h-3.5" /> {latencyMs}ms
                 </span>
                 <span>
@@ -159,26 +173,25 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
           </div>
 
           {/* JSON Explorer */}
-          <div className="flex-1 bg-slate-950 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
-            {/* Toolbar */}
-            <div className="px-3.5 py-2 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between gap-3 text-xs">
+          <div className="flex-1 bg-[var(--sf-2)] border border-[var(--bd)] rounded-xl overflow-hidden flex flex-col">
+            <div className="px-3.5 py-2 bg-[var(--sf)] border-b border-[var(--bd)] flex items-center justify-between gap-3 text-xs">
               <div className="relative flex-1 max-w-xs">
-                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <Search className="w-3.5 h-3.5 text-[var(--mu)] absolute left-2.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={searchKey}
                   onChange={(e) => setSearchKey(e.target.value)}
                   placeholder="Filter keys or values..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded pl-7 pr-2 py-1 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  className="w-full bg-[var(--sf-2)] border border-[var(--bd)] rounded-lg pl-7 pr-2 py-1 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:outline-none focus:border-[var(--rd)]"
                 />
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={handleDownload}
                   disabled={!rawData}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded transition-colors disabled:opacity-50"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[var(--tx)] bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] rounded-lg transition-colors disabled:opacity-50"
                   title="Download JSON file"
                 >
                   <Download className="w-3.5 h-3.5" />
@@ -188,17 +201,19 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
                   type="button"
                   onClick={handleCopy}
                   disabled={!rawData}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 rounded transition-colors disabled:opacity-50"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[var(--tx)] bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] rounded-lg transition-colors disabled:opacity-50"
                   title="Copy full JSON"
                 >
-                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? <Check className="w-3.5 h-3.5 text-[var(--ok-tx)]" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copied ? 'Copied' : 'Copy JSON'}</span>
                 </button>
               </div>
             </div>
 
-            {/* JSON Code Viewer */}
-            <pre className="p-4 text-xs font-mono text-emerald-300/90 overflow-auto flex-1 leading-relaxed selection:bg-emerald-900/40">
+            <pre
+              className="p-4 text-xs font-mono overflow-auto flex-1 leading-relaxed"
+              style={{ backgroundColor: 'var(--code-bg)', color: 'var(--code-tx)' }}
+            >
               {filteredData
                 ? JSON.stringify(filteredData, null, 2)
                 : '// No data loaded yet. Click "Send Request" to fetch live data.'}

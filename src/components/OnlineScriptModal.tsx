@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Copy,
@@ -7,7 +7,6 @@ import {
   Cloud,
   FileCode,
   Github,
-  Play,
   CheckCircle2,
 } from 'lucide-react';
 
@@ -24,6 +23,15 @@ export const OnlineScriptModal: React.FC<OnlineScriptModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'worker' | 'python' | 'node' | 'github' | 'curl'>('worker');
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -98,7 +106,7 @@ def fetch_top_matches():
             
             # Print live matches with scores
             if m.get("d") == 1 or m.get("j"):
-                print(f"  🔴 [LIVE] {team1} vs {team2} | Scores: {score1} vs {score2} | {status}")
+                print(f"  [LIVE] {team1} vs {team2} | Scores: {score1} vs {score2} | {status}")
                 
     except Exception as e:
         print(f"[ERROR] Fetch failed: {e}")
@@ -133,7 +141,7 @@ async function pollLiveScores() {
     
     for (const [id, m] of Object.entries(data)) {
       if (m.d === 1 || m.j) {
-        console.log(\`🔴 LIVE: \${m.b} vs \${m.c} | \${m.j || 'yet to bat'} | \${m.res || 'Live'}\`);
+        console.log(\`LIVE: \${m.b} vs \${m.c} | \${m.j || 'yet to bat'} | \${m.res || 'Live'}\`);
       }
     }
   } catch (err) {
@@ -180,22 +188,28 @@ jobs:
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
+      style={{ backgroundColor: 'var(--overlay)' }}
+      onClick={onClose}
+    >
       <div
-        className="relative w-full max-w-3xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
+        className="relative w-full max-w-3xl bg-[var(--sf)] border border-[var(--bd)] rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
+        role="dialog"
+        aria-modal="true"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/90">
+        <div className="px-5 py-4 border-b border-[var(--bd)] flex items-center justify-between bg-[var(--sf)]">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400">
+            <div className="w-8 h-8 rounded-lg bg-[var(--ok-bg)] flex items-center justify-center text-[var(--ok-tx)]">
               <Cloud className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">
+              <h2 className="text-base font-bold text-[var(--tx)]">
                 Online Automated Scripts
               </h2>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-[var(--mu)]">
                 Run continuously online 24/7 without needing any local server
               </p>
             </div>
@@ -203,7 +217,8 @@ jobs:
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+            aria-label="Close scripts modal"
+            className="p-1.5 text-[var(--mu)] hover:text-[var(--tx)] rounded-lg hover:bg-[var(--sf-2)] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -211,35 +226,35 @@ jobs:
 
         {/* Info callout */}
         <div className="px-5 pt-4">
-          <div className="p-3.5 bg-emerald-950/30 border border-emerald-500/20 rounded-xl text-xs text-emerald-300 flex items-start gap-2.5">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+          <div className="p-3.5 bg-[var(--ok-bg)] border border-[var(--ok-bd)] rounded-xl text-xs text-[var(--tx)] flex items-start gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-[var(--ok-tx)] shrink-0 mt-0.5" />
             <div>
-              <strong className="text-white block font-semibold mb-0.5">
+              <strong className="text-[var(--ok-tx)] block font-semibold mb-0.5">
                 Current App Status: Already running 100% online in your browser!
               </strong>
               This web app connects directly to{' '}
-              <code className="text-emerald-200 bg-emerald-950/60 px-1 py-0.5 rounded font-mono">
+              <code className="bg-[var(--sf)] border border-[var(--bd)] px-1 py-0.5 rounded font-mono text-[var(--tx)]">
                 https://api.goscorer.com/api/v2/getTopMatches
               </code>{' '}
-              with live auto-refreshing polling. If you also need an independent cloud runner (serverless cron or background daemon), choose a script below:
+              with live auto-refreshing polling. If you also need an independent cloud runner, choose a script below:
             </div>
           </div>
         </div>
 
         {/* Script Selection Tabs */}
         <div className="px-5 pt-4">
-          <div className="flex items-center gap-1.5 p-1 bg-slate-950 rounded-xl border border-slate-800 overflow-x-auto no-scrollbar text-xs">
+          <div className="flex items-center gap-1.5 p-1 bg-[var(--sf-2)] rounded-xl border border-[var(--bd)] overflow-x-auto no-scrollbar text-xs">
             <button
               type="button"
               onClick={() => setActiveTab('worker')}
               className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                 activeTab === 'worker'
-                  ? 'bg-slate-800 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--rd)] text-white'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)]'
               }`}
             >
-              <Cloud className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Cloudflare Worker (Serverless)</span>
+              <Cloud className="w-3.5 h-3.5" />
+              <span>Cloudflare Worker</span>
             </button>
 
             <button
@@ -247,11 +262,11 @@ jobs:
               onClick={() => setActiveTab('python')}
               className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                 activeTab === 'python'
-                  ? 'bg-slate-800 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--rd)] text-white'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)]'
               }`}
             >
-              <Terminal className="w-3.5 h-3.5 text-amber-400" />
+              <Terminal className="w-3.5 h-3.5" />
               <span>Python Daemon</span>
             </button>
 
@@ -260,11 +275,11 @@ jobs:
               onClick={() => setActiveTab('node')}
               className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                 activeTab === 'node'
-                  ? 'bg-slate-800 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--rd)] text-white'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)]'
               }`}
             >
-              <FileCode className="w-3.5 h-3.5 text-blue-400" />
+              <FileCode className="w-3.5 h-3.5" />
               <span>Node.js / Bun</span>
             </button>
 
@@ -273,11 +288,11 @@ jobs:
               onClick={() => setActiveTab('github')}
               className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                 activeTab === 'github'
-                  ? 'bg-slate-800 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--rd)] text-white'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)]'
               }`}
             >
-              <Github className="w-3.5 h-3.5 text-purple-400" />
+              <Github className="w-3.5 h-3.5" />
               <span>GitHub Actions</span>
             </button>
 
@@ -286,11 +301,11 @@ jobs:
               onClick={() => setActiveTab('curl')}
               className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                 activeTab === 'curl'
-                  ? 'bg-slate-800 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--rd)] text-white'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)]'
               }`}
             >
-              <Terminal className="w-3.5 h-3.5 text-slate-300" />
+              <Terminal className="w-3.5 h-3.5" />
               <span>cURL</span>
             </button>
           </div>
@@ -298,21 +313,24 @@ jobs:
 
         {/* Code Box */}
         <div className="p-5 flex-1 overflow-hidden flex flex-col">
-          <div className="relative flex-1 bg-slate-950 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-3.5 py-2 bg-slate-900/80 border-b border-slate-800 text-xs">
-              <span className="font-mono text-slate-400 text-[11px]">
+          <div className="relative flex-1 bg-[var(--sf-2)] border border-[var(--bd)] rounded-xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-3.5 py-2 bg-[var(--sf)] border-b border-[var(--bd)] text-xs">
+              <span className="font-mono text-[var(--mu)] text-[11px]">
                 Payload: {`{"cc": "${countryCode}"}`}
               </span>
               <button
                 type="button"
                 onClick={handleCopy}
-                className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-md bg-slate-800 hover:bg-slate-700 text-white transition-colors"
+                className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] text-[var(--tx)] transition-colors"
               >
-                {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? <Check className="w-3.5 h-3.5 text-[var(--ok-tx)]" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copied ? 'Copied' : 'Copy Code'}</span>
               </button>
             </div>
-            <pre className="p-4 text-xs font-mono text-emerald-300 overflow-auto flex-1 leading-relaxed selection:bg-emerald-900/50">
+            <pre
+              className="p-4 text-xs font-mono overflow-auto flex-1 leading-relaxed"
+              style={{ backgroundColor: 'var(--code-bg)', color: 'var(--code-tx)' }}
+            >
               {currentCode}
             </pre>
           </div>

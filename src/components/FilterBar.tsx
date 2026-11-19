@@ -25,46 +25,78 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   totalCount,
 }) => {
   return (
-    <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 pb-4 border-b border-slate-800">
-      {/* Tab Selectors */}
-      <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl overflow-x-auto no-scrollbar">
+    <div className="space-y-3 mb-4">
+      {/* Mobile & Tablet Search + Format Row (Desktop puts these in TopHeaderBar) */}
+      <div className="flex lg:hidden items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="w-3.5 h-3.5 text-[var(--mu)] absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search teams, tournament, venue"
+            className="w-full bg-[var(--sf)] border border-[var(--bd)] rounded-xl pl-8 pr-7 py-2 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:outline-none focus:border-[var(--rd)]"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => onSearchChange('')}
+              aria-label="Clear search"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--mu)] hover:text-[var(--tx)]"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        <select
+          aria-label="Filter by format"
+          value={selectedFormat}
+          onChange={(e) => onFormatChange(e.target.value)}
+          className="bg-[var(--sf)] border border-[var(--bd)] text-xs font-semibold text-[var(--tx)] rounded-xl px-2.5 py-2 cursor-pointer focus:outline-none focus:border-[var(--rd)] shrink-0"
+        >
+          {FORMAT_OPTIONS.map((f) => (
+            <option key={f} value={f}>
+              {f === 'All' ? 'All' : f}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Status Filter Pills */}
+      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
         <button
           type="button"
           onClick={() => onTabChange('all')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 tabular-nums ${
             activeTab === 'all'
-              ? 'bg-slate-800 text-white shadow-sm'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'bg-[var(--rd)] text-white shadow-xs'
+              : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--tx)] hover:border-[var(--mu)]/60'
           }`}
         >
-          All Matches ({totalCount})
+          All {totalCount}
         </button>
 
         <button
           type="button"
           onClick={() => onTabChange('live')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+          className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 tabular-nums ${
             activeTab === 'live'
-              ? 'bg-rose-950/80 text-rose-300 border border-rose-800/60 shadow-sm'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'bg-[var(--rd)] text-white shadow-xs'
+              : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--tx)] hover:border-[var(--mu)]/60'
           }`}
         >
-          <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-          <span>Live Now</span>
-          {liveCount > 0 && (
-            <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-300 text-[10px] font-mono-numbers">
-              {liveCount}
-            </span>
-          )}
+          <span className="md:hidden">Live {liveCount}</span>
+          <span className="hidden md:inline">Live Now {liveCount}</span>
         </button>
 
         <button
           type="button"
           onClick={() => onTabChange('upcoming')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
             activeTab === 'upcoming'
-              ? 'bg-amber-950/80 text-amber-300 border border-amber-800/60 shadow-sm'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'bg-[var(--rd)] text-white shadow-xs'
+              : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--tx)] hover:border-[var(--mu)]/60'
           }`}
         >
           Upcoming
@@ -73,51 +105,14 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         <button
           type="button"
           onClick={() => onTabChange('completed')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
             activeTab === 'completed'
-              ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/60 shadow-sm'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'bg-[var(--rd)] text-white shadow-xs'
+              : 'bg-[var(--sf)] border border-[var(--bd)] text-[var(--tx)] hover:border-[var(--mu)]/60'
           }`}
         >
           Finished
         </button>
-      </div>
-
-      {/* Search and Format dropdown */}
-      <div className="flex items-center gap-2">
-        {/* Search Input */}
-        <div className="relative flex-1 sm:w-64">
-          <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search teams, tournament, venue..."
-            className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-8 pr-7 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => onSearchChange('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-
-        {/* Format Selector */}
-        <select
-          value={selectedFormat}
-          onChange={(e) => onFormatChange(e.target.value)}
-          className="bg-slate-900 border border-slate-800 text-xs text-slate-300 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-500 cursor-pointer"
-        >
-          {FORMAT_OPTIONS.map((f) => (
-            <option key={f} value={f}>
-              {f === 'All' ? 'All Formats' : f}
-            </option>
-          ))}
-        </select>
       </div>
     </div>
   );

@@ -8,7 +8,16 @@ import {
 } from './services/cricketApi';
 import { ParsedCricketMatch, RawApiResponse } from './types/cricket';
 import { MatchOddsState } from './types/odds';
-import { Navbar } from './components/Navbar';
+import {
+  DesktopSidebar,
+  TabletRail,
+  TopHeaderBar,
+  MobileBottomNav,
+  NavSection,
+  SportMode,
+} from './components/Navbar';
+import { ThemeMode } from './components/ThemeToggle';
+import { SettingsView } from './components/SettingsView';
 import { StatsHeader } from './components/StatsHeader';
 import { FilterBar } from './components/FilterBar';
 import { MatchCard } from './components/MatchCard';
@@ -40,15 +49,10 @@ import {
   fetchServerStrategyStates,
 } from './services/supabaseSyncService';
 import {
-  Radio,
   AlertTriangle,
   RefreshCw,
-  Terminal,
-  Code2,
   Info,
-  Zap,
   Send,
-  Target,
 } from 'lucide-react';
 
 export default function App() {
@@ -58,11 +62,36 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number>(8);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
-  const [tickCounter, setTickCounter] = useState<number>(0);
+  const [, setTickCounter] = useState<number>(0);
+
+  // Theme & Shell Navigation State
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    if (typeof document !== 'undefined') {
+      const attr = document.documentElement.getAttribute('data-theme');
+      if (attr === 'dark' || attr === 'light') return attr;
+    }
+    return 'light';
+  });
+  const [activeNav, setActiveNav] = useState<NavSection>('matches');
+  const [sport, setSport] = useState<SportMode>('cricket');
+  const [telegramInitialSection, setTelegramInitialSection] = useState<'credentials' | 'alerts'>('credentials');
+
+  const handleThemeChange = useCallback((next: ThemeMode) => {
+    setTheme(next);
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-theme', next);
+      document.documentElement.classList.toggle('dark', next === 'dark');
+    }
+    try {
+      localStorage.setItem('crex-theme', next);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
 
   // Configuration - 1-second live tick rate
   const [countryCode, setCountryCode] = useState<string>('IN');
-  const [autoRefreshInterval, setAutoRefreshInterval] = useState<number>(1); // 1s live rate
+  const [autoRefreshInterval] = useState<number>(1);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
 
   // Filters
@@ -176,7 +205,7 @@ export default function App() {
       .catch(() => {});
   }, [applyServerStrategyStates]);
 
-  // Phase 5 Routing: Dedicated Match Analysis View
+  // Dedicated Match Analysis View Routing
   const [activeAnalysisMatchId, setActiveAnalysisMatchId] = useState<string | null>(() => {
     if (typeof window !== 'undefined' && window.location.hash.startsWith('#/match/')) {
       return window.location.hash.replace('#/match/', '').trim() || null;
@@ -184,7 +213,6 @@ export default function App() {
     return null;
   });
 
-  // Listen to hash changes for browser forward/back buttons and deep links
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash;
@@ -208,10 +236,11 @@ export default function App() {
 
   const navigateToDashboard = useCallback(() => {
     setActiveAnalysisMatchId(null);
+    setActiveNav('matches');
     window.location.hash = '';
   }, []);
 
-  // Phase 4 + Phase 2: Per-Match Isolated Odds Manager (hydrated via Server SSE)
+  // Per-Match Isolated Odds Manager (hydrated via Server SSE)
   const {
     oddsByMatchId,
     getMatchOdds,
@@ -227,13 +256,12 @@ export default function App() {
   const finishedMatchesRef = useRef<Set<string>>(new Set());
   const isFirstFetchRef = useRef<boolean>(true);
 
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(1);
   const inFlightRef = useRef<boolean>(false);
 
   // Previous scores memory to detect live changes (runs / wickets)
   const previousScoresRef = useRef<Record<string, { runs: number; wickets: number }>>({});
 
-  // Core Data Fetcher: Executed every second
+  // Core Data Fetcher
   const loadMatches = useCallback(
     async (silent = false, customCc?: string) => {
       if (inFlightRef.current && silent) return;
@@ -250,7 +278,6 @@ export default function App() {
         setLastUpdated(new Date());
         setTickCounter((prev) => prev + 1);
 
-        // On first discovery: pre-seed existing completed matches so historical results are not spammed
         if (isFirstFetchRef.current) {
           result.matches.forEach((m) => {
             if (m.status === 'completed') {
@@ -260,7 +287,6 @@ export default function App() {
           isFirstFetchRef.current = false;
         }
 
-        // Detect score changes for audio chime alerts & Telegram alerts
         let scoreChanged = false;
         let wicketFell = false;
 
@@ -273,7 +299,6 @@ export default function App() {
                 if (activeScore.wickets > prev.wickets) {
                   wicketFell = true;
 
-                  // Telegram Wicket Alert
                   if (
                     telegramConfig.enabled &&
                     telegramConfig.botToken &&
@@ -301,7 +326,6 @@ export default function App() {
             }
           }
 
-          // Telegram Match Result Alert (Database Verified & Deduplicated)
           if (
             m.status === 'completed' &&
             telegramConfig.enabled &&
@@ -311,7 +335,6 @@ export default function App() {
             !finishedMatchesRef.current.has(m.id)
           ) {
             finishedMatchesRef.current.add(m.id);
-            // Verify in Supabase DB before dispatching to eliminate multi-tab/refresh duplicates
             checkAndRecordMatchConclusionInDb(m.id, {
               team1: m.team1.name,
               team2: m.team2.name,
@@ -326,7 +349,6 @@ export default function App() {
           }
         });
 
-        // Telegram Periodic Scoreboard Digest
         if (
           telegramConfig.enabled &&
           telegramConfig.botToken &&
@@ -347,7 +369,6 @@ export default function App() {
           }
         }
 
-        // Strictly filter to WBBL 2026 and Abu Dhabi T10 2026 matches only for dashboard grid
         const allParsed = Object.entries(result.raw || {})
           .filter(([_, m]) => m && typeof m === 'object' && m.b && m.c)
           .map(([id, m]) => transformCrexMatch(id, m));
@@ -367,7 +388,7 @@ export default function App() {
     [countryCode, soundEnabled, telegramConfig]
   );
 
-  // Real-time Entry Opportunities Count for Navbar Radar Badge (control-only odds)
+  // Real-time Entry Opportunities Count for Radar Badge
   const entryOpportunitiesCount = useMemo(() => {
     let count = 0;
     const liveMatches = matches.filter(
@@ -384,13 +405,11 @@ export default function App() {
 
       if (currentPaise === null) continue;
 
-      // First entry eligible state: BATTING control >= 85 paise inside window
       if (inWindow && controlInfo.teamInControl === 'BATTING' && currentPaise >= 85) {
         count++;
         continue;
       }
 
-      // Second entry criteria: STRICT REQUIREMENT: MUST HAVE 1ST ENTRY & BOWLING < 65 paise (allowed after window)
       const hasFirst = recordedFirstEntries.has(m.id);
       if (hasFirst && controlInfo.teamInControl === 'BOWLING' && currentPaise < 65) {
         count++;
@@ -399,31 +418,30 @@ export default function App() {
     return count;
   }, [matches, oddsByMatchId, recordedFirstEntries, strategyVersion]);
 
-  // Initial load: Migrate local data, populate from PostgreSQL, then fetch fresh feed
   useEffect(() => {
-    // 1. Migrate any existing local data
     migrateLocalStorageToSupabase().catch(() => {});
 
-    // 2. Hydrate matches from PostgreSQL if available
-    fetchMatchesFromSupabase().then((savedMatches) => {
-      if (savedMatches.length > 0) {
-        setMatches((prev) => (prev.length === 0 ? savedMatches : prev));
-        setAllServerMatches((prev) => (prev.length === 0 ? savedMatches : prev));
-      }
-    }).catch(() => {});
+    fetchMatchesFromSupabase()
+      .then((savedMatches) => {
+        if (savedMatches.length > 0) {
+          setMatches((prev) => (prev.length === 0 ? savedMatches : prev));
+          setAllServerMatches((prev) => (prev.length === 0 ? savedMatches : prev));
+        }
+      })
+      .catch(() => {});
 
-    // 3. Hydrate strategy recorded 1st entries from PostgreSQL
-    fetchRecordedFirstEntriesFromDb().then((entries) => {
-      if (entries.size > 0) {
-        setRecordedFirstEntries((prev) => new Set([...prev, ...entries]));
-      }
-    }).catch(() => {});
+    fetchRecordedFirstEntriesFromDb()
+      .then((entries) => {
+        if (entries.size > 0) {
+          setRecordedFirstEntries((prev) => new Set([...prev, ...entries]));
+        }
+      })
+      .catch(() => {});
 
-    // 4. Initiate baseline load
     loadMatches(false);
   }, [loadMatches]);
 
-  // Authoritative SSE Stream from server.ts (browser stays read-only & synced across all devices)
+  // Authoritative SSE Stream from server.ts
   useEffect(() => {
     if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
 
@@ -469,7 +487,7 @@ export default function App() {
           applyServerStrategyStates(payload.strategyStates);
         }
       } catch {
-        // Ignore malformed heartbeat/SSE chunks
+        // Ignore malformed SSE chunks
       }
     };
 
@@ -482,13 +500,11 @@ export default function App() {
     };
   }, [applyServerStrategyStates]);
 
-  // Active 1-Second Fallback Engine (runs polling only when SSE isn't streaming or custom CC selected)
+  // Active 1-Second Fallback Engine
   useEffect(() => {
     if (autoRefreshInterval <= 0) return;
 
     let countdown = autoRefreshInterval;
-    setSecondsRemaining(countdown);
-
     const timer = setInterval(() => {
       countdown -= 1;
       if (countdown <= 0) {
@@ -497,7 +513,6 @@ export default function App() {
           loadMatches(true);
         }
       }
-      setSecondsRemaining(countdown);
     }, 1000);
 
     return () => clearInterval(timer);
@@ -528,260 +543,24 @@ export default function App() {
 
   const liveMatchesCount = matches.filter((m) => m.status === 'live').length;
 
-  // Dedicated Match Analysis View (Phase 5)
-  if (activeAnalysisMatchId) {
-    const analysisMatch =
-      matches.find((m) => m.id === activeAnalysisMatchId) ||
-      allServerMatches.find((m) => m.id === activeAnalysisMatchId);
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-        <MatchAnalysisPage
-          matchId={activeAnalysisMatchId}
-          match={analysisMatch}
-          oddsState={getMatchOdds(activeAnalysisMatchId)}
-          allMatches={matches.length > 0 ? matches : allServerMatches}
-          strategyVersion={strategyVersion}
-          onStrategyStateSync={(snap) => applyServerStrategyStates({ [activeAnalysisMatchId]: snap })}
-          onBack={navigateToDashboard}
-          onSelectMatch={navigateToAnalysis}
-          onRefreshOdds={refreshMatchOdds}
-        />
+  const openTelegramModal = useCallback((section: 'credentials' | 'alerts') => {
+    setTelegramInitialSection(section);
+    setIsTelegramModalOpen(true);
+  }, []);
 
-        {/* Match Details Scorecard Modal if triggered */}
-        <MatchDetailModal
-          match={selectedMatch}
-          onClose={() => setSelectedMatch(null)}
-        />
-
-        {/* Standalone Online Script Generator Modal */}
-        <OnlineScriptModal
-          isOpen={isScriptModalOpen}
-          onClose={() => setIsScriptModalOpen(false)}
-          countryCode={countryCode}
-        />
-
-        {/* API Inspector & Payload Test Modal */}
-        <ApiInspectorModal
-          isOpen={isInspectorModalOpen}
-          onClose={() => setIsInspectorModalOpen(false)}
-          initialPayload={`{"cc":"${countryCode}"}`}
-          rawData={rawData}
-          onPayloadSend={async (newCc) => {
-            setCountryCode(newCc);
-            await loadMatches(false, newCc);
-          }}
-          isFetching={isFetching}
-          latencyMs={latencyMs}
-        />
-
-        {/* Telegram Bot Manager & Broadcaster Modal */}
-        <TelegramBotModal
-          isOpen={isTelegramModalOpen}
-          onClose={() => setIsTelegramModalOpen(false)}
-          config={telegramConfig}
-          onSaveConfig={(newConfig) => {
-            setTelegramConfig(newConfig);
-            saveStoredTelegramConfig(newConfig);
-          }}
-          matches={matches}
-        />
-
-        {/* Dev-Only Odds Diagnostic Modal */}
-        <OddsDiagnosticModal
-          isOpen={isOddsDiagnosticOpen}
-          onClose={() => setIsOddsDiagnosticOpen(false)}
-          matches={matches}
-          oddsByMatchId={oddsByMatchId}
-          onRefreshAll={refreshAllOdds}
-          onRefreshMatch={refreshMatchOdds}
-          isRefreshing={isGlobalRefreshing}
-          totalRecordsReceived={totalRecordsReceived}
-        />
-
-        {/* Live Entry Radar & Opportunities Modal */}
-        <EntryPossibilitiesModal
-          isOpen={isEntryRadarOpen}
-          onClose={() => setIsEntryRadarOpen(false)}
-          matches={matches}
-          oddsByMatchId={oddsByMatchId}
-          onSelectMatch={navigateToAnalysis}
-          recordedFirstEntries={recordedFirstEntries}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Top Navigation */}
-      <Navbar
-        countryCode={countryCode}
-        onCountryCodeChange={(code) => {
-          setCountryCode(code);
-          loadMatches(false, code);
-        }}
-        autoRefreshInterval={autoRefreshInterval}
-        onIntervalChange={(sec) => {
-          setAutoRefreshInterval(sec);
-        }}
-        secondsRemaining={secondsRemaining}
-        isFetching={isFetching}
-        onRefreshNow={() => loadMatches(false)}
-        soundEnabled={soundEnabled}
-        onToggleSound={() => setSoundEnabled(!soundEnabled)}
-        onOpenScriptModal={() => setIsScriptModalOpen(true)}
-        onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
-        onOpenTelegramModal={() => setIsTelegramModalOpen(true)}
-        onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
-        entryOpportunitiesCount={entryOpportunitiesCount}
-        isTelegramActive={telegramConfig.enabled && !!telegramConfig.botToken && !!telegramConfig.chatId}
-        lastUpdated={lastUpdated}
-        isSseActive={isSseConnected}
-      />
-
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Stats Metrics Cards */}
-        <StatsHeader
-          matches={matches}
-          latencyMs={latencyMs}
-          lastUpdated={lastUpdated}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-        />
-
-        {/* Filter & Search Bar */}
-        <FilterBar
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          selectedFormat={selectedFormat}
-          onFormatChange={setSelectedFormat}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          liveCount={liveMatchesCount}
-          totalCount={matches.length}
-        />
-
-        {/* Error Notification */}
-        {error && (
-          <div className="my-6 p-4 rounded-xl bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-              <span>{error}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => loadMatches(false)}
-              className="px-3 py-1 bg-rose-900/60 hover:bg-rose-800 text-rose-100 rounded-lg text-xs font-medium transition-colors"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {/* Matches Grid */}
-        <section className="mt-6">
-          {isFetching && matches.length === 0 ? (
-            <div className="py-20 flex flex-col items-center justify-center text-center">
-              <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin mb-3" />
-              <p className="text-sm font-semibold text-slate-300">
-                Fetching live cricket data from Crex API...
-              </p>
-              <p className="text-xs text-slate-500 mt-1">
-                Connecting to https://api.goscorer.com/api/v2/getTopMatches
-              </p>
-            </div>
-          ) : filteredMatches.length === 0 ? (
-            <div className="py-20 flex flex-col items-center justify-center text-center border border-dashed border-slate-800 rounded-2xl p-8">
-              <div className="w-12 h-12 rounded-2xl bg-slate-900 flex items-center justify-center text-slate-500 mb-3">
-                <Info className="w-6 h-6" />
-              </div>
-              <h3 className="text-sm font-bold text-slate-300">No matches found</h3>
-              <p className="text-xs text-slate-500 mt-1 max-w-sm">
-                No matches match your current filter ({activeTab}, {selectedFormat}) or search query.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('all');
-                  setSelectedFormat('All');
-                  setSearchQuery('');
-                }}
-                className="mt-4 px-4 py-2 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-              >
-                Reset Filters
-              </button>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {filteredMatches.map((m) => (
-                <MatchCard
-                  key={m.id}
-                  match={m}
-                  oddsState={getMatchOdds(m.id)}
-                  onSelect={(match) => navigateToAnalysis(match.id)}
-                  onInspect={(match) => {
-                    setSelectedMatch(match);
-                  }}
-                />
-              ))}
-            </div>
-          )}
-        </section>
-      </main>
-
-      {/* Footer */}
-      <footer className="border-t border-slate-900 bg-slate-950 py-6 text-center text-xs text-slate-500">
-        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span>Crex Live Cricket Scorer</span>
-            <span>·</span>
-            <span>Real-time updates every 1 second</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <a
-              href="https://t.me/my_cricket_tracker_bot"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1 font-semibold"
-            >
-              <Send className="w-3 h-3 -rotate-12" />
-              <span>@my_cricket_tracker_bot</span>
-            </a>
-            <span>·</span>
-            <button
-              type="button"
-              onClick={() => setIsTelegramModalOpen(true)}
-              className="hover:text-slate-300 transition-colors"
-            >
-              Telegram Settings
-            </button>
-            <span>·</span>
-            <button
-              type="button"
-              onClick={() => setIsInspectorModalOpen(true)}
-              className="hover:text-slate-300 transition-colors"
-            >
-              API Raw Inspector
-            </button>
-          </div>
-        </div>
-      </footer>
-
-      {/* Match Details Scorecard Modal */}
+  const sharedModals = (
+    <>
       <MatchDetailModal
         match={selectedMatch}
         onClose={() => setSelectedMatch(null)}
       />
 
-      {/* Standalone Online Script Generator Modal */}
       <OnlineScriptModal
         isOpen={isScriptModalOpen}
         onClose={() => setIsScriptModalOpen(false)}
         countryCode={countryCode}
       />
 
-      {/* API Inspector & Payload Test Modal */}
       <ApiInspectorModal
         isOpen={isInspectorModalOpen}
         onClose={() => setIsInspectorModalOpen(false)}
@@ -795,7 +574,6 @@ export default function App() {
         latencyMs={latencyMs}
       />
 
-      {/* Telegram Bot Manager & Broadcaster Modal */}
       <TelegramBotModal
         isOpen={isTelegramModalOpen}
         onClose={() => setIsTelegramModalOpen(false)}
@@ -805,9 +583,9 @@ export default function App() {
           saveStoredTelegramConfig(newConfig);
         }}
         matches={matches}
+        initialSection={telegramInitialSection}
       />
 
-      {/* Dev-Only Odds Diagnostic Modal (Phase 4 Verification) */}
       <OddsDiagnosticModal
         isOpen={isOddsDiagnosticOpen}
         onClose={() => setIsOddsDiagnosticOpen(false)}
@@ -819,7 +597,6 @@ export default function App() {
         totalRecordsReceived={totalRecordsReceived}
       />
 
-      {/* Live Entry Radar & Possibilities Modal */}
       <EntryPossibilitiesModal
         isOpen={isEntryRadarOpen}
         onClose={() => setIsEntryRadarOpen(false)}
@@ -828,6 +605,241 @@ export default function App() {
         onSelectMatch={navigateToAnalysis}
         recordedFirstEntries={recordedFirstEntries}
       />
+    </>
+  );
+
+  // Dedicated Match Analysis View
+  if (activeAnalysisMatchId) {
+    const analysisMatch =
+      matches.find((m) => m.id === activeAnalysisMatchId) ||
+      allServerMatches.find((m) => m.id === activeAnalysisMatchId);
+    return (
+      <div className="min-h-screen bg-[var(--bg)] text-[var(--tx)] flex flex-col">
+        <MatchAnalysisPage
+          matchId={activeAnalysisMatchId}
+          match={analysisMatch}
+          oddsState={getMatchOdds(activeAnalysisMatchId)}
+          allMatches={matches.length > 0 ? matches : allServerMatches}
+          strategyVersion={strategyVersion}
+          onStrategyStateSync={(snap) => applyServerStrategyStates({ [activeAnalysisMatchId]: snap })}
+          onBack={navigateToDashboard}
+          onSelectMatch={navigateToAnalysis}
+          onRefreshOdds={refreshMatchOdds}
+          theme={theme}
+          onThemeChange={handleThemeChange}
+        />
+        {sharedModals}
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--tx)] flex">
+      {/* Desktop Left Sidebar (>= 1024px) */}
+      <DesktopSidebar
+        activeNav={activeNav}
+        onSelectNav={setActiveNav}
+        sport={sport}
+        onSelectSport={setSport}
+        onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
+        onOpenAlertsModal={() => openTelegramModal('alerts')}
+        onOpenTelegramModal={() => openTelegramModal('credentials')}
+        onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
+        entryOpportunitiesCount={entryOpportunitiesCount}
+      />
+
+      {/* Tablet Compact Icon Rail (768px - 1023px) */}
+      <TabletRail
+        activeNav={activeNav}
+        onSelectNav={setActiveNav}
+        onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
+        onOpenAlertsModal={() => openTelegramModal('alerts')}
+        entryOpportunitiesCount={entryOpportunitiesCount}
+      />
+
+      {/* Main Content Column */}
+      <div className="flex-1 min-w-0 flex flex-col min-h-screen">
+        <main className="flex-1 w-full max-w-[1280px] mx-auto px-3.5 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-24 md:pb-8">
+          <TopHeaderBar
+            activeNav={activeNav}
+            onSelectNav={setActiveNav}
+            sport={sport}
+            onSelectSport={setSport}
+            theme={theme}
+            onThemeChange={handleThemeChange}
+            onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
+            onOpenAlertsModal={() => openTelegramModal('alerts')}
+            onOpenTelegramModal={() => openTelegramModal('credentials')}
+            onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
+            entryOpportunitiesCount={entryOpportunitiesCount}
+            liveCount={liveMatchesCount}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            selectedFormat={selectedFormat}
+            onFormatChange={setSelectedFormat}
+          />
+
+          {activeNav === 'settings' ? (
+            <SettingsView
+              theme={theme}
+              onThemeChange={handleThemeChange}
+              soundEnabled={soundEnabled}
+              onToggleSound={() => setSoundEnabled(!soundEnabled)}
+              countryCode={countryCode}
+              onCountryCodeChange={(code) => {
+                setCountryCode(code);
+                loadMatches(false, code);
+              }}
+              isFetching={isFetching}
+              onRefreshNow={() => loadMatches(false)}
+              isSseActive={isSseConnected}
+              latencyMs={latencyMs}
+              lastUpdated={lastUpdated}
+              isTelegramActive={telegramConfig.enabled && !!telegramConfig.botToken && !!telegramConfig.chatId}
+              onOpenTelegramModal={() => openTelegramModal('credentials')}
+              onOpenAlertsModal={() => openTelegramModal('alerts')}
+              onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
+              onOpenScriptModal={() => setIsScriptModalOpen(true)}
+              onOpenOddsDiagnosticModal={() => setIsOddsDiagnosticOpen(true)}
+            />
+          ) : (
+            <>
+              <StatsHeader
+                matches={matches}
+                latencyMs={latencyMs}
+                lastUpdated={lastUpdated}
+                activeTab={activeTab}
+                onTabChange={setActiveTab}
+              />
+
+              <FilterBar
+                activeTab={activeTab}
+                onTabChange={setActiveTab}
+                selectedFormat={selectedFormat}
+                onFormatChange={setSelectedFormat}
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                liveCount={liveMatchesCount}
+                totalCount={matches.length}
+              />
+
+              {error && (
+                <div className="my-4 p-3.5 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/35 text-[var(--rdt)] text-xs flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => loadMatches(false)}
+                    className="px-3 py-1 bg-[var(--rd)] text-white rounded-lg text-xs font-semibold transition-opacity hover:opacity-90 shrink-0"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+
+              <section className="mt-4">
+                {isFetching && matches.length === 0 ? (
+                  <div className="py-20 flex flex-col items-center justify-center text-center">
+                    <RefreshCw className="w-7 h-7 text-[var(--rdt)] animate-spin mb-3" />
+                    <p className="text-sm font-semibold text-[var(--tx)]">
+                      Fetching live cricket data from Crex API...
+                    </p>
+                    <p className="text-xs text-[var(--mu)] mt-1">
+                      Connecting to live match feed
+                    </p>
+                  </div>
+                ) : filteredMatches.length === 0 ? (
+                  <div className="py-16 flex flex-col items-center justify-center text-center border border-dashed border-[var(--bd)] bg-[var(--sf)] rounded-2xl p-8">
+                    <div className="w-11 h-11 rounded-2xl bg-[var(--sf-2)] flex items-center justify-center text-[var(--mu)] mb-3">
+                      <Info className="w-5 h-5" />
+                    </div>
+                    <h3 className="text-sm font-bold text-[var(--tx)]">No matches found</h3>
+                    <p className="text-xs text-[var(--mu)] mt-1 max-w-sm">
+                      No matches match your current filter ({activeTab}, {selectedFormat}) or search query.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('all');
+                        setSelectedFormat('All');
+                        setSearchQuery('');
+                      }}
+                      className="mt-4 px-4 py-2 text-xs font-semibold text-white bg-[var(--rd)] hover:opacity-90 rounded-xl transition-opacity"
+                    >
+                      Reset Filters
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {filteredMatches.map((m) => (
+                      <MatchCard
+                        key={m.id}
+                        match={m}
+                        oddsState={getMatchOdds(m.id)}
+                        onSelect={(match) => navigateToAnalysis(match.id)}
+                        onInspect={(match) => {
+                          setSelectedMatch(match);
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </main>
+
+        {/* Subtle Desktop/Tablet Footer */}
+        <footer className="hidden md:block border-t border-[var(--bd)] bg-[var(--sf)] py-4 text-xs text-[var(--mu)]">
+          <div className="max-w-[1280px] mx-auto px-6 lg:px-8 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-[var(--tx)]">Crex Live Cricket Scorer</span>
+              <span>·</span>
+              <span>Real-time updates every 1 second</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <a
+                href="https://t.me/my_cricket_tracker_bot"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[var(--blut)] hover:underline flex items-center gap-1 font-semibold"
+              >
+                <Send className="w-3 h-3 -rotate-12" />
+                <span>@my_cricket_tracker_bot</span>
+              </a>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={() => openTelegramModal('credentials')}
+                className="hover:text-[var(--tx)] transition-colors"
+              >
+                Telegram Settings
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={() => setIsInspectorModalOpen(true)}
+                className="hover:text-[var(--tx)] transition-colors"
+              >
+                API Raw Inspector
+              </button>
+            </div>
+          </div>
+        </footer>
+      </div>
+
+      {/* Mobile Bottom Navigation (< 768px) */}
+      <MobileBottomNav
+        activeNav={activeNav}
+        onSelectNav={setActiveNav}
+        onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
+        onOpenAlertsModal={() => openTelegramModal('alerts')}
+        entryOpportunitiesCount={entryOpportunitiesCount}
+      />
+
+      {sharedModals}
     </div>
   );
 }

@@ -1,11 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   X,
   Target,
   Clock,
   ShieldAlert,
   ArrowRight,
-  TrendingUp,
   Layers,
   Sparkles,
   HelpCircle,
@@ -77,7 +76,15 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
 }) => {
   const [filterMode, setFilterMode] = useState<'all' | 'opportunities' | 'monitoring'>('all');
 
-  // Compute live entry radar analysis across all matches (strictly control & control_team_odds)
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [isOpen, onClose]);
+
   const { opportunities, radarWatchlist } = useMemo(() => {
     const oppList: EntryOpportunity[] = [];
     const watchList: MatchRadarStatus[] = [];
@@ -121,7 +128,6 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
 
       const bookingTeamDisplay = engineState.bookingTeamName || controlInfo.battingTeamName;
 
-      // 1. Evaluate First Entry: booking/entry confirmed inside window with BATTING >= 85 paise
       const firstEntryQualified =
         !isDisqualifiedByWickets &&
         inWindow &&
@@ -131,7 +137,6 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
         controlTeamOdds !== null &&
         controlTeamOdds >= 85;
 
-      // 2. Evaluate Second Entry: strictly after active 1st entry, confirmed wicket, BOWLING < 65 paise (works after window)
       let secondEntryQualified = false;
       let secondEntryLockedReason: string | undefined;
 
@@ -204,21 +209,21 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       let statusSummary = '';
 
       if (isDisqualifiedByWickets || engineState.stage === 'DISQUALIFIED_3_WICKETS') {
-        statusSummary = `⚠️ Skipped: ${wickets} wickets before entry (>= 3 limit)`;
+        statusSummary = `Skipped: ${wickets} wickets before entry (>= 3 limit)`;
       } else if (engineState.stage === 'ACTIVE_SECOND_ENTRY') {
-        statusSummary = `🛡️ 1st & 2nd Entries Active on ${bookingTeamDisplay} (Bookset: BOWLING > 85p)`;
+        statusSummary = `1st & 2nd Entries Active on ${bookingTeamDisplay} (Bookset: BOWLING > 85p)`;
       } else if (hasFirstEntryRecorded || engineState.stage === 'ACTIVE_FIRST_ENTRY') {
-        statusSummary = `🛡️ 1st Entry Active on ${bookingTeamDisplay} (Exit: BATTING <= 55p pre-wkt | Bookset: BOWLING > 85p)`;
+        statusSummary = `1st Entry Active on ${bookingTeamDisplay} (Exit: BATTING <= 55p pre-wkt | Bookset: BOWLING > 85p)`;
       } else if (engineState.stage === 'CONFIRMED_PENDING_85') {
-        statusSummary = `⏳ Entry Confirmed (${bookingTeamDisplay}): Waiting for first later ball with BATTING >= 85p`;
+        statusSummary = `Entry Confirmed (${bookingTeamDisplay}): Waiting for first later ball with BATTING >= 85p`;
       } else if (engineState.stage === 'CONFIRMED_BOOKING_TEAM') {
-        statusSummary = `🎯 Booking Confirmed: ${bookingTeamDisplay} (Waiting for next 4/6 entry confirmation)`;
+        statusSummary = `Booking Confirmed: ${bookingTeamDisplay} (Waiting for next 4/6 entry confirmation)`;
       } else if (engineState.stage === 'WAITING_FOR_CONFIRMATION') {
-        statusSummary = `⏳ Waiting for Booking Team: ${controlInfo.battingTeamName} needs BATTING >= 85p + 4 (>= 11p) or 6 (>= 18p)`;
+        statusSummary = `Waiting for Booking Team: ${controlInfo.battingTeamName} needs BATTING >= 85p + 4 (>= 11p) or 6 (>= 18p)`;
       } else if (firstEntryQualified) {
-        statusSummary = '🎯 1st Entry Ready NOW';
+        statusSummary = '1st Entry Ready NOW';
       } else if (secondEntryQualified) {
-        statusSummary = '🚀 2nd Entry Ready NOW';
+        statusSummary = '2nd Entry Ready NOW';
       } else if (!inWindow) {
         statusSummary = `Window passed (${currentOver} ov >= ${windowLimitOver} ov limit)`;
       } else if (controlTeamOdds !== null) {
@@ -259,63 +264,67 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       : radarWatchlist;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 backdrop-blur-md"
+      style={{ backgroundColor: 'var(--overlay)' }}
+      onClick={onClose}
+    >
       <div
-        className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-slate-100"
+        className="bg-[var(--sf)] border border-[var(--bd)] rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-[var(--tx)]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="entry-radar-title"
+        onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/90 sticky top-0 z-10">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <Target className="w-5 h-5 animate-pulse" />
+        <div className="px-5 sm:px-6 py-4 border-b border-[var(--bd)] flex items-center justify-between bg-[var(--sf)] sticky top-0 z-10">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/30 flex items-center justify-center text-[var(--rdt)] shrink-0">
+              <Target className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 id="entry-radar-title" className="text-lg font-bold tracking-tight text-white">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 id="entry-radar-title" className="text-base sm:text-lg font-bold tracking-tight text-[var(--tx)]">
                   Entry Radar & Opportunities
                 </h2>
                 {opportunities.length > 0 ? (
-                  <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)] flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--ok-tx)] animate-ping" />
                     {opportunities.length} Opportunity Active
                   </span>
                 ) : (
-                  <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
+                  <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-[var(--sf-2)] text-[var(--mu)] border border-[var(--bd)]">
                     Scanning {radarWatchlist.length} Matches
                   </span>
                 )}
               </div>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-[var(--mu)] truncate">
                 Ball 0.0 to match end surveillance · Strict rule: 2nd entry never fires without prior 1st entry
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
-              title="Close"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-2 text-[var(--mu)] hover:text-[var(--tx)] hover:bg-[var(--sf-2)] rounded-lg transition-colors shrink-0"
+            title="Close"
+            aria-label="Close Entry Radar"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Filter Bar */}
-        <div className="px-6 py-2.5 bg-slate-900/60 border-b border-slate-800 flex items-center justify-between text-xs">
-          <div className="flex items-center gap-1.5">
+        <div className="px-5 sm:px-6 py-2.5 bg-[var(--sf-2)] border-b border-[var(--bd)] flex items-center justify-between gap-2 text-xs overflow-x-auto no-scrollbar">
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
               onClick={() => setFilterMode('all')}
-              className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap ${
                 filterMode === 'all'
-                  ? 'bg-slate-800 text-white border border-slate-700'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--rd)] text-white'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)] bg-[var(--sf)] border border-[var(--bd)]'
               }`}
             >
               All Matches ({radarWatchlist.length})
@@ -323,42 +332,41 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
             <button
               type="button"
               onClick={() => setFilterMode('opportunities')}
-              className={`px-3 py-1.5 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                 filterMode === 'opportunities'
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)] bg-[var(--sf)] border border-[var(--bd)]'
               }`}
             >
-              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+              <Sparkles className="w-3.5 h-3.5" />
               Ready Entries ({opportunities.length})
             </button>
             <button
               type="button"
               onClick={() => setFilterMode('monitoring')}
-              className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap ${
                 filterMode === 'monitoring'
-                  ? 'bg-slate-800 text-white border border-slate-700'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-[var(--rd)] text-white'
+                  : 'text-[var(--mu)] hover:text-[var(--tx)] bg-[var(--sf)] border border-[var(--bd)]'
               }`}
             >
-              Waiting for Entry ({radarWatchlist.filter((m) => !m.firstEntryQualified && !m.secondEntryQualified).length})
+              Waiting ({radarWatchlist.filter((m) => !m.firstEntryQualified && !m.secondEntryQualified).length})
             </button>
           </div>
 
-          <div className="hidden sm:flex items-center gap-2 text-slate-400">
-            <Activity className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
+          <div className="hidden sm:flex items-center gap-2 text-[var(--mu)] shrink-0">
+            <Activity className="w-3.5 h-3.5 text-[var(--ok-tx)] animate-spin" />
             <span>Updated Every Second</span>
           </div>
         </div>
 
         {/* Scrollable Content Body */}
-        <div className="p-6 overflow-y-auto space-y-6 flex-1">
-          {/* Active Opportunities Section (if any) */}
+        <div className="p-5 sm:p-6 overflow-y-auto space-y-6 flex-1">
           {opportunities.length > 0 && (
             <div>
               <div className="flex items-center gap-2 mb-3">
-                <Sparkles className="w-4 h-4 text-emerald-400" />
-                <h3 className="text-sm font-semibold text-white tracking-wide uppercase">
+                <Sparkles className="w-4 h-4 text-[var(--ok-tx)]" />
+                <h3 className="text-sm font-semibold text-[var(--tx)] tracking-wide uppercase">
                   Actionable Entry Opportunities ({opportunities.length})
                 </h3>
               </div>
@@ -369,67 +377,65 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                     key={`${opp.matchId}-${opp.type}-${idx}`}
                     className={`p-4 rounded-xl border transition-all ${
                       opp.type === 'FIRST_ENTRY'
-                        ? 'bg-emerald-950/30 border-emerald-500/40 hover:border-emerald-500/70'
-                        : 'bg-indigo-950/30 border-indigo-500/40 hover:border-indigo-500/70'
+                        ? 'bg-[var(--ok-bg)] border-[var(--ok-bd)]'
+                        : 'bg-[var(--blu)] border-[var(--info-bd)]'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <span
-                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-bold ${
+                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-bold border ${
                           opp.type === 'FIRST_ENTRY'
-                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                            : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
+                            ? 'bg-[var(--sf)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
+                            : 'bg-[var(--sf)] text-[var(--blut)] border-[var(--info-bd)]'
                         }`}
                       >
                         <Target className="w-3 h-3" />
                         {opp.type === 'FIRST_ENTRY' ? '1ST ENTRY QUALIFIED' : '2ND ENTRY QUALIFIED'}
                       </span>
-                      <span className="text-[11px] font-mono text-slate-400">
+                      <span className="text-[11px] font-mono text-[var(--mu)] tabular-nums">
                         Inn {opp.currentInnings} · Over {opp.currentOver}
                       </span>
                     </div>
 
-                    <h4 className="font-bold text-white text-base">
+                    <h4 className="font-bold text-[var(--tx)] text-base">
                       {opp.match.team1.shortName} vs {opp.match.team2.shortName}
                     </h4>
-                    <p className="text-xs text-slate-400 mb-3 truncate">
+                    <p className="text-xs text-[var(--mu)] mb-3 truncate">
                       {opp.match.seriesName || opp.match.format} · {opp.match.venueName || 'Live'}
                     </p>
 
-                    <div className="grid grid-cols-2 gap-2 bg-slate-900/80 rounded-lg p-2.5 mb-3 text-xs">
+                    <div className="grid grid-cols-2 gap-2 bg-[var(--sf)] border border-[var(--bd)] rounded-lg p-2.5 mb-3 text-xs">
                       <div>
-                        <div className="text-slate-400 text-[10px]">Active Odds</div>
-                        <div className="font-mono font-bold text-emerald-400 text-sm">
+                        <div className="text-[var(--mu)] text-[10px]">Active Odds</div>
+                        <div className="font-mono font-bold text-[var(--ok-tx)] text-sm tabular-nums">
                           {opp.decimalOdds.toFixed(2)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-slate-400 text-[10px]">
+                        <div className="text-[var(--mu)] text-[10px]">
                           {opp.type === 'FIRST_ENTRY' ? 'Entry Condition' : 'Control Trigger'}
                         </div>
-                        <div className="font-mono font-bold text-slate-200 text-sm">
+                        <div className="font-mono font-bold text-[var(--tx)] text-sm tabular-nums">
                           {opp.type === 'FIRST_ENTRY'
                             ? `BATTING >= 85p (${opp.controlTeamOdds}p)`
                             : `BOWLING < 65p (${opp.controlTeamOdds}p)`}
                         </div>
                       </div>
                       <div>
-                        <div className="text-slate-400 text-[10px]">Current Score</div>
-                        <div className="font-mono font-semibold text-slate-200">
+                        <div className="text-[var(--mu)] text-[10px]">Current Score</div>
+                        <div className="font-mono font-semibold text-[var(--tx)] tabular-nums">
                           {opp.runs}/{opp.wickets} ({opp.currentOver} ov)
                         </div>
                       </div>
                       <div>
-                        <div className="text-slate-400 text-[10px]">Bookset Target</div>
-                        <div className="font-mono font-semibold text-amber-300">
+                        <div className="text-[var(--mu)] text-[10px]">Bookset Target</div>
+                        <div className="font-mono font-semibold text-[var(--warn-tx)]">
                           {opp.booksetTarget}
                         </div>
                       </div>
                     </div>
 
-                    <p className="text-xs text-slate-300 mb-3">
-                      {opp.explanation}
-                    </p>
+                    <p className="text-xs text-[var(--tx)] mb-3">{opp.explanation}</p>
 
                     <button
                       type="button"
@@ -437,7 +443,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                         onSelectMatch(opp.matchId);
                         onClose();
                       }}
-                      className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors shadow-sm"
+                      className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-[var(--rd)] hover:opacity-90 text-white rounded-xl text-xs font-semibold transition-opacity"
                     >
                       <span>Open Match Analysis</span>
                       <ArrowRight className="w-3.5 h-3.5" />
@@ -448,33 +454,27 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
             </div>
           )}
 
-          {/* Prominent "Wait for the entry" Section when no active opportunities exist */}
           {opportunities.length === 0 && (
-            <div className="bg-gradient-to-br from-slate-800/80 via-slate-900/90 to-slate-950 p-6 rounded-2xl border border-slate-700/60 text-center relative overflow-hidden shadow-lg">
-              <div className="absolute top-0 right-0 p-8 opacity-5">
-                <Target className="w-48 h-48" />
+            <div className="bg-[var(--sf-2)] p-6 rounded-2xl border border-[var(--bd)] text-center relative overflow-hidden">
+              <div className="w-12 h-12 rounded-2xl bg-[var(--warn-bg)] border border-[var(--warn-bd)] flex items-center justify-center text-[var(--warn-tx)] mx-auto mb-3">
+                <Clock className="w-6 h-6" />
               </div>
 
-              <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mx-auto mb-3 shadow-inner">
-                <Clock className="w-7 h-7 animate-pulse" />
-              </div>
-
-              <h3 className="text-xl font-bold text-white mb-1">
+              <h3 className="text-lg font-bold text-[var(--tx)] mb-1">
                 Wait for the entry
               </h3>
-              <p className="text-sm text-slate-300 max-w-lg mx-auto mb-5">
-                No match currently meets the exact entry criteria. The radar is actively scanning every ball from 0.0 overs to match end. As soon as an opportunity qualifies, it will appear here immediately and ping the Telegram group.
+              <p className="text-xs sm:text-sm text-[var(--mu)] max-w-lg mx-auto mb-5">
+                No match currently meets the exact entry criteria. The radar is actively scanning every ball from 0.0 overs to match end.
               </p>
 
-              {/* Exact Strategy Discipline Rules */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl mx-auto text-left">
-                <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
-                  <div className="flex items-center gap-1.5 text-emerald-400 font-semibold text-xs mb-1">
+                <div className="p-3 rounded-xl bg-[var(--sf)] border border-[var(--bd)]">
+                  <div className="flex items-center gap-1.5 text-[var(--ok-tx)] font-semibold text-xs mb-1">
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     <span>Booking Team &amp; 1st Entry</span>
                   </div>
-                  <ul className="text-[11px] text-slate-400 space-y-1">
-                    <li>• Boundary: 4 with <strong className="text-slate-200">&ge; 11 paise</strong> | 6 with <strong className="text-slate-200">&ge; 18 paise</strong></li>
+                  <ul className="text-[11px] text-[var(--mu)] space-y-1">
+                    <li>• Boundary: 4 with <strong className="text-[var(--tx)]">&ge; 11 paise</strong> | 6 with <strong className="text-[var(--tx)]">&ge; 18 paise</strong></li>
                     <li>• Switch Formula: (100 - bowl_before) + (100 - bat_after)</li>
                     <li>• Wicket Filter: &lt; 3 wickets before entry (&ge; 3 skips match)</li>
                     <li>• Over Window: 1st Innings &lt; 10.0 ov | 2nd Innings &lt; 6.0 ov</li>
@@ -482,14 +482,14 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                   </ul>
                 </div>
 
-                <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
-                  <div className="flex items-center gap-1.5 text-indigo-400 font-semibold text-xs mb-1">
+                <div className="p-3 rounded-xl bg-[var(--sf)] border border-[var(--bd)]">
+                  <div className="flex items-center gap-1.5 text-[var(--blut)] font-semibold text-xs mb-1">
                     <Lock className="w-3.5 h-3.5" />
                     <span>Exits &amp; Second Entry</span>
                   </div>
-                  <ul className="text-[11px] text-slate-400 space-y-1">
-                    <li>• <strong className="text-amber-300">Early Exit (&le; 55p):</strong> No wicket since 1st entry + BATTING &le; 55p</li>
-                    <li>• <strong className="text-amber-300">Second Entry:</strong> Wicket after 1st entry + BOWLING &lt; 65p (any over)</li>
+                  <ul className="text-[11px] text-[var(--mu)] space-y-1">
+                    <li>• <strong className="text-[var(--warn-tx)]">Early Exit (&le; 55p):</strong> No wicket since 1st entry + BATTING &le; 55p</li>
+                    <li>• <strong className="text-[var(--warn-tx)]">Second Entry:</strong> Wicket after 1st entry + BOWLING &lt; 65p (any over)</li>
                     <li>• Bookset for BOTH entries: BOWLING control &amp; odds &gt; 85 paise</li>
                     <li>• Held State: Once entry fires, server locks it in PostgreSQL</li>
                   </ul>
@@ -502,19 +502,19 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
           <div>
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-slate-400" />
-                <h3 className="text-sm font-semibold text-white tracking-wide uppercase">
+                <Layers className="w-4 h-4 text-[var(--mu)]" />
+                <h3 className="text-sm font-semibold text-[var(--tx)] tracking-wide uppercase">
                   Live Match Surveillance Feed ({displayList.length})
                 </h3>
               </div>
-              <span className="text-[11px] text-slate-400">
+              <span className="text-[11px] text-[var(--mu)] hidden sm:inline">
                 Monitored from ball 0.0 to match end
               </span>
             </div>
 
             {displayList.length === 0 ? (
-              <div className="p-8 text-center text-slate-500 bg-slate-900/50 rounded-xl border border-slate-800">
-                <HelpCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
+              <div className="p-8 text-center text-[var(--mu)] bg-[var(--sf-2)] rounded-xl border border-[var(--bd)]">
+                <HelpCircle className="w-8 h-8 mx-auto mb-2 opacity-60" />
                 <p className="text-xs">No active matches match the selected filter.</p>
               </div>
             ) : (
@@ -532,59 +532,57 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                   return (
                     <div
                       key={item.matchId}
-                      className="p-3.5 rounded-xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      className="p-3.5 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                     >
-                      {/* Match & Scores */}
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-bold text-white text-sm">
+                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                          <span className="font-bold text-[var(--tx)] text-sm">
                             {t1.shortName} vs {t2.shortName}
                           </span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 font-medium">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sf)] border border-[var(--bd)] text-[var(--mu)] font-medium">
                             {item.match.format}
                           </span>
                           {item.firstEntryQualified && (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
                               1ST ENTRY READY
                             </span>
                           )}
                           {item.secondEntryQualified && (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[var(--blu)] text-[var(--blut)] border border-[var(--info-bd)]">
                               2ND ENTRY READY
                             </span>
                           )}
                         </div>
 
-                        <div className="text-xs text-slate-300 flex items-center gap-3">
+                        <div className="text-xs text-[var(--tx)] flex items-center gap-3 flex-wrap tabular-nums">
                           <span>
                             <strong>{t1.shortName}:</strong> {score1}
                           </span>
-                          <span>•</span>
+                          <span className="text-[var(--mu)]">•</span>
                           <span>
                             <strong>{t2.shortName}:</strong> {score2}
                           </span>
                         </div>
 
-                        <div className="text-[11px] text-slate-400 mt-1 flex items-center gap-2">
-                          <span className="font-medium text-amber-400">
+                        <div className="text-[11px] text-[var(--mu)] mt-1 flex items-center gap-2 flex-wrap">
+                          <span className="font-medium text-[var(--warn-tx)]">
                             {item.statusSummary}
                           </span>
                           {item.secondEntryLockedReason && (
-                            <span className="text-slate-500 hidden md:inline">
+                            <span className="text-[var(--mu)] hidden md:inline">
                               · {item.secondEntryLockedReason}
                             </span>
                           )}
                         </div>
                       </div>
 
-                      {/* Odds & Proximity */}
-                      <div className="flex items-center gap-4 shrink-0 justify-between sm:justify-end border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-700/60">
-                        <div className="text-right">
-                          <div className="text-[10px] text-slate-400">Control &amp; Odds</div>
-                          <div className="font-mono font-bold text-base text-white">
+                      <div className="flex items-center gap-4 shrink-0 justify-between sm:justify-end border-t sm:border-t-0 pt-2 sm:pt-0 border-[var(--bd)]">
+                        <div className="text-right tabular-nums">
+                          <div className="text-[10px] text-[var(--mu)]">Control &amp; Odds</div>
+                          <div className="font-mono font-bold text-base text-[var(--tx)]">
                             {item.controlTeamOdds !== null ? `${item.controlTeamOdds}p` : '—'}
                           </div>
-                          <div className="text-[10px] font-mono text-slate-400">
+                          <div className="text-[10px] font-mono text-[var(--mu)]">
                             {item.control}
                           </div>
                         </div>
@@ -595,7 +593,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                             onSelectMatch(item.matchId);
                             onClose();
                           }}
-                          className="px-3 py-1.5 bg-slate-700 hover:bg-emerald-600 hover:text-white text-slate-200 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1"
+                          className="px-3 py-1.5 bg-[var(--sf)] hover:bg-[var(--rds)] border border-[var(--rd)]/40 text-[var(--rdt)] rounded-xl text-xs font-semibold transition-colors flex items-center gap-1"
                         >
                           <span>Analyze</span>
                           <ArrowRight className="w-3.5 h-3.5" />
@@ -610,23 +608,21 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
         </div>
 
         {/* Modal Footer */}
-        <div className="px-6 py-3 border-t border-slate-800 bg-slate-900/90 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 gap-2">
+        <div className="px-5 sm:px-6 py-3 border-t border-[var(--bd)] bg-[var(--sf)] flex flex-col sm:flex-row items-center justify-between text-xs text-[var(--mu)] gap-2">
           <div className="flex items-center gap-1.5">
-            <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+            <ShieldAlert className="w-3.5 h-3.5 text-[var(--warn-tx)] shrink-0" />
             <span>
               Engine locks 2nd entry automatically until a 1st entry is formally recorded.
             </span>
           </div>
 
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-medium transition-colors"
-            >
-              Close
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-1.5 bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] text-[var(--tx)] rounded-lg font-medium transition-colors"
+          >
+            Close
+          </button>
         </div>
       </div>
     </div>

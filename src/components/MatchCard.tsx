@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  MapPin,
   CheckCircle,
   Clock,
   ChevronRight,
@@ -119,9 +118,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
     navigator.clipboard.writeText(text);
   };
 
-  // Crex style live status text
   const getLiveEquation = () => {
-    // If team 2 is actively chasing, display runs needed in balls remaining (Crex style)
     if (isLive && match.target && team2Score && team2Score.totalBalls > 0) {
       const needed = Math.max(0, match.target - team2Score.runs);
       let maxOvers = 20;
@@ -154,49 +151,49 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
     }
 
     if (match.sessionText) return match.sessionText;
-    if (isLive) return 'Match in progress';
-    return isUpcoming ? `Starts ${formatStartTime(match.startTime)}` : '';
+    return '';
   };
+
+  const equation = getLiveEquation();
+  const headerLocation = match.matchTitlePrefix
+    ? `${match.format} · ${match.venueName}`
+    : `${match.format} · ${match.venueName || match.seriesName}`;
 
   return (
     <div
       onClick={() => onSelect(match)}
-      className={`group relative rounded-2xl border p-4 sm:p-5 transition-all duration-300 cursor-pointer flex flex-col justify-between ${
+      style={{ boxShadow: 'var(--card-shadow)' }}
+      className={`group relative rounded-2xl border p-4 transition-all duration-200 cursor-pointer flex flex-col justify-between bg-[var(--sf)] ${
         isScoreFlashing
-          ? 'ring-2 ring-emerald-400 bg-emerald-950/30 border-emerald-500 shadow-xl shadow-emerald-900/40 scale-[1.01]'
-          : isLive
-          ? 'bg-slate-900/95 border-slate-700/90 hover:border-emerald-500/50 hover:shadow-lg hover:shadow-emerald-950/20'
-          : 'bg-slate-900/50 border-slate-800/80 hover:border-slate-700 hover:bg-slate-900/80'
+          ? 'ring-2 ring-[var(--rd)] border-[var(--rd)]'
+          : 'border-[var(--bd)] hover:border-[var(--mu)]/60'
       }`}
     >
-      {/* Top Header: Match Number, Venue, Format & Live Badge */}
       <div>
-        <div className="flex items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-800/80 text-xs">
-          <div className="flex items-center gap-1.5 truncate text-slate-400">
-            <span className="font-semibold text-slate-300 truncate max-w-[200px] sm:max-w-[260px]">
-              {match.matchTitlePrefix ? `${match.matchTitlePrefix}, ${match.venueName}` : `${match.seriesName} · ${match.venueName}`}
-            </span>
-          </div>
+        {/* Top Header: Format · Venue & Status Pill */}
+        <div className="flex items-center justify-between gap-2 mb-3.5 text-[11px]">
+          <span className="text-[var(--mu)] font-medium truncate">
+            {headerLocation}
+          </span>
 
-          {/* Status Indicator */}
-          <div>
+          <div className="shrink-0">
             {isScoreFlashing ? (
-              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold tracking-wider animate-pulse">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                BALL UPDATE
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)] text-[10px] font-bold tracking-wider uppercase">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--ok-tx)] animate-ping" />
+                Update
               </span>
             ) : isLive ? (
-              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[11px] font-semibold uppercase tracking-wider">
-                <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-ping" />
-                Live
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[var(--rds)] text-[var(--rdt)] text-[10px] font-bold uppercase tracking-wider">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--rdt)]" />
+                LIVE
               </span>
             ) : isCompleted ? (
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--ok-bg)] text-[var(--ok-tx)] text-[10px] font-semibold">
                 <CheckCircle className="w-3 h-3" />
                 Finished
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-400">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--warn-bg)] text-[var(--warn-tx)] text-[10px] font-semibold">
                 <Clock className="w-3 h-3" />
                 {formatStartTime(match.startTime)}
               </span>
@@ -204,7 +201,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
           </div>
         </div>
 
-        {/* Teams & Scores (Crex style) */}
+        {/* Teams & Scores */}
         <div className="space-y-3">
           {/* Team 1 */}
           <div className="flex items-center justify-between gap-3">
@@ -213,54 +210,46 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
                 <img
                   src={match.team1.flagUrl}
                   alt={team1Short}
-                  className="w-6 h-6 rounded-full object-cover shrink-0 border border-slate-700 bg-slate-800 shadow-sm"
+                  className="w-8 h-8 rounded-full object-cover shrink-0 border border-[var(--bd)] bg-[var(--sf-2)]"
                   onError={(e) => {
                     (e.target as HTMLElement).style.display = 'none';
                   }}
                 />
               ) : (
-                <div
-                  className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 shadow-sm"
-                  style={{
-                    backgroundColor: team1Resolved.color || match.team1.color,
-                    color: team1Resolved.textColor || '#ffffff',
-                  }}
-                >
+                <div className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-[11px] shrink-0 bg-[var(--rds)] text-[var(--rdt)]">
                   {team1Short.slice(0, 2)}
                 </div>
               )}
-              <div className="truncate">
+              <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-bold text-slate-100 truncate">
+                  <span className="text-sm font-bold text-[var(--tx)] truncate">
                     {team1Short}
                   </span>
-                  <span className="text-xs text-slate-400 truncate hidden sm:inline">
-                    {team1Name}
-                  </span>
+                  {match.battingTeamKey === match.team1.key && isLive && (
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-[var(--rd)] shrink-0"
+                      title="Batting"
+                    />
+                  )}
+                </div>
+                <div className="text-[11px] text-[var(--mu)] truncate">
+                  {team1Name}
                 </div>
               </div>
             </div>
 
-            {/* Team 1 Score */}
-            <div className="text-right shrink-0 flex items-center gap-1.5">
+            <div className="text-right shrink-0">
               {team1Score ? (
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-base sm:text-lg font-bold font-mono-numbers text-white">
-                    {team1Score.wickets > 0
-                      ? `${team1Score.runs}-${team1Score.wickets}`
-                      : `${team1Score.runs}`}
-                  </span>
-                  <span className="text-xs text-slate-400 font-mono-numbers">
-                    {team1Score.overs}
-                  </span>
-                </div>
+                <>
+                  <div className="text-lg font-bold tabular-nums text-[var(--tx)] leading-tight">
+                    {team1Score.runs}/{team1Score.wickets}
+                  </div>
+                  <div className="text-[11px] text-[var(--mu)] tabular-nums leading-tight mt-0.5">
+                    {team1Score.overs} ov
+                  </div>
+                </>
               ) : (
-                <span className="text-xs text-slate-500 font-mono-numbers">Yet to bat</span>
-              )}
-              {match.battingTeamKey === match.team1.key && isLive && (
-                <span className="text-xs shrink-0 text-amber-400" title="Batting">
-                  🏏
-                </span>
+                <span className="text-xs text-[var(--mu)]">Yet to bat</span>
               )}
             </div>
           </div>
@@ -272,156 +261,136 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
                 <img
                   src={match.team2.flagUrl}
                   alt={team2Short}
-                  className="w-6 h-6 rounded-full object-cover shrink-0 border border-slate-700 bg-slate-800 shadow-sm"
+                  className="w-8 h-8 rounded-full object-cover shrink-0 border border-[var(--bd)] bg-[var(--sf-2)]"
                   onError={(e) => {
                     (e.target as HTMLElement).style.display = 'none';
                   }}
                 />
               ) : (
-                <div
-                  className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0 shadow-sm"
-                  style={{
-                    backgroundColor: team2Resolved.color || match.team2.color,
-                    color: team2Resolved.textColor || '#ffffff',
-                  }}
-                >
+                <div className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-[11px] shrink-0 bg-[var(--rds)] text-[var(--rdt)]">
                   {team2Short.slice(0, 2)}
                 </div>
               )}
-              <div className="truncate">
+              <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-bold text-slate-100 truncate">
+                  <span className="text-sm font-bold text-[var(--tx)] truncate">
                     {team2Short}
                   </span>
-                  <span className="text-xs text-slate-400 truncate hidden sm:inline">
-                    {team2Name}
-                  </span>
+                  {match.battingTeamKey === match.team2.key && isLive && (
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-[var(--rd)] shrink-0"
+                      title="Batting"
+                    />
+                  )}
+                </div>
+                <div className="text-[11px] text-[var(--mu)] truncate">
+                  {team2Name}
                 </div>
               </div>
             </div>
 
-            {/* Team 2 Score */}
-            <div className="text-right shrink-0 flex items-center gap-1.5">
+            <div className="text-right shrink-0">
               {team2Score ? (
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-base sm:text-lg font-bold font-mono-numbers text-white">
-                    {team2Score.wickets > 0
-                      ? `${team2Score.runs}-${team2Score.wickets}`
-                      : `${team2Score.runs}`}
-                  </span>
-                  <span className="text-xs text-slate-400 font-mono-numbers">
-                    {team2Score.overs}
-                  </span>
-                </div>
+                <>
+                  <div className="text-lg font-bold tabular-nums text-[var(--tx)] leading-tight">
+                    {team2Score.runs}/{team2Score.wickets}
+                  </div>
+                  <div className="text-[11px] text-[var(--mu)] tabular-nums leading-tight mt-0.5">
+                    {team2Score.overs} ov
+                  </div>
+                </>
               ) : (
-                <span className="text-xs text-slate-500 font-mono-numbers">
+                <span className="text-xs text-[var(--mu)]">
                   {isUpcoming ? 'Scheduled' : 'Yet to bat'}
                 </span>
               )}
-              {match.battingTeamKey === match.team2.key && isLive && (
-                <span className="text-xs shrink-0 text-amber-400" title="Batting">
-                  🏏
+            </div>
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div className="mt-3.5 pt-3 border-t border-[var(--bd)] space-y-2.5">
+          {/* Optional Chase / Result Equation */}
+          {equation && (
+            <p className="text-[11px] font-semibold text-[var(--rdt)] line-clamp-1">
+              {equation}
+            </p>
+          )}
+
+          {/* Odds Row */}
+          {oddsState && (
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[var(--mu)] font-medium shrink-0">Odds</span>
+                {oddsState.status === 'loading' ? (
+                  <span className="text-[var(--mu)] animate-pulse">Loading...</span>
+                ) : oddsState.status === 'success' && oddsState.odds?.bookmaker && !oddsState.odds.bookmaker.isSuspended ? (
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    {oddsState.odds.favoriteTeamName && (
+                      <span className="font-bold text-[var(--tx)] truncate">
+                        {oddsState.odds.favoriteTeamName}
+                      </span>
+                    )}
+                    {oddsState.odds.bookmaker.backRate !== null && (
+                      <span className="px-2 py-0.5 rounded-md bg-[var(--blu)] text-[var(--blut)] font-bold text-[11px] tabular-nums shrink-0">
+                        B {oddsState.odds.bookmaker.backRate}
+                      </span>
+                    )}
+                    {oddsState.odds.bookmaker.layRate !== null && (
+                      <span className="px-2 py-0.5 rounded-md bg-[var(--rds)] text-[var(--rdt)] font-bold text-[11px] tabular-nums shrink-0">
+                        L {oddsState.odds.bookmaker.layRate}
+                      </span>
+                    )}
+                  </div>
+                ) : oddsState.status === 'unavailable' || oddsState.odds?.bookmaker?.isSuspended ? (
+                  <span className="text-[var(--tx)] font-medium truncate">
+                    Closed · Suspended
+                  </span>
+                ) : oddsState.status === 'error' ? (
+                  <span className="text-[var(--rdt)] font-medium">Unavailable</span>
+                ) : (
+                  <span className="text-[var(--mu)] font-medium">Ready</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Win Probability Bar */}
+          {match.winProbability && (
+            <div>
+              <div className="flex items-center justify-between text-[11px] mb-1 tabular-nums">
+                <span className="font-bold text-[var(--tx)]">
+                  {team1Short} {match.winProbability.team1Prob}%
                 </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Live Status / Chasing Equation (Crex style amber footer) */}
-        <div className="mt-3.5 pt-3 border-t border-slate-800/60">
-          <p className="text-xs font-semibold text-amber-300/95 line-clamp-1">
-            {getLiveEquation()}
-          </p>
-        </div>
-
-        {/* Dedicated Live Match Odds Strip (Phase 4 Verified Integration) */}
-        {oddsState && (
-          <div className="mt-2.5 px-2.5 py-1.5 rounded-lg bg-slate-950/70 border border-slate-800/90 flex items-center justify-between text-[11px]">
-            <div className="flex items-center gap-1.5 truncate">
-              <span className="font-semibold text-slate-400">Odds:</span>
-              {oddsState.status === 'loading' ? (
-                <span className="text-slate-500 animate-pulse font-mono">Loading...</span>
-              ) : oddsState.status === 'success' && oddsState.odds?.bookmaker && !oddsState.odds.bookmaker.isSuspended ? (
-                <div className="flex items-center gap-1.5">
-                  {oddsState.odds.favoriteTeamName && (
-                    <span className="font-bold text-amber-300 truncate max-w-[80px]">
-                      {oddsState.odds.favoriteTeamName}
-                    </span>
-                  )}
-                  {oddsState.odds.bookmaker.backRate !== null && (
-                    <span className="px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-600/40 text-sky-300 font-mono font-bold text-[10px]">
-                      B: {oddsState.odds.bookmaker.backRate}
-                    </span>
-                  )}
-                  {oddsState.odds.bookmaker.layRate !== null && (
-                    <span className="px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-600/40 text-rose-300 font-mono font-bold text-[10px]">
-                      L: {oddsState.odds.bookmaker.layRate}
-                    </span>
-                  )}
-                </div>
-              ) : oddsState.status === 'unavailable' || oddsState.odds?.bookmaker?.isSuspended ? (
-                <span className="text-slate-500 font-mono text-[10px]">Closed / Suspended</span>
-              ) : oddsState.status === 'error' ? (
-                <span className="text-rose-400 font-mono text-[10px]">Unavailable</span>
-              ) : (
-                <span className="text-slate-500 font-mono text-[10px]">Ready</span>
-              )}
-            </div>
-
-            <div className="flex items-center gap-1.5 shrink-0">
-              {oddsState.consistency.status === 'verified' && (
-                <span
-                  className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400"
-                  title="Verified mapping with cricket match"
+                <span className="text-[var(--mu)]">Win probability</span>
+                <span className="font-bold text-[var(--tx)]">
+                  {team2Short} {match.winProbability.team2Prob}%
+                </span>
+              </div>
+              <div className="h-1.5 w-full bg-[var(--bar)] rounded-full overflow-hidden flex">
+                <div
+                  className="h-full bg-[var(--rd)] transition-all duration-500"
+                  style={{ width: `${match.winProbability.team1Prob}%` }}
                 />
-              )}
-              <span className="text-[10px] text-slate-500 font-mono">
-                {oddsState.maskedKey}
-              </span>
+              </div>
             </div>
-          </div>
-        )}
-
-        {/* Win Probability Bar (if available) */}
-        {match.winProbability && (
-          <div className="mt-3 bg-slate-800/40 rounded-lg p-2 border border-slate-800/60">
-            <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium mb-1">
-              <span>{team1Short} {match.winProbability.team1Prob}%</span>
-              <span className="text-slate-500">Win Probability</span>
-              <span>{team2Short} {match.winProbability.team2Prob}%</span>
-            </div>
-            <div className="h-1.5 w-full bg-slate-700/60 rounded-full overflow-hidden flex">
-              <div
-                className="h-full transition-all duration-500"
-                style={{
-                  width: `${match.winProbability.team1Prob}%`,
-                  backgroundColor: match.team1.color,
-                }}
-              />
-              <div
-                className="h-full transition-all duration-500"
-                style={{
-                  width: `${match.winProbability.team2Prob}%`,
-                  backgroundColor: match.team2.color,
-                }}
-              />
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* Footer Info: Series Name & Card Actions */}
-      <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between text-xs text-slate-400">
-        <div className="flex items-center gap-1.5 truncate max-w-[200px]">
-          <span className="truncate text-[11px] text-slate-400">{match.seriesName}</span>
-        </div>
+      <div className="mt-3.5 pt-3 border-t border-[var(--bd)] flex items-center justify-between gap-2 text-xs">
+        <span className="truncate text-[11px] text-[var(--mu)]">
+          {match.seriesName}
+        </span>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
             onClick={copyMatchSummary}
-            className="p-1.5 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition-colors"
+            className="p-1.5 text-[var(--mu)] hover:text-[var(--tx)] rounded-lg hover:bg-[var(--sf-2)] transition-colors"
             title="Copy match summary"
+            aria-label="Copy match summary"
           >
             <Share2 className="w-3.5 h-3.5" />
           </button>
@@ -431,7 +400,7 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
               e.stopPropagation();
               onInspect(match);
             }}
-            className="px-2 py-1 text-[11px] text-slate-300 hover:text-white rounded hover:bg-slate-800 transition-colors font-mono"
+            className="px-2 py-1 text-[11px] text-[var(--mu)] hover:text-[var(--tx)] rounded-lg hover:bg-[var(--sf-2)] transition-colors font-mono font-medium"
             title="Inspect raw match JSON"
           >
             JSON
@@ -442,11 +411,11 @@ export const MatchCard: React.FC<MatchCardProps> = ({ match, onSelect, onInspect
               e.stopPropagation();
               onSelect(match);
             }}
-            className="px-2.5 py-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/50 hover:bg-emerald-900/60 border border-emerald-500/30 rounded-md transition-colors flex items-center gap-1 group-hover:border-emerald-500/60"
+            className="px-3 py-1.5 text-xs font-semibold text-[var(--rdt)] bg-[var(--sf)] hover:bg-[var(--rds)] border border-[var(--rd)]/35 rounded-xl transition-colors inline-flex items-center gap-1"
             title="Open Dedicated Match Analysis & Live Odds"
           >
             <span>Analysis</span>
-            <ChevronRight className="w-3.5 h-3.5 text-emerald-400 group-hover:translate-x-0.5 transition-transform" />
+            <ChevronRight className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>

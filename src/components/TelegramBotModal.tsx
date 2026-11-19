@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   Send,
@@ -27,6 +27,7 @@ interface TelegramBotModalProps {
   config: TelegramConfig;
   onSaveConfig: (config: TelegramConfig) => void;
   matches: ParsedCricketMatch[];
+  initialSection?: 'credentials' | 'alerts';
 }
 
 export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
@@ -35,6 +36,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   config,
   onSaveConfig,
   matches,
+  initialSection = 'credentials',
 }) => {
   const [botToken, setBotToken] = useState<string>(config.botToken || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ');
   const [chatId, setChatId] = useState<string>(config.chatId || '-1003980667930');
@@ -51,7 +53,9 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   const [testStatus, setTestStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [isSendingManual, setIsSendingManual] = useState<boolean>(false);
 
-  React.useEffect(() => {
+  const alertsSectionRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
     if (config.botToken) setBotToken(config.botToken);
     if (config.chatId) setChatId(config.chatId);
     setEnabled(config.enabled ?? false);
@@ -61,6 +65,20 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
     setNotifyStrategyEntries(config.notifyStrategyEntries ?? false);
     setNotifyPeriodicDigest(config.notifyPeriodicDigest ?? false);
   }, [config]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (initialSection === 'alerts' && alertsSectionRef.current) {
+      setTimeout(() => {
+        alertsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 60);
+    }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [isOpen, initialSection, onClose]);
 
   if (!isOpen) return null;
 
@@ -124,6 +142,8 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
         enabled,
         notifyWickets,
         notifyResults,
+        notifyOverCompletion,
+        notifyStrategyEntries,
         notifyBoundaries: false,
         notifyPeriodicDigest,
         digestIntervalMinutes,
@@ -156,28 +176,40 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
-      <div className="relative w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm"
+      style={{ backgroundColor: 'var(--overlay)' }}
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-2xl bg-[var(--sf)] border border-[var(--bd)] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Telegram Integration"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 bg-slate-900/90 shrink-0">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--bd)] bg-[var(--sf)] shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-              <Send className="w-5 h-5 -rotate-12" />
+            <div className="w-9 h-9 rounded-xl bg-[var(--blu)] border border-[var(--info-bd)] flex items-center justify-center text-[var(--blut)]">
+              <Send className="w-4 h-4 -rotate-12" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-white">Telegram Integration</h2>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-base font-bold text-[var(--tx)]">
+                  {initialSection === 'alerts' ? 'Telegram Alerts Configuration' : 'Telegram Integration'}
+                </h2>
                 <span
                   className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
                     enabled && botToken && chatId
-                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                      : 'bg-slate-800 text-slate-400 border-slate-700'
+                      ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
+                      : 'bg-[var(--sf-2)] text-[var(--mu)] border-[var(--bd)]'
                   }`}
                 >
                   {enabled && botToken && chatId ? '● Broadcasting Active' : '○ Standby'}
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-[var(--mu)]">
                 Direct Telegram bot link & real-time live cricket broadcast alerts
               </p>
             </div>
@@ -185,7 +217,8 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            aria-label="Close Telegram modal"
+            className="p-1.5 rounded-lg text-[var(--mu)] hover:text-[var(--tx)] hover:bg-[var(--sf-2)] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -196,22 +229,22 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
           <div
             className={`mx-5 mt-4 p-3 rounded-xl border text-xs flex items-center justify-between gap-2 shrink-0 ${
               testStatus.ok
-                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
-                : 'bg-rose-950/40 border-rose-500/40 text-rose-300'
+                ? 'bg-[var(--ok-bg)] border-[var(--ok-bd)] text-[var(--ok-tx)]'
+                : 'bg-[var(--rds)] border-[var(--rd)]/40 text-[var(--rdt)]'
             }`}
           >
             <div className="flex items-center gap-2">
               {testStatus.ok ? (
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
               ) : (
-                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <AlertCircle className="w-4 h-4 shrink-0" />
               )}
               <span>{testStatus.message}</span>
             </div>
             <button
               type="button"
               onClick={() => setTestStatus(null)}
-              className="text-slate-400 hover:text-slate-200"
+              className="text-[var(--mu)] hover:text-[var(--tx)]"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -221,16 +254,16 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
         {/* Modal Scrollable Body */}
         <div className="p-5 overflow-y-auto space-y-5">
           {/* Direct Telegram Link Card */}
-          <div className="p-4 rounded-xl bg-gradient-to-r from-blue-950/50 to-slate-900 border border-blue-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="p-4 rounded-xl bg-[var(--blu)] border border-[var(--info-bd)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <div className="flex items-center gap-2">
-                <Send className="w-4 h-4 text-blue-400" />
-                <span className="text-xs font-bold text-white uppercase tracking-wider">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Send className="w-4 h-4 text-[var(--blut)]" />
+                <span className="text-xs font-bold text-[var(--tx)] uppercase tracking-wider">
                   Telegram Bot
                 </span>
-                <span className="text-xs text-blue-300 font-mono">@my_cricket_tracker_bot</span>
+                <span className="text-xs text-[var(--blut)] font-mono font-semibold">@my_cricket_tracker_bot</span>
               </div>
-              <p className="text-xs text-slate-400 mt-1">
+              <p className="text-xs text-[var(--mu)] mt-1">
                 Open Telegram directly to view match updates and notifications.
               </p>
             </div>
@@ -238,7 +271,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
               href="https://t.me/my_cricket_tracker_bot"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow-sm shadow-blue-900/40 transition-colors shrink-0"
+              className="inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-[var(--rd)] hover:opacity-90 text-white text-xs font-semibold rounded-xl transition-opacity shrink-0"
             >
               <span>Open in Telegram</span>
               <ExternalLink className="w-3.5 h-3.5" />
@@ -246,9 +279,9 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
           </div>
 
           {/* Credentials Section */}
-          <div className="bg-slate-950/50 border border-slate-800 rounded-xl p-4 space-y-4">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-              <Send className="w-3.5 h-3.5 text-blue-400" />
+          <div className="bg-[var(--sf-2)] border border-[var(--bd)] rounded-xl p-4 space-y-4">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--tx)] flex items-center gap-2">
+              <Send className="w-3.5 h-3.5 text-[var(--blut)]" />
               <span>Telegram Credentials</span>
             </h3>
 
@@ -256,10 +289,10 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
               {/* Bot Token Input */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-medium text-slate-300">
-                    Bot Token <span className="text-rose-400">*</span>
+                  <label className="text-xs font-medium text-[var(--tx)]">
+                    Bot Token <span className="text-[var(--rdt)]">*</span>
                   </label>
-                  <span className="text-[11px] text-slate-400">From @BotFather</span>
+                  <span className="text-[11px] text-[var(--mu)]">From @BotFather</span>
                 </div>
                 <div className="relative">
                   <input
@@ -267,12 +300,13 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                     value={botToken}
                     onChange={(e) => setBotToken(e.target.value)}
                     placeholder="e.g. 789123456:AAFlkXb123456..."
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 pr-10 font-mono"
+                    className="w-full bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-3 py-2 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:outline-none focus:border-[var(--rd)] pr-10 font-mono"
                   />
                   <button
                     type="button"
                     onClick={() => setShowToken(!showToken)}
-                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-200"
+                    aria-label={showToken ? 'Hide token' : 'Show token'}
+                    className="absolute right-2.5 top-2.5 text-[var(--mu)] hover:text-[var(--tx)]"
                   >
                     {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -282,28 +316,28 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
               {/* Chat ID Input */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-medium text-slate-300">
-                    Group Chat ID <span className="text-rose-400">*</span>
+                  <label className="text-xs font-medium text-[var(--tx)]">
+                    Group Chat ID <span className="text-[var(--rdt)]">*</span>
                   </label>
-                  <span className="text-[11px] text-slate-400">Prefix -100... for groups</span>
+                  <span className="text-[11px] text-[var(--mu)]">Prefix -100... for groups</span>
                 </div>
                 <input
                   type="text"
                   value={chatId}
                   onChange={(e) => setChatId(e.target.value)}
                   placeholder="e.g. -1001234567890 (for groups) or 12345678 (for private)"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                  className="w-full bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-3 py-2 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:outline-none focus:border-[var(--rd)] font-mono"
                 />
               </div>
             </div>
 
             {/* Test & Action Buttons */}
-            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
+            <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-[var(--bd)]">
               <button
                 type="button"
                 onClick={handleTestConnection}
                 disabled={isTesting || !botToken.trim() || !chatId.trim()}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[var(--blut)] hover:opacity-90 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-opacity"
               >
                 <Send className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} />
                 <span>{isTesting ? 'Testing Ping...' : 'Test Connection'}</span>
@@ -313,9 +347,9 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                 type="button"
                 onClick={handleSendLiveScoreboardNow}
                 disabled={isSendingManual || !botToken.trim() || !chatId.trim()}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-800/60 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-[var(--ok-tx)] bg-[var(--ok-bg)] border border-[var(--ok-bd)] hover:opacity-90 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-opacity"
               >
-                <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                <Zap className="w-3.5 h-3.5" />
                 <span>{isSendingManual ? 'Broadcasting...' : 'Send Live Scoreboard'}</span>
               </button>
 
@@ -323,32 +357,37 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                 type="button"
                 onClick={handleTestOverAlert}
                 disabled={isTesting || !botToken.trim() || !chatId.trim()}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-amber-300 bg-amber-950/60 hover:bg-amber-900/60 border border-amber-800/60 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-[var(--warn-tx)] bg-[var(--warn-bg)] border border-[var(--warn-bd)] hover:opacity-90 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-opacity"
               >
-                <Radio className="w-3.5 h-3.5 text-amber-400" />
+                <Radio className="w-3.5 h-3.5" />
                 <span>Test Over Alert</span>
               </button>
 
               <button
                 type="button"
                 onClick={handleSave}
-                className="ml-auto flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors"
+                className="ml-auto flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-[var(--tx)] bg-[var(--sf)] hover:bg-[var(--rds)] border border-[var(--bd)] rounded-lg transition-colors"
               >
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <Check className="w-3.5 h-3.5 text-[var(--ok-tx)]" />
                 <span>Save Settings</span>
               </button>
             </div>
           </div>
 
           {/* Automatic Broadcast Settings */}
-          <div className="bg-slate-950/50 border border-slate-800 rounded-xl p-4 space-y-4">
+          <div
+            ref={alertsSectionRef}
+            className={`bg-[var(--sf-2)] border rounded-xl p-4 space-y-4 ${
+              initialSection === 'alerts' ? 'border-[var(--rd)] ring-1 ring-[var(--rd)]/25' : 'border-[var(--bd)]'
+            }`}
+          >
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                  <Radio className="w-3.5 h-3.5 text-emerald-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--tx)] flex items-center gap-2">
+                  <Radio className="w-3.5 h-3.5 text-[var(--ok-tx)]" />
                   <span>Live Broadcast Triggers</span>
                 </h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">
+                <p className="text-[11px] text-[var(--mu)] mt-0.5">
                   Choose which real-time match events to post automatically to Telegram
                 </p>
               </div>
@@ -360,101 +399,101 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                   onChange={(e) => setEnabled(e.target.checked)}
                   className="sr-only peer"
                 />
-                <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+                <div className="w-11 h-6 bg-[var(--bar)] rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[var(--sf)] after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--rd)]"></div>
               </label>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-800">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[var(--bd)]">
               {/* Strategy Entry Opportunities Alert */}
-              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-emerald-950/30 border border-emerald-500/40 cursor-pointer hover:border-emerald-500/70 transition-colors sm:col-span-2">
+              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[var(--ok-bg)] border border-[var(--ok-bd)] cursor-pointer sm:col-span-2">
                 <input
                   type="checkbox"
                   checked={notifyStrategyEntries}
                   onChange={(e) => setNotifyStrategyEntries(e.target.checked)}
-                  className="mt-0.5 rounded text-emerald-500 focus:ring-0 bg-slate-800 border-slate-700"
+                  className="mt-0.5 rounded"
                 />
                 <div>
-                  <div className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
-                    <Target className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>🎯 Trading Strategy Entry Alerts (1st & 2nd Entry Signals)</span>
+                  <div className="text-xs font-semibold text-[var(--ok-tx)] flex items-center gap-1.5">
+                    <Target className="w-3.5 h-3.5" />
+                    <span>Trading Strategy Entry Alerts (1st & 2nd Entry Signals)</span>
                   </div>
-                  <p className="text-[11px] text-slate-300 mt-0.5">
+                  <p className="text-[11px] text-[var(--tx)] mt-0.5 opacity-90">
                     Broadcasts verified <b>First Entry</b> signals when BATTING control odds are <code>&gt;= 85 paise</code> (including deferred CONFIRMED_PENDING_85 entries) within window (1st Inn &lt; 10.0 ov, 2nd Inn &lt; 6.0 ov). Exits 1st entry at BATTING &lt;= 55p if no wicket fell, or unlocks <b>Second Entry</b> after confirmed wicket + BOWLING &lt; 65p (any over). Bookset exits when BOWLING &gt; 85 paise. Verified in DB to eliminate duplicates.
                   </p>
                 </div>
               </label>
 
               {/* Over-by-Over Completion Alert */}
-              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-900/70 border border-amber-500/30 cursor-pointer hover:border-amber-500/60 transition-colors sm:col-span-2">
+              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[var(--warn-bg)] border border-[var(--warn-bd)] cursor-pointer sm:col-span-2">
                 <input
                   type="checkbox"
                   checked={notifyOverCompletion}
                   onChange={(e) => setNotifyOverCompletion(e.target.checked)}
-                  className="mt-0.5 rounded text-amber-500 focus:ring-0 bg-slate-800 border-slate-700"
+                  className="mt-0.5 rounded"
                 />
                 <div>
-                  <div className="text-xs font-semibold text-amber-200 flex items-center gap-1.5">
-                    <Radio className="w-3.5 h-3.5 text-amber-400" />
-                    <span>⚡ Over-by-Over Live Completion Alerts</span>
+                  <div className="text-xs font-semibold text-[var(--warn-tx)] flex items-center gap-1.5">
+                    <Radio className="w-3.5 h-3.5" />
+                    <span>Over-by-Over Live Completion Alerts</span>
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
+                  <p className="text-[11px] text-[var(--tx)] mt-0.5 opacity-85">
                     Posts a dedicated scorecard message for each match after every completed over (e.g., Over 5, Over 6). Checks the local database before sending to strictly prevent duplicate posts.
                   </p>
                 </div>
               </label>
 
               {/* Wickets Alert */}
-              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-900/60 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors">
+              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[var(--sf)] border border-[var(--bd)] cursor-pointer hover:border-[var(--mu)] transition-colors">
                 <input
                   type="checkbox"
                   checked={notifyWickets}
                   onChange={(e) => setNotifyWickets(e.target.checked)}
-                  className="mt-0.5 rounded text-blue-600 focus:ring-0 bg-slate-800 border-slate-700"
+                  className="mt-0.5 rounded"
                 />
                 <div>
-                  <div className="text-xs font-semibold text-white">Confirmed Wickets Alert</div>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
+                  <div className="text-xs font-semibold text-[var(--tx)]">Confirmed Wickets Alert</div>
+                  <p className="text-[11px] text-[var(--mu)] mt-0.5">
                     Instant wicket notifications with batting team, score, and over number.
                   </p>
                 </div>
               </label>
 
               {/* Match Results Alert */}
-              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-900/60 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors">
+              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[var(--sf)] border border-[var(--bd)] cursor-pointer hover:border-[var(--mu)] transition-colors">
                 <input
                   type="checkbox"
                   checked={notifyResults}
                   onChange={(e) => setNotifyResults(e.target.checked)}
-                  className="mt-0.5 rounded text-blue-600 focus:ring-0 bg-slate-800 border-slate-700"
+                  className="mt-0.5 rounded"
                 />
                 <div>
-                  <div className="text-xs font-semibold text-white">Final Match Results Alert</div>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
+                  <div className="text-xs font-semibold text-[var(--tx)]">Final Match Results Alert</div>
+                  <p className="text-[11px] text-[var(--mu)] mt-0.5">
                     Concluded match result messages with winner and final scores.
                   </p>
                 </div>
               </label>
 
               {/* Periodic Scoreboard Digest */}
-              <div className="sm:col-span-2 p-3 rounded-lg bg-slate-900/60 border border-slate-800 space-y-2">
-                <div className="flex items-center justify-between">
+              <div className="sm:col-span-2 p-3 rounded-lg bg-[var(--sf)] border border-[var(--bd)] space-y-2">
+                <div className="flex items-center justify-between gap-2">
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={notifyPeriodicDigest}
                       onChange={(e) => setNotifyPeriodicDigest(e.target.checked)}
-                      className="rounded text-blue-600 focus:ring-0 bg-slate-800 border-slate-700"
+                      className="rounded"
                     />
-                    <span className="text-xs font-semibold text-white">Periodic Scoreboard Digest</span>
+                    <span className="text-xs font-semibold text-[var(--tx)]">Periodic Scoreboard Digest</span>
                   </label>
 
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] text-slate-400">Every</span>
+                    <span className="text-[11px] text-[var(--mu)]">Every</span>
                     <select
                       value={digestIntervalMinutes}
                       onChange={(e) => setDigestIntervalMinutes(Number(e.target.value))}
                       disabled={!notifyPeriodicDigest}
-                      className="bg-slate-800 border border-slate-700 text-xs text-white rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+                      className="bg-[var(--sf-2)] border border-[var(--bd)] text-xs text-[var(--tx)] rounded px-2 py-1 focus:outline-none disabled:opacity-50"
                     >
                       <option value={1}>1 min</option>
                       <option value={2}>2 min</option>
@@ -465,7 +504,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                     </select>
                   </div>
                 </div>
-                <p className="text-[11px] text-slate-400">
+                <p className="text-[11px] text-[var(--mu)]">
                   Sends an automated summary of all live matches at your selected interval.
                 </p>
               </div>
@@ -474,12 +513,12 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="flex items-center justify-between px-5 py-3 border-t border-slate-800 bg-slate-950/60 shrink-0">
+        <div className="flex items-center justify-between px-5 py-3 border-t border-[var(--bd)] bg-[var(--sf)] shrink-0">
           <a
             href="https://t.me/my_cricket_tracker_bot"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
+            className="text-xs text-[var(--blut)] hover:underline flex items-center gap-1 font-medium"
           >
             <span>Open @my_cricket_tracker_bot</span>
             <ExternalLink className="w-3 h-3" />
@@ -487,7 +526,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-1.5 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors"
+            className="px-4 py-1.5 text-xs font-semibold text-[var(--tx)] bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] rounded-lg transition-colors"
           >
             Close
           </button>
