@@ -363,24 +363,23 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 
 -- ============================================================================
--- Seed default Telegram configuration record
+-- Seed default Telegram configuration record (no credentials in SQL)
 -- ============================================================================
 
 INSERT INTO app_settings (key, value, description, updated_at)
 VALUES (
   'telegram_config',
   '{
-    "enabled": true,
-    "botToken": "8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ",
-    "chatId": "-1003980667930",
+    "enabled": false,
+    "chatId": "",
     "notifyWickets": true,
     "notifyResults": true,
     "notifyOverCompletion": true,
-    "notifyPeriodicDigest": true,
+    "notifyPeriodicDigest": false,
     "notifyStrategyEntries": false,
     "digestIntervalMinutes": 3
   }'::jsonb,
-  'Default Telegram Bot and Broadcast Notifications Configuration',
+  'Default Telegram Bot notification toggles (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env or Admin Panel)',
   NOW()
 )
 ON CONFLICT (key) DO NOTHING;

@@ -1,9 +1,20 @@
 import express from 'express';
+import helmet from 'helmet';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { buildAdminAuthConfigFromEnv, createAdminAuth, AuthenticatedAdminRequest } from './server/adminAuth';
+import {
+  DEFAULT_TELEGRAM_SETTINGS,
+  StoredTelegramSettings,
+  buildSafeTelegramStatus,
+  loadTelegramFromDb,
+  resolveEffectiveTelegramToken,
+  runOneTimeTelegramTokenMigration,
+  saveTelegramToDb,
+} from './server/telegramConfig';
 import { parseBookmakerRate, parseSessionMarkets, transformGetSV3Response } from './src/services/oddsApi';
 import { parseInningsScore, isValidActiveSecondInningsScore } from './src/services/cricketApi';
 import { resolveTeam, resolveSeries, resolveVenue } from './src/data/cricketMapping';
@@ -60,6 +71,14 @@ if (process.env.PGPASSWORD) {
 
 export const dbPool = new Pool(poolConfig);
 const DATABASE_URL = poolConfig.connectionString || `postgresql://${poolConfig.user || 'postgres'}:****@${poolConfig.host || 'localhost'}:${poolConfig.port || 5432}/${poolConfig.database || 'leadhunt'}`;
+
+// Server-side Admin Auth, Sessions, Rate Limiting, CSRF, CORS, and Audit Logging
+const adminAuth = createAdminAuth(buildAdminAuthConfigFromEnv(process.env, dbPool));
+adminAuth.logStartupStatus();
+
+// Per-IP cap for public SSE (/api/live-stream) connections
+const MAX_SSE_PER_IP = Math.max(1, parseInt(process.env.MAX_SSE_PER_IP || '20', 10) || 20);
+const sseCountByIp = new Map<string, number>();
 
 // Track timeline state across seconds and server restarts
 const finalizedTimelineMatches = new Set<string>();
@@ -207,12 +226,19 @@ async function testDbConnection(isRetry = false) {
 
     if (!dbSchemaReady) {
       await ensureTimelineSchema(client);
+      await adminAuth.ensureAuthTables(client);
+      await runOneTimeTelegramTokenMigration(client);
       dbSchemaReady = true;
+    } else {
+      await adminAuth.ensureAuthTables(client);
+      await runOneTimeTelegramTokenMigration(client);
     }
 
     client.release();
     isDbAvailable = true;
     hasLoggedDbOffline = false;
+    await reloadTelegramConfigFromDb();
+    logTelegramStartupStatusOnce();
 
     // Rehydrate strategy engine state from PostgreSQL without firing alerts or duplicates
     try {
@@ -276,18 +302,28 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
 });
 
-app.use(express.json());
+if (adminAuth.trustProxy) {
+  app.set('trust proxy', 1);
+}
 
-// Enable CORS for all incoming client requests
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
+// Security headers (HSTS enabled only when COOKIE_SECURE is true, keeping plain HTTP VPS reachable until HTTPS is ready)
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    hsts: adminAuth.cookieSecure,
+  })
+);
+
+app.use(express.json({ limit: '256kb' }));
+
+// Same-origin is always allowed; ALLOWED_ORIGINS controls additional cross-origin access only
+app.use(adminAuth.corsMiddleware);
+
+// Admin Authentication Endpoints
+app.post('/api/admin/login', adminAuth.handleLogin);
+app.post('/api/admin/logout', adminAuth.handleLogout);
+app.get('/api/admin/me', adminAuth.handleMe);
 
 // In-memory warm match store
 let matchStore: {
@@ -314,48 +350,59 @@ function broadcastToClients(data: any) {
   }
 }
 
-// Backend Automated Telegram Broadcaster with Dynamic Supabase Settings
-const DEFAULT_TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8972166437:AAGjbREY_bCgJJ77wHTJKZWMwCndj3Pi6JQ';
-const DEFAULT_TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '-1003980667930';
+// Backend Automated Telegram Broadcaster (Env-first token, zero hardcoded credentials)
+const ENV_TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const ENV_TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
 
-let activeTelegramConfig: {
-  botToken: string;
-  chatId: string;
-  enabled: boolean;
-  notifyWickets: boolean;
-  notifyResults: boolean;
-  notifyOverCompletion: boolean;
-  notifyPeriodicDigest: boolean;
-  notifyStrategyEntries: boolean;
-  digestIntervalMinutes: number;
-} = {
-  botToken: DEFAULT_TELEGRAM_BOT_TOKEN,
-  chatId: DEFAULT_TELEGRAM_CHAT_ID,
-  enabled: false,
-  notifyWickets: false,
-  notifyResults: false,
-  notifyOverCompletion: false,
-  notifyPeriodicDigest: false,
-  notifyStrategyEntries: false,
-  digestIntervalMinutes: 3,
+let dbSecretTelegramToken = '';
+let hasLoggedTelegramStartupWarning = false;
+
+let activeTelegramConfig: StoredTelegramSettings = {
+  ...DEFAULT_TELEGRAM_SETTINGS,
+  chatId: ENV_TELEGRAM_CHAT_ID,
 };
+
+function getEffectiveTelegramCredentials() {
+  const resolved = resolveEffectiveTelegramToken(ENV_TELEGRAM_BOT_TOKEN, dbSecretTelegramToken);
+  const chatId = (activeTelegramConfig.chatId || ENV_TELEGRAM_CHAT_ID || '').trim();
+  return {
+    ...resolved,
+    chatId,
+  };
+}
+
+function getSafeTelegramStatus() {
+  return buildSafeTelegramStatus({
+    envToken: ENV_TELEGRAM_BOT_TOKEN,
+    envChatId: ENV_TELEGRAM_CHAT_ID,
+    dbSecretToken: dbSecretTelegramToken,
+    settings: activeTelegramConfig,
+  });
+}
+
+function logTelegramStartupStatusOnce() {
+  if (hasLoggedTelegramStartupWarning) return;
+  hasLoggedTelegramStartupWarning = true;
+  const status = getSafeTelegramStatus();
+  if (!status.configured) {
+    console.warn(
+      `[Telegram] Not configured — set TELEGRAM_BOT_TOKEN in .env (or save a token in the Admin panel). Automated Telegram alerts remain disabled.`
+    );
+  } else {
+    console.log(
+      `[Telegram] Configured (source=${status.tokenSource}, token=****${status.tokenLast4}, enabled=${status.enabled})`
+    );
+  }
+}
 
 async function reloadTelegramConfigFromDb() {
   try {
-    const res = await dbPool.query('SELECT value FROM app_settings WHERE key = $1 LIMIT 1', ['telegram_config']);
-    if (res.rows.length > 0 && res.rows[0].value) {
-      const cfg = res.rows[0].value as any;
+    const { settings, dbSecretToken } = await loadTelegramFromDb(dbPool);
+    dbSecretTelegramToken = dbSecretToken;
+    if (settings) {
       activeTelegramConfig = {
-        ...activeTelegramConfig,
-        botToken: cfg.botToken || activeTelegramConfig.botToken,
-        chatId: cfg.chatId || activeTelegramConfig.chatId,
-        enabled: cfg.enabled ?? activeTelegramConfig.enabled,
-        notifyWickets: cfg.notifyWickets ?? activeTelegramConfig.notifyWickets,
-        notifyResults: cfg.notifyResults ?? activeTelegramConfig.notifyResults,
-        notifyOverCompletion: cfg.notifyOverCompletion ?? activeTelegramConfig.notifyOverCompletion,
-        notifyPeriodicDigest: cfg.notifyPeriodicDigest ?? activeTelegramConfig.notifyPeriodicDigest,
-        notifyStrategyEntries: cfg.notifyStrategyEntries ?? activeTelegramConfig.notifyStrategyEntries,
-        digestIntervalMinutes: cfg.digestIntervalMinutes || activeTelegramConfig.digestIntervalMinutes,
+        ...settings,
+        chatId: settings.chatId || ENV_TELEGRAM_CHAT_ID,
       };
     }
   } catch {
@@ -364,40 +411,57 @@ async function reloadTelegramConfigFromDb() {
 }
 
 // Initial config hydration and background periodic refresh every 30s
-reloadTelegramConfigFromDb();
+reloadTelegramConfigFromDb().finally(() => {
+  // If DB was offline on startup, still log once after 3s so operators see Telegram status clearly
+  setTimeout(logTelegramStartupStatusOnce, 3000);
+});
 setInterval(reloadTelegramConfigFromDb, 30000);
 
 async function sendTelegramBroadcast(htmlText: string) {
-  const token = activeTelegramConfig.botToken || DEFAULT_TELEGRAM_BOT_TOKEN;
-  const chatId = activeTelegramConfig.chatId || DEFAULT_TELEGRAM_CHAT_ID;
-  if (!token || !chatId || !activeTelegramConfig.enabled) return false;
+  const creds = getEffectiveTelegramCredentials();
+  if (!creds.configured || !creds.token || !creds.chatId || !activeTelegramConfig.enabled) {
+    return false;
+  }
 
   try {
-    const cleanToken = token.trim().replace(/^bot/i, '');
-    const res = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: chatId.trim(),
+        chat_id: creds.chatId,
         text: htmlText,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
       }),
     });
+    void adminAuth.recordAdminAudit(
+      'TELEGRAM_BROADCAST',
+      'telegram',
+      { ok: res.ok, status: res.status, messageLength: htmlText.length },
+      'server'
+    );
     return res.ok;
   } catch (e: any) {
     console.error('Telegram broadcast error:', e.message);
+    void adminAuth.recordAdminAudit(
+      'TELEGRAM_BROADCAST_ERROR',
+      'telegram',
+      { error: e.message || 'Unknown error', messageLength: htmlText.length },
+      'server'
+    );
     return false;
   }
 }
 
-// Fast in-memory cache to prevent redundant DB roundtrips for sent overs
+// Fast in-memory caches & in-flight guards to prevent duplicate DB/Telegram dispatches
 const sentOverBroadcastCache = new Set<string>();
+const inFlightOverBroadcasts = new Set<string>();
+const inFlightConclusions = new Set<string>();
 
 /**
  * Checks in PostgreSQL app_settings if an over update has ALREADY been sent.
- * If not, atomically records it in DB and returns true to allow dispatch.
- * Guarantees zero duplicate messages even across restarts or multiple tabs.
+ * Uses a single atomic INSERT ... ON CONFLICT (key) DO NOTHING RETURNING key
+ * so concurrent ticks or restarts can never dispatch a duplicate over alert.
  */
 async function checkAndRecordOverInDb(
   matchId: string,
@@ -416,20 +480,13 @@ async function checkAndRecordOverInDb(
 ): Promise<boolean> {
   const dbKey = `tele_over:${matchId}:${inningIndex}:${completedOver}`;
 
-  // 1. Fast in-memory filter
-  if (sentOverBroadcastCache.has(dbKey)) {
+  // 1. Fast in-memory filter + in-flight concurrency guard
+  if (sentOverBroadcastCache.has(dbKey) || inFlightOverBroadcasts.has(dbKey)) {
     return false;
   }
+  inFlightOverBroadcasts.add(dbKey);
 
   try {
-    // 2. Database verification before sending: check if already exists in PostgreSQL
-    const existing = await dbPool.query('SELECT key FROM app_settings WHERE key = $1 LIMIT 1', [dbKey]);
-    if (existing.rows.length > 0) {
-      sentOverBroadcastCache.add(dbKey);
-      return false; // Already sent previously
-    }
-
-    // 3. Atomically record in PostgreSQL app_settings BEFORE sending
     const payload = {
       matchId,
       inningIndex,
@@ -437,25 +494,28 @@ async function checkAndRecordOverInDb(
       ...details,
       sentAt: new Date().toISOString(),
     };
-    await dbPool.query(
+    const insertRes = await dbPool.query(
       `INSERT INTO app_settings (key, value, description, updated_at)
        VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+       ON CONFLICT (key) DO NOTHING
+       RETURNING key`,
       [dbKey, JSON.stringify(payload), `Telegram over ${completedOver} broadcast record for match ${matchId}`]
     );
 
     sentOverBroadcastCache.add(dbKey);
-    return true;
-  } catch (err: any) {
+    return insertRes.rows.length > 0;
+  } catch {
     sentOverBroadcastCache.add(dbKey);
     return true;
+  } finally {
+    inFlightOverBroadcasts.delete(dbKey);
   }
 }
 
 /**
  * Checks in PostgreSQL app_settings if a match conclusion notification has ALREADY been sent.
- * If not, atomically records it in DB and returns true to allow dispatch.
- * Guarantees zero duplicate messages across restarts, reloads, or multiple servers.
+ * Uses a single atomic INSERT ... ON CONFLICT (key) DO NOTHING RETURNING key
+ * so concurrent ticks or restarts send exactly ONE Telegram message per match result.
  */
 async function checkAndRecordConclusionInDb(
   matchId: string,
@@ -468,40 +528,39 @@ async function checkAndRecordConclusionInDb(
 ): Promise<boolean> {
   const dbKey = `tele_concluded:${matchId}`;
 
-  // 1. Fast in-memory filter
-  if (finishedNotifiedMatches.has(dbKey) || finishedNotifiedMatches.has(matchId)) {
+  // 1. Fast in-memory filter + in-flight concurrency guard
+  if (
+    finishedNotifiedMatches.has(dbKey) ||
+    finishedNotifiedMatches.has(matchId) ||
+    inFlightConclusions.has(dbKey)
+  ) {
     return false;
   }
+  inFlightConclusions.add(dbKey);
 
   try {
-    // 2. Database verification before sending: check if already exists in PostgreSQL
-    const existing = await dbPool.query('SELECT key FROM app_settings WHERE key = $1 LIMIT 1', [dbKey]);
-    if (existing.rows.length > 0) {
-      finishedNotifiedMatches.add(dbKey);
-      finishedNotifiedMatches.add(matchId);
-      return false; // Already sent previously
-    }
-
-    // 3. Atomically record in PostgreSQL BEFORE sending
     const payload = {
       matchId,
       ...details,
       sentAt: new Date().toISOString(),
     };
-    await dbPool.query(
+    const insertRes = await dbPool.query(
       `INSERT INTO app_settings (key, value, description, updated_at)
        VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+       ON CONFLICT (key) DO NOTHING
+       RETURNING key`,
       [dbKey, JSON.stringify(payload), `Telegram match concluded notification record for match ${matchId}`]
     );
 
     finishedNotifiedMatches.add(dbKey);
     finishedNotifiedMatches.add(matchId);
-    return true;
-  } catch (err: any) {
+    return insertRes.rows.length > 0;
+  } catch {
     finishedNotifiedMatches.add(dbKey);
     finishedNotifiedMatches.add(matchId);
     return true;
+  } finally {
+    inFlightConclusions.delete(dbKey);
   }
 }
 
@@ -831,6 +890,7 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
     if (
       inn1OverFinished &&
       !isFinished &&
+      activeTelegramConfig.enabled &&
       activeTelegramConfig.notifyOverCompletion !== false
     ) {
       const allowed = await checkAndRecordOverInDb(id, 1, curScore1.completedOvers, {
@@ -877,6 +937,7 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
     if (
       inn2OverFinished &&
       !isFinished &&
+      activeTelegramConfig.enabled &&
       activeTelegramConfig.notifyOverCompletion !== false
     ) {
       const allowed = await checkAndRecordOverInDb(id, 2, curScore2.completedOvers, {
@@ -928,16 +989,13 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
     }
   }
 
-  // Check for match conclusion (Database Verified & Deduplicated)
+  // Check for match conclusion (Server-authoritative, atomically DB-deduplicated)
   if (
     isFinished &&
     !finishedNotifiedMatches.has(id) &&
     !finishedNotifiedMatches.has(`tele_concluded:${id}`)
   ) {
-    finishedNotifiedMatches.add(id);
-    finishedNotifiedMatches.add(`tele_concluded:${id}`);
-
-    if (activeTelegramConfig.notifyResults) {
+    if (activeTelegramConfig.enabled && activeTelegramConfig.notifyResults) {
       const allowed = await checkAndRecordConclusionInDb(id, {
         team1: team1Name,
         team2: team2Name,
@@ -956,6 +1014,10 @@ async function processMatchUpdate(id: string, item: any): Promise<boolean> {
           (item.sname || item.sfullname ? `\n🏆 ${item.sname || item.sfullname}` : '');
         await sendTelegramBroadcast(resultMsg);
       }
+    } else {
+      // Telegram or result alerts disabled when this match concluded: mark in-memory so enabling later won't blast old results
+      finishedNotifiedMatches.add(id);
+      finishedNotifiedMatches.add(`tele_concluded:${id}`);
     }
   }
 
@@ -2438,8 +2500,18 @@ setInterval(syncLiveMatchScores, 1000);     // Live ball-by-ball getSV3 score & 
 setInterval(syncCrexPool, 2500);            // Sync Crex fixtures pool & mapping every 2.5s
 setInterval(persistLiveTimelineTicks, 1000); // Append-only 1-second timeline DB saver + strategy loop
 
-// SSE Live Stream: Instant zero-latency push to connected clients (read-only UI hydration)
+// SSE Live Stream: Instant zero-latency push to connected clients (read-only UI hydration, capped per IP)
 app.get('/api/live-stream', (req, res) => {
+  const clientIp = adminAuth.getClientIp(req);
+  const currentConnections = sseCountByIp.get(clientIp) || 0;
+  if (currentConnections >= MAX_SSE_PER_IP) {
+    return res.status(429).json({
+      ok: false,
+      error: 'Too many simultaneous live stream connections from this IP',
+    });
+  }
+  sseCountByIp.set(clientIp, currentConnections + 1);
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -2464,10 +2536,22 @@ app.get('/api/live-stream', (req, res) => {
     res.write(': keepalive\n\n');
   }, 10000);
 
-  req.on('close', () => {
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     clearInterval(heartbeat);
     sseClients.delete(res);
-  });
+    const remaining = (sseCountByIp.get(clientIp) || 1) - 1;
+    if (remaining <= 0) {
+      sseCountByIp.delete(clientIp);
+    } else {
+      sseCountByIp.set(clientIp, remaining);
+    }
+  };
+
+  req.on('close', cleanup);
+  res.on('close', cleanup);
 });
 
 // High-speed endpoint: Responds immediately from memory in < 1ms
@@ -2486,12 +2570,11 @@ app.all(['/api/top-matches', '/api/v2/getTopMatches'], async (req, res) => {
   });
 });
 
-// In-flight server request deduplication & short TTL cache for odds
+// Server-maintained odds cache (populated every 1s by syncLiveMatchScores)
 const serverOddsCache = new Map<string, { data: any; timestamp: number }>();
-const serverOddsInFlight = new Map<string, Promise<any>>();
 
-// Match-specific Odds Endpoint Proxy (CORS bypass and server-side deduplication)
-app.get(['/api/odds', '/api/v3/getSV3'], async (req, res) => {
+// Match-specific Odds Endpoint (Public read-only cache — never writes to DB or triggers upstream fetches on anonymous hits)
+app.get(['/api/odds', '/api/v3/getSV3'], (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   const key = String(req.query.key || '').trim();
 
@@ -2504,130 +2587,20 @@ app.get(['/api/odds', '/api/v3/getSV3'], async (req, res) => {
     return res.status(400).json({ ok: false, error: 'Invalid match key format' });
   }
 
-  // Check 500ms cache
   const cached = serverOddsCache.get(key);
-  if (cached && Date.now() - cached.timestamp < 500) {
+  if (cached?.data) {
     return res.json(cached.data);
   }
 
-  // Deduplicate concurrent upstream requests for the same key
-  if (serverOddsInFlight.has(key)) {
-    try {
-      const data = await serverOddsInFlight.get(key);
-      return res.json(data);
-    } catch (err: any) {
-      return res.status(502).json({ ok: false, error: err.message });
-    }
-  }
-
-  const fetchTask = (async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
-
-    const upstreamRes = await fetch(
-      `https://api.goscorer.com/api/v3/getSV3?key=${encodeURIComponent(key)}`,
-      {
-        method: 'GET',
-        headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          Pragma: 'no-cache',
-        },
-        signal: controller.signal,
-      }
-    );
-    clearTimeout(timeout);
-
-    if (!upstreamRes.ok) {
-      throw new Error(`Upstream odds API returned status ${upstreamRes.status}`);
-    }
-
-    const data = await upstreamRes.json();
-    const now = new Date();
-    serverOddsCache.set(key, { data, timestamp: now.getTime() });
-    oddsFetchedAtByMatch.set(key, now);
-
-    // Instantly update matchStore with live ball-by-ball score from getSV3
-    if (data && matchStore.matches[key]) {
-      const existing = matchStore.matches[key];
-      let changed = false;
-      const nextJ = data.j || existing.j;
-      const nextK = data.k || existing.k;
-      if (data.j || data.k || data.res) {
-        recordScoreObservation(key, nextJ, nextK, now, 'getSV3');
-      }
-      if (data.j && existing.j !== data.j) {
-        existing.j = data.j;
-        changed = true;
-      }
-      if (data.k && existing.k !== data.k) {
-        existing.k = data.k;
-        changed = true;
-      }
-      if (data.res && existing.res !== data.res) {
-        existing.res = data.res;
-        changed = true;
-      }
-      if (data.R && existing.flb !== data.R) {
-        existing.flb = data.R;
-        changed = true;
-      }
-      if (changed) {
-        matchStore.lastUpdated = Date.now();
-        processMatchUpdate(key, existing).catch(() => {});
-      }
-    }
-
-    // Asynchronously record tick into match_odds_ticks table
-    if (data) {
-      const rawRate =
-        typeof data.R === 'string'
-          ? data.R
-          : typeof data.r === 'string'
-          ? data.r
-          : typeof data.s === 'string'
-          ? data.s
-          : null;
-      const favTeam =
-        typeof data.F === 'string'
-          ? data.F.replace(/^\^/, '')
-          : data.B || data.sd || null;
-
-      (async () => {
-        try {
-          await dbPool.query(
-            `INSERT INTO match_odds_ticks (match_id, odds_key, favorite_team, raw_rate_string, session_data, created_at)
-             VALUES ($1, $2, $3, $4, $5, NOW())`,
-            [key, key, favTeam, rawRate, data.S ? JSON.stringify({ raw_sessions: data.S }) : null]
-          );
-        } catch {
-          // Non-blocking if database is offline or starting up
-        }
-      })();
-    }
-
-    return data;
-  })();
-
-  serverOddsInFlight.set(key, fetchTask);
-
-  try {
-    const data = await fetchTask;
-    return res.json(data);
-  } catch (err: any) {
-    if (cached?.data) {
-      return res.json(cached.data);
-    }
-    return res.status(502).json({
-      ok: false,
-      error: err.message || 'Failed to fetch odds from upstream',
-    });
-  } finally {
-    serverOddsInFlight.delete(key);
-  }
+  return res.status(404).json({
+    ok: false,
+    cached: false,
+    error: 'Odds snapshot not cached yet for this match',
+  });
 });
 
-// 24/7 Webhook / Cron Endpoint (hit by cron-job.org, UptimeRobot, or Vercel Cron)
-app.all(['/api/cron', '/api/telegram/cron'], async (req, res) => {
+// 24/7 Webhook / Cron Endpoint (Protected by CRON_SECRET via X-Cron-Secret, Bearer token, or ?secret=)
+app.all(['/api/cron', '/api/telegram/cron'], adminAuth.requireCronSecret, async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   await syncGoscorerApi('IN');
 
@@ -2656,6 +2629,13 @@ app.all(['/api/cron', '/api/telegram/cron'], async (req, res) => {
     sent = await sendTelegramBroadcast(digest);
   }
 
+  void adminAuth.recordAdminAudit(
+    'CRON_EXECUTED',
+    req.path,
+    { liveMatchesCount: liveItems.length, telegramSent: sent },
+    adminAuth.getClientIp(req)
+  );
+
   res.json({
     ok: true,
     status: 'cron_executed',
@@ -2665,40 +2645,118 @@ app.all(['/api/cron', '/api/telegram/cron'], async (req, res) => {
   });
 });
 
-// Telegram Bot Dispatch Proxy
-app.post('/api/telegram/send', async (req, res) => {
-  const { botToken, chatId, text } = req.body || {};
-  const token = botToken || DEFAULT_TELEGRAM_BOT_TOKEN;
-  const targetChatId = chatId || DEFAULT_TELEGRAM_CHAT_ID;
+// Admin Telegram Test Endpoint (uses server-configured token & chatId, never requires a token in request body)
+app.post('/api/admin/telegram/test', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  await reloadTelegramConfigFromDb();
+  const creds = getEffectiveTelegramCredentials();
 
-  if (!text) {
-    return res.status(400).json({ ok: false, error: 'Missing message text' });
+  if (!creds.configured || !creds.token) {
+    return res.status(400).json({
+      ok: false,
+      status: 'not configured',
+      error: 'Telegram bot token is not configured on the server',
+    });
   }
 
+  const targetChatId = (typeof req.body?.chatId === 'string' && req.body.chatId.trim()) || creds.chatId;
+  if (!targetChatId) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Telegram chat ID is not configured',
+    });
+  }
+
+  const customText = typeof req.body?.text === 'string' && req.body.text.trim() ? req.body.text.trim() : null;
+  const timestamp = new Date().toISOString();
+  const text =
+    customText ||
+    `🏏 <b>Crex Live Scorer — Admin Test Message</b>\n\n` +
+      `✅ Server-side Telegram delivery is working.\n` +
+      `🔐 Token source: <code>${creds.source}</code> (****${creds.tokenLast4})\n` +
+      `⏰ <i>${timestamp}</i>`;
+
   try {
-    const cleanToken = String(token).trim().replace(/^bot/i, '');
-    const tgRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+    const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: String(targetChatId).trim(),
+        chat_id: targetChatId,
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
       }),
     });
     const data = await tgRes.json();
+    void adminAuth.recordAdminAudit(
+      'TELEGRAM_TEST',
+      '/api/admin/telegram/test',
+      { ok: tgRes.ok, status: tgRes.status, tokenSource: creds.source },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
     return res.status(tgRes.status).json(data);
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Endpoint to test an over completion alert directly
-app.post('/api/telegram/test-over', async (req, res) => {
-  const { botToken, chatId, matchId } = req.body || {};
-  const token = botToken || activeTelegramConfig.botToken || DEFAULT_TELEGRAM_BOT_TOKEN;
-  const targetChatId = chatId || activeTelegramConfig.chatId || DEFAULT_TELEGRAM_CHAT_ID;
+// Telegram Bot Dispatch Proxy (Admin only, server-configured token only)
+app.post('/api/telegram/send', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  const { chatId, text } = req.body || {};
+  await reloadTelegramConfigFromDb();
+  const creds = getEffectiveTelegramCredentials();
+
+  if (!creds.configured || !creds.token) {
+    return res.status(400).json({ ok: false, error: 'Telegram bot token is not configured on the server' });
+  }
+
+  const targetChatId = (typeof chatId === 'string' && chatId.trim()) || creds.chatId;
+  if (!targetChatId) {
+    return res.status(400).json({ ok: false, error: 'Telegram chat ID is not configured' });
+  }
+
+  if (!text) {
+    return res.status(400).json({ ok: false, error: 'Missing message text' });
+  }
+
+  try {
+    const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: targetChatId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+    });
+    const data = await tgRes.json();
+    void adminAuth.recordAdminAudit(
+      'TELEGRAM_SEND',
+      '/api/telegram/send',
+      { ok: tgRes.ok, status: tgRes.status, messageLength: String(text).length },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
+    return res.status(tgRes.status).json(data);
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Endpoint to test an over completion alert directly (Admin only, server-configured token only)
+app.post('/api/telegram/test-over', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  const { chatId, matchId } = req.body || {};
+  await reloadTelegramConfigFromDb();
+  const creds = getEffectiveTelegramCredentials();
+
+  if (!creds.configured || !creds.token) {
+    return res.status(400).json({ ok: false, error: 'Telegram bot token is not configured on the server' });
+  }
+
+  const targetChatId = (typeof chatId === 'string' && chatId.trim()) || creds.chatId;
+  if (!targetChatId) {
+    return res.status(400).json({ ok: false, error: 'Telegram chat ID is not configured' });
+  }
 
   const sampleMatch = (matchId && matchStore.matches[matchId])
     ? matchStore.matches[matchId]
@@ -2723,39 +2781,47 @@ app.post('/api/telegram/test-over', async (req, res) => {
     `⚡ <i>Crex Live Scorer · Verified Over Update</i>`;
 
   try {
-    const cleanToken = String(token).trim().replace(/^bot/i, '');
-    const tgRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+    const tgRes = await fetch(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: String(targetChatId).trim(),
+        chat_id: targetChatId,
         text: testMsg,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
       }),
     });
     const data = await tgRes.json();
+    void adminAuth.recordAdminAudit(
+      'TELEGRAM_TEST_OVER',
+      matchId ? String(matchId) : 'sample',
+      { ok: tgRes.ok, status: tgRes.status },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
     return res.status(tgRes.status).json(data);
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Trigger initial connection greeting on boot
+// Trigger initial connection greeting on boot (only when Telegram is configured & enabled)
 setTimeout(() => {
-  sendTelegramBroadcast(
-    '🏏 <b>Crex Live Cricket Scorer Connected!</b>\n\n' +
-    '✅ Backend automated live cricket feed is now active.\n' +
-    '📢 Real-time wickets, match conclusions, and live scoreboards will be broadcasted here automatically.'
-  );
-}, 2000);
+  const creds = getEffectiveTelegramCredentials();
+  if (creds.configured && creds.chatId && activeTelegramConfig.enabled) {
+    void sendTelegramBroadcast(
+      '🏏 <b>Crex Live Cricket Scorer Connected!</b>\n\n' +
+        '✅ Backend automated live cricket feed is now active.\n' +
+        '📢 Real-time wickets, match conclusions, and live scoreboards will be broadcasted here automatically.'
+    );
+  }
+}, 2500);
 
 // ============================================================================
 // Local PostgreSQL Database REST Endpoints
 // ============================================================================
 
-// Diagnostic Endpoint: Check PostgreSQL connectivity and table counts
-app.get(['/api/db/status', '/api/supabase/status'], async (_req, res) => {
+// Diagnostic Endpoint: Check PostgreSQL connectivity and table counts (Admin only)
+app.get(['/api/db/status', '/api/supabase/status'], adminAuth.requireAdmin, async (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   const safeUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
   try {
@@ -2794,14 +2860,20 @@ app.get(['/api/db/status', '/api/supabase/status'], async (_req, res) => {
   }
 });
 
-// Upsert Strategy Trade (First Entry, Second Entry, Bookset Exits - idempotent)
-app.post('/api/db/trades', async (req, res) => {
+// Upsert Strategy Trade (First Entry, Second Entry, Bookset Exits - idempotent, Admin only)
+app.post('/api/db/trades', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   try {
     const trade = req.body;
     if (!trade || !trade.matchId) {
       return res.status(400).json({ ok: false, error: 'Missing matchId or trade payload' });
     }
     await upsertTradeIdempotent(trade);
+    void adminAuth.recordAdminAudit(
+      'DB_WRITE_TRADE',
+      String(trade.matchId),
+      { entryType: trade.entryType, status: trade.status },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -2826,8 +2898,8 @@ app.get('/api/db/trades', async (req, res) => {
   }
 });
 
-// Upsert Match Record and Latest Score State
-app.post('/api/db/matches', async (req, res) => {
+// Upsert Match Record and Latest Score State (Admin only)
+app.post('/api/db/matches', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   try {
     const match = req.body;
     if (!match || !match.id) {
@@ -2987,6 +3059,12 @@ app.post('/api/db/matches', async (req, res) => {
       );
     }
 
+    void adminAuth.recordAdminAudit(
+      'DB_WRITE_MATCH',
+      String(match.id),
+      { format: match.format, status: match.status },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
     return res.json({ ok: true, matchUuid });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -3047,8 +3125,8 @@ app.get('/api/db/matches', async (_req, res) => {
   }
 });
 
-// Upsert Odds State and Snapshot
-app.post('/api/db/odds', async (req, res) => {
+// Upsert Odds State and Snapshot (Admin only)
+app.post('/api/db/odds', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   try {
     const { matchId, oddsState } = req.body;
     if (!matchId || !oddsState?.odds) {
@@ -3126,6 +3204,12 @@ app.post('/api/db/odds', async (req, res) => {
         ]
       );
     }
+    void adminAuth.recordAdminAudit(
+      'DB_WRITE_ODDS',
+      String(matchId),
+      { oddsKey: oddsState.oddsKey || matchId },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -3182,8 +3266,8 @@ app.get('/api/db/timeline/:matchId', async (req, res) => {
   }
 });
 
-// Upsert Strategy Signal (idempotent via event_dedupe_hash)
-app.post('/api/db/signals', async (req, res) => {
+// Upsert Strategy Signal (idempotent via event_dedupe_hash, Admin only)
+app.post('/api/db/signals', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   try {
     const signal = req.body as StrategySignal;
     if (!signal?.matchId) {
@@ -3191,20 +3275,32 @@ app.post('/api/db/signals', async (req, res) => {
     }
     const dedupeHash = `${signal.matchId}:${signal.signalType}:${signal.status}:${signal.currentInnings}:${signal.currentOver}:${signal.ballNumber || 0}:${signal.relevantOdds?.decimalOdds ?? 'null'}:${signal.relevantOdds?.opposingTeamOdds ?? 'null'}`.slice(0, 160);
     await pgStrategyStorageAdapter.insertSignal(signal, dedupeHash);
+    void adminAuth.recordAdminAudit(
+      'DB_WRITE_SIGNAL',
+      String(signal.matchId),
+      { signalType: signal.signalType, status: signal.status },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Upsert Trade Position (idempotent)
-app.post('/api/db/positions', async (req, res) => {
+// Upsert Trade Position (idempotent, Admin only)
+app.post('/api/db/positions', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   try {
     const position = req.body as TradePosition;
     if (!position?.matchId) {
       return res.status(400).json({ ok: false, error: 'Missing position or matchId' });
     }
     await pgStrategyStorageAdapter.upsertPosition(position);
+    void adminAuth.recordAdminAudit(
+      'DB_WRITE_POSITION',
+      String(position.matchId),
+      { positionType: position.positionType, status: position.status },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -3283,8 +3379,8 @@ app.get('/api/strategy/state', (_req, res) => {
   });
 });
 
-// Server-Saved Manual Override: Entry
-app.post('/api/strategy/:matchId/override-entry', async (req, res) => {
+// Server-Saved Manual Override: Entry (Admin only)
+app.post('/api/strategy/:matchId/override-entry', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   const { matchId } = req.params;
   const body = req.body || {};
   const positionType = (body.positionType === 'SECOND_ENTRY' ? 'SECOND_ENTRY' : 'FIRST_ENTRY') as PositionType;
@@ -3317,6 +3413,13 @@ app.post('/api/strategy/:matchId/override-entry', async (req, res) => {
     dbAvailable: isDbAvailable,
   });
 
+  void adminAuth.recordAdminAudit(
+    'STRATEGY_OVERRIDE_ENTRY',
+    matchId,
+    { positionType, entryOdds, innings, over: Number(body.over) || 0 },
+    req.adminUser?.ip || adminAuth.getClientIp(req)
+  );
+
   broadcastToClients({
     type: 'update',
     matches: matchStore.matches,
@@ -3328,8 +3431,8 @@ app.post('/api/strategy/:matchId/override-entry', async (req, res) => {
   return res.json({ ok: true, state });
 });
 
-// Server-Saved Manual Override: Exit
-app.post('/api/strategy/:matchId/override-exit', async (req, res) => {
+// Server-Saved Manual Override: Exit (Admin only)
+app.post('/api/strategy/:matchId/override-exit', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   const { matchId } = req.params;
   const body = req.body || {};
   const positionType = (body.positionType === 'SECOND_ENTRY' ? 'SECOND_ENTRY' : 'FIRST_ENTRY') as PositionType;
@@ -3347,6 +3450,13 @@ app.post('/api/strategy/:matchId/override-exit', async (req, res) => {
     dbAvailable: isDbAvailable,
   });
 
+  void adminAuth.recordAdminAudit(
+    'STRATEGY_OVERRIDE_EXIT',
+    matchId,
+    { positionType, exitOdds, over: Number(body.over) || 0, exitReason: body.exitReason || null },
+    req.adminUser?.ip || adminAuth.getClientIp(req)
+  );
+
   broadcastToClients({
     type: 'update',
     matches: matchStore.matches,
@@ -3358,14 +3468,21 @@ app.post('/api/strategy/:matchId/override-exit', async (req, res) => {
   return res.json({ ok: true, state });
 });
 
-// Server-Saved Manual Override: Reset Match Strategy State
-app.post('/api/strategy/:matchId/reset', async (req, res) => {
+// Server-Saved Manual Override: Reset Match Strategy State (Admin only)
+app.post('/api/strategy/:matchId/reset', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   const { matchId } = req.params;
   if (!matchId) {
     return res.status(400).json({ ok: false, error: 'Missing matchId' });
   }
   const state = await strategyCoordinator.resetMatch(matchId);
 
+  void adminAuth.recordAdminAudit(
+    'STRATEGY_RESET',
+    matchId,
+    {},
+    req.adminUser?.ip || adminAuth.getClientIp(req)
+  );
+
   broadcastToClients({
     type: 'update',
     matches: matchStore.matches,
@@ -3377,58 +3494,65 @@ app.post('/api/strategy/:matchId/reset', async (req, res) => {
   return res.json({ ok: true, state });
 });
 
-// Telegram Config from app_settings
-app.get('/api/db/telegram-config', async (_req, res) => {
+// Masked Telegram Config & Status (Admin only — NEVER returns botToken, only last 4 chars & source)
+app.get(['/api/db/telegram-config', '/api/admin/telegram'], adminAuth.requireAdmin, async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   try {
-    const result = await dbPool.query('SELECT value FROM app_settings WHERE key = $1 LIMIT 1', ['telegram_config']);
-    return res.json({ ok: true, data: result.rows[0]?.value || null });
+    await reloadTelegramConfigFromDb();
+    return res.json({ ok: true, data: getSafeTelegramStatus() });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message, data: null });
   }
 });
 
-app.post('/api/db/telegram-config', async (req, res) => {
+app.post(['/api/db/telegram-config', '/api/admin/telegram'], adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   try {
-    const config = req.body;
-    await dbPool.query(
-      `INSERT INTO app_settings (key, value, description, updated_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-      ['telegram_config', JSON.stringify(config), 'Telegram Bot automated live feed dispatch configuration']
-    );
+    const patch = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+    const { tokenUpdated, tokenCleared } = await saveTelegramToDb(dbPool, activeTelegramConfig, patch);
     await reloadTelegramConfigFromDb();
-    return res.json({ ok: true });
+    void adminAuth.recordAdminAudit(
+      'TELEGRAM_CONFIG_UPDATE',
+      'telegram_config',
+      { ...patch, tokenUpdated, tokenCleared },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
+    return res.json({ ok: true, data: getSafeTelegramStatus() });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Atomic Check & Record in app_settings (Used for preventing duplicate notifications)
-app.post('/api/db/app-settings/check-record', async (req, res) => {
+// Atomic Check & Record in app_settings (Admin only)
+app.post('/api/db/app-settings/check-record', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
   const { key, payload, description } = req.body || {};
   if (!key) return res.status(400).json({ ok: false, error: 'Missing key' });
 
   try {
-    const existing = await dbPool.query('SELECT key FROM app_settings WHERE key = $1 LIMIT 1', [key]);
-    if (existing.rows.length > 0) {
-      return res.json({ ok: true, alreadyRecorded: true });
-    }
-
-    await dbPool.query(
+    const insertRes = await dbPool.query(
       `INSERT INTO app_settings (key, value, description, updated_at)
        VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (key) DO NOTHING`,
+       ON CONFLICT (key) DO NOTHING
+       RETURNING key`,
       [key, JSON.stringify(payload || {}), description || 'Automated notification record']
     );
 
-    return res.json({ ok: true, alreadyRecorded: false });
+    const alreadyRecorded = insertRes.rows.length === 0;
+    void adminAuth.recordAdminAudit(
+      'APP_SETTINGS_CHECK_RECORD',
+      String(key),
+      { alreadyRecorded },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
+
+    return res.json({ ok: true, alreadyRecorded });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err.message, alreadyRecorded: false });
   }
 });
 
-// Get recorded First Entries
-app.get('/api/db/app-settings/first-entries', async (_req, res) => {
+// Get recorded First Entries (Admin only)
+app.get('/api/db/app-settings/first-entries', adminAuth.requireAdmin, async (_req, res) => {
   try {
     const result = await dbPool.query("SELECT key FROM app_settings WHERE key LIKE 'tele_entry:%:FIRST_ENTRY'");
     const matchIds = result.rows.map((r: any) => {

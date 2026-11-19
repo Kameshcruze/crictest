@@ -24,27 +24,14 @@ import { MatchCard } from './components/MatchCard';
 import { MatchDetailModal } from './components/MatchDetailModal';
 import { OnlineScriptModal } from './components/OnlineScriptModal';
 import { ApiInspectorModal } from './components/ApiInspectorModal';
-import { TelegramBotModal } from './components/TelegramBotModal';
-import { OddsDiagnosticModal } from './components/OddsDiagnosticModal';
 import { MatchAnalysisPage } from './components/MatchAnalysisPage';
 import { EntryPossibilitiesModal } from './components/EntryPossibilitiesModal';
 import { useOddsManager } from './hooks/useOddsManager';
 import { strategyEngine, detectTeamInControl, isWithinEntryWindow } from './services/strategy/engine';
 import { SerializedMatchStrategyState } from './services/strategy/types';
+import { clearLegacyTelegramLocalStorage } from './services/telegramService';
 import {
-  TelegramConfig,
-  getStoredTelegramConfig,
-  saveStoredTelegramConfig,
-  sendTelegramMessage,
-  formatWicketAlert,
-  formatResultAlert,
-  formatScoreboardDigest,
-} from './services/telegramService';
-import {
-  migrateLocalStorageToSupabase,
   fetchMatchesFromSupabase,
-  checkAndRecordMatchConclusionInDb,
-  fetchRecordedFirstEntriesFromDb,
   fetchStrategyTradesFromDb,
   fetchServerStrategyStates,
 } from './services/supabaseSyncService';
@@ -73,7 +60,6 @@ export default function App() {
   });
   const [activeNav, setActiveNav] = useState<NavSection>('matches');
   const [sport, setSport] = useState<SportMode>('cricket');
-  const [telegramInitialSection, setTelegramInitialSection] = useState<'credentials' | 'alerts'>('credentials');
 
   const handleThemeChange = useCallback((next: ThemeMode) => {
     setTheme(next);
@@ -102,8 +88,6 @@ export default function App() {
   const [selectedMatch, setSelectedMatch] = useState<ParsedCricketMatch | null>(null);
   const [isScriptModalOpen, setIsScriptModalOpen] = useState<boolean>(false);
   const [isInspectorModalOpen, setIsInspectorModalOpen] = useState<boolean>(false);
-  const [isTelegramModalOpen, setIsTelegramModalOpen] = useState<boolean>(false);
-  const [isOddsDiagnosticOpen, setIsOddsDiagnosticOpen] = useState<boolean>(false);
   const [isEntryRadarOpen, setIsEntryRadarOpen] = useState<boolean>(false);
 
   // Authoritative Server SSE State (Read-only browser mirror)
@@ -244,16 +228,12 @@ export default function App() {
     oddsByMatchId,
     getMatchOdds,
     refreshMatchOdds,
-    refreshAllOdds,
-    isGlobalRefreshing,
-    totalRecordsReceived,
   } = useOddsManager(matches, serverOddsByMatch);
 
-  // Telegram Bot Configuration
-  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>(getStoredTelegramConfig);
-  const lastDigestTimeRef = useRef<number>(Date.now());
-  const finishedMatchesRef = useRef<Set<string>>(new Set());
-  const isFirstFetchRef = useRef<boolean>(true);
+  // Purge any legacy browser-stored Telegram config keys on boot
+  useEffect(() => {
+    clearLegacyTelegramLocalStorage();
+  }, []);
 
   const inFlightRef = useRef<boolean>(false);
 
@@ -277,15 +257,6 @@ export default function App() {
         setLastUpdated(new Date());
         setTickCounter((prev) => prev + 1);
 
-        if (isFirstFetchRef.current) {
-          result.matches.forEach((m) => {
-            if (m.status === 'completed') {
-              finishedMatchesRef.current.add(m.id);
-            }
-          });
-          isFirstFetchRef.current = false;
-        }
-
         let scoreChanged = false;
         let wicketFell = false;
 
@@ -297,23 +268,6 @@ export default function App() {
               if (prev) {
                 if (activeScore.wickets > prev.wickets) {
                   wicketFell = true;
-
-                  if (
-                    telegramConfig.enabled &&
-                    telegramConfig.botToken &&
-                    telegramConfig.chatId &&
-                    telegramConfig.notifyWickets
-                  ) {
-                    const battingTeam = m.battingTeamKey === m.team2.key ? m.team2.shortName : m.team1.shortName;
-                    const alertHtml = formatWicketAlert(
-                      m,
-                      battingTeam,
-                      activeScore.runs,
-                      activeScore.wickets,
-                      activeScore.overs
-                    );
-                    sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, alertHtml);
-                  }
                 } else if (activeScore.runs > prev.runs) {
                   scoreChanged = true;
                 }
@@ -324,41 +278,7 @@ export default function App() {
               };
             }
           }
-
-          if (
-            m.status === 'completed' &&
-            telegramConfig.enabled &&
-            telegramConfig.botToken &&
-            telegramConfig.chatId &&
-            telegramConfig.notifyResults &&
-            !finishedMatchesRef.current.has(m.id)
-          ) {
-            finishedMatchesRef.current.add(m.id);
-            checkAndRecordMatchConclusionInDb(m.id, {
-              team1: m.team1.name,
-              team2: m.team2.name,
-              result: m.resultText || m.statusLabel,
-              seriesName: m.seriesName,
-            }).then((allowed) => {
-              if (allowed) {
-                const resultHtml = formatResultAlert(m);
-                sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, resultHtml);
-              }
-            });
-          }
         });
-
-        if (
-          telegramConfig.enabled &&
-          telegramConfig.botToken &&
-          telegramConfig.chatId &&
-          telegramConfig.notifyPeriodicDigest &&
-          Date.now() - lastDigestTimeRef.current >= telegramConfig.digestIntervalMinutes * 60 * 1000
-        ) {
-          lastDigestTimeRef.current = Date.now();
-          const digestHtml = formatScoreboardDigest(result.matches);
-          sendTelegramMessage(telegramConfig.botToken, telegramConfig.chatId, digestHtml);
-        }
 
         if (soundEnabled && silent) {
           if (wicketFell) {
@@ -384,7 +304,7 @@ export default function App() {
         setIsFetching(false);
       }
     },
-    [countryCode, soundEnabled, telegramConfig]
+    [countryCode, soundEnabled]
   );
 
   // Real-time Entry Opportunities Count for Radar Badge
@@ -418,21 +338,11 @@ export default function App() {
   }, [matches, oddsByMatchId, recordedFirstEntries, strategyVersion]);
 
   useEffect(() => {
-    migrateLocalStorageToSupabase().catch(() => {});
-
     fetchMatchesFromSupabase()
       .then((savedMatches) => {
         if (savedMatches.length > 0) {
           setMatches((prev) => (prev.length === 0 ? savedMatches : prev));
           setAllServerMatches((prev) => (prev.length === 0 ? savedMatches : prev));
-        }
-      })
-      .catch(() => {});
-
-    fetchRecordedFirstEntriesFromDb()
-      .then((entries) => {
-        if (entries.size > 0) {
-          setRecordedFirstEntries((prev) => new Set([...prev, ...entries]));
         }
       })
       .catch(() => {});
@@ -542,11 +452,6 @@ export default function App() {
 
   const liveMatchesCount = matches.filter((m) => m.status === 'live').length;
 
-  const openTelegramModal = useCallback((section: 'credentials' | 'alerts') => {
-    setTelegramInitialSection(section);
-    setIsTelegramModalOpen(true);
-  }, []);
-
   const sharedModals = (
     <>
       <MatchDetailModal
@@ -571,29 +476,6 @@ export default function App() {
         }}
         isFetching={isFetching}
         latencyMs={latencyMs}
-      />
-
-      <TelegramBotModal
-        isOpen={isTelegramModalOpen}
-        onClose={() => setIsTelegramModalOpen(false)}
-        config={telegramConfig}
-        onSaveConfig={(newConfig) => {
-          setTelegramConfig(newConfig);
-          saveStoredTelegramConfig(newConfig);
-        }}
-        matches={matches}
-        initialSection={telegramInitialSection}
-      />
-
-      <OddsDiagnosticModal
-        isOpen={isOddsDiagnosticOpen}
-        onClose={() => setIsOddsDiagnosticOpen(false)}
-        matches={matches}
-        oddsByMatchId={oddsByMatchId}
-        onRefreshAll={refreshAllOdds}
-        onRefreshMatch={refreshMatchOdds}
-        isRefreshing={isGlobalRefreshing}
-        totalRecordsReceived={totalRecordsReceived}
       />
 
       <EntryPossibilitiesModal
@@ -645,8 +527,6 @@ export default function App() {
         sport={sport}
         onSelectSport={setSport}
         onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
-        onOpenAlertsModal={() => openTelegramModal('alerts')}
-        onOpenTelegramModal={() => openTelegramModal('credentials')}
         onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
         entryOpportunitiesCount={entryOpportunitiesCount}
       />
@@ -656,7 +536,6 @@ export default function App() {
         activeNav={activeNav}
         onSelectNav={setActiveNav}
         onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
-        onOpenAlertsModal={() => openTelegramModal('alerts')}
         entryOpportunitiesCount={entryOpportunitiesCount}
       />
 
@@ -675,8 +554,6 @@ export default function App() {
             theme={theme}
             onThemeChange={handleThemeChange}
             onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
-            onOpenAlertsModal={() => openTelegramModal('alerts')}
-            onOpenTelegramModal={() => openTelegramModal('credentials')}
             onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
             entryOpportunitiesCount={entryOpportunitiesCount}
             liveCount={liveMatchesCount}
@@ -703,12 +580,8 @@ export default function App() {
               isSseActive={isSseConnected}
               latencyMs={latencyMs}
               lastUpdated={lastUpdated}
-              isTelegramActive={telegramConfig.enabled && !!telegramConfig.botToken && !!telegramConfig.chatId}
-              onOpenTelegramModal={() => openTelegramModal('credentials')}
-              onOpenAlertsModal={() => openTelegramModal('alerts')}
               onOpenInspectorModal={() => setIsInspectorModalOpen(true)}
               onOpenScriptModal={() => setIsScriptModalOpen(true)}
-              onOpenOddsDiagnosticModal={() => setIsOddsDiagnosticOpen(true)}
             />
           ) : (
             <>
@@ -873,7 +746,6 @@ export default function App() {
         activeNav={activeNav}
         onSelectNav={setActiveNav}
         onOpenEntryRadarModal={() => setIsEntryRadarOpen(true)}
-        onOpenAlertsModal={() => openTelegramModal('alerts')}
         entryOpportunitiesCount={entryOpportunitiesCount}
       />
 

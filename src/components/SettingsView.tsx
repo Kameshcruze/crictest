@@ -6,11 +6,8 @@ import {
   VolumeX,
   RefreshCw,
   Globe,
-  Send,
-  Bell,
   Code2,
   Cloud,
-  Zap,
   Wifi,
   ChevronRight,
 } from 'lucide-react';
@@ -28,12 +25,8 @@ interface SettingsViewProps {
   isSseActive: boolean;
   latencyMs: number;
   lastUpdated: Date;
-  isTelegramActive: boolean;
-  onOpenTelegramModal: () => void;
-  onOpenAlertsModal: () => void;
   onOpenInspectorModal: () => void;
   onOpenScriptModal: () => void;
-  onOpenOddsDiagnosticModal: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -48,12 +41,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   isSseActive,
   latencyMs,
   lastUpdated,
-  isTelegramActive,
-  onOpenTelegramModal,
-  onOpenAlertsModal,
   onOpenInspectorModal,
   onOpenScriptModal,
-  onOpenOddsDiagnosticModal,
 }) => {
   const [ccDraft, setCcDraft] = React.useState(countryCode);
 
@@ -227,73 +216,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
-      {/* Telegram & Alerts */}
+      {/* Inspector & Developer Tools */}
       <section
         className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5"
         style={{ boxShadow: 'var(--card-shadow)' }}
       >
-        <div className="flex items-center justify-between gap-2 mb-3">
-          <div>
-            <h2 className="text-sm font-bold text-[var(--tx)]">Telegram & Broadcast Alerts</h2>
-            <p className="text-xs text-[var(--mu)] mt-0.5">
-              Configure bot credentials, group chat ID, and event notification triggers.
-            </p>
-          </div>
-          <span
-            className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full border ${
-              isTelegramActive
-                ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
-                : 'bg-[var(--sf-2)] text-[var(--mu)] border-[var(--bd)]'
-            }`}
-          >
-            {isTelegramActive ? 'Active' : 'Standby'}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <button
-            type="button"
-            onClick={onOpenAlertsModal}
-            className="flex items-center justify-between p-3.5 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] text-left transition-colors group"
-          >
-            <div className="flex items-center gap-2.5">
-              <Bell className="w-4 h-4 text-[var(--rdt)]" />
-              <div>
-                <div className="text-xs font-semibold text-[var(--tx)]">Alerts Configuration</div>
-                <div className="text-[11px] text-[var(--mu)]">Over, wicket, result & strategy triggers</div>
-              </div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-[var(--mu)] group-hover:text-[var(--rdt)]" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenTelegramModal}
-            className="flex items-center justify-between p-3.5 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] text-left transition-colors group"
-          >
-            <div className="flex items-center gap-2.5">
-              <Send className="w-4 h-4 text-[var(--rdt)]" />
-              <div>
-                <div className="text-xs font-semibold text-[var(--tx)]">Telegram Settings</div>
-                <div className="text-[11px] text-[var(--mu)]">Token, Chat ID, ping & scoreboard</div>
-              </div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-[var(--mu)] group-hover:text-[var(--rdt)]" />
-          </button>
-        </div>
-      </section>
-
-      {/* Diagnostics & Developer Tools */}
-      <section
-        className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5"
-        style={{ boxShadow: 'var(--card-shadow)' }}
-      >
-        <h2 className="text-sm font-bold text-[var(--tx)]">Diagnostics & Inspector Tools</h2>
+        <h2 className="text-sm font-bold text-[var(--tx)]">Inspector Tools</h2>
         <p className="text-xs text-[var(--mu)] mt-0.5 mb-3">
-          Inspect live Crex API JSON payloads, multi-match odds isolation, and cloud runner scripts.
+          Inspect live Crex API JSON payloads and cloud runner scripts.
         </p>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
             type="button"
             onClick={onOpenInspectorModal}
@@ -302,18 +235,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex items-center gap-2">
               <Code2 className="w-4 h-4 text-[var(--rdt)]" />
               <span className="text-xs font-semibold text-[var(--tx)]">API Raw Inspector</span>
-            </div>
-            <ChevronRight className="w-4 h-4 text-[var(--mu)]" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenOddsDiagnosticModal}
-            className="flex items-center justify-between p-3 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--warn-bg)] border border-[var(--bd)] text-left transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 text-[var(--warn-tx)]" />
-              <span className="text-xs font-semibold text-[var(--tx)]">Odds Diagnostics</span>
             </div>
             <ChevronRight className="w-4 h-4 text-[var(--mu)]" />
           </button>

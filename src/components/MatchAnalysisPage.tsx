@@ -55,6 +55,7 @@ interface MatchAnalysisPageProps {
   onRefreshOdds?: (matchId: string) => Promise<void>;
   theme?: ThemeMode;
   onThemeChange?: (theme: ThemeMode) => void;
+  isAdmin?: boolean;
 }
 
 export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
@@ -69,6 +70,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   onRefreshOdds,
   theme,
   onThemeChange,
+  isAdmin = false,
 }) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [freshnessSec, setFreshnessSec] = useState<number>(0);
@@ -1094,18 +1096,20 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 24/7 Server Evaluated
               </span>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleResetStrategyState}
-                disabled={overridePending}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[var(--tx)] bg-[var(--sf-2)] border border-[var(--bd)] hover:bg-[var(--rds)] hover:text-[var(--rdt)] rounded-lg transition-colors disabled:opacity-50"
-                title="Manual Override: Reset server strategy state for this match"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Manual Override: Reset</span>
-              </button>
-            </div>
+            {isAdmin && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleResetStrategyState}
+                  disabled={overridePending}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[var(--tx)] bg-[var(--sf-2)] border border-[var(--bd)] hover:bg-[var(--rds)] hover:text-[var(--rdt)] rounded-lg transition-colors disabled:opacity-50"
+                  title="Manual Override: Reset server strategy state for this match"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Manual Override: Reset</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* 4 Strategy Rule Cards */}
@@ -1204,7 +1208,9 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     strategyState.stage === 'ACTIVE_FIRST_ENTRY'
                       ? `Entered @ ${strategyState.firstEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.entryOdds} (${strategyState.firstEntryTrade?.entryPaise ?? Math.round(((strategyState.firstEntryPosition.entryOdds ?? 1.86) - 1) * 100)}p) • ${strategyState.firstEntryTrade?.entryWickets ?? strategyState.firstEntryPosition.entryWickets ?? 0} wkts`
                       : strategyState.firstEntryPosition.status === 'CANDIDATE_DETECTED'
-                      ? 'Candidate signal qualified (manual override available)'
+                      ? isAdmin
+                        ? 'Candidate signal qualified (manual override available)'
+                        : 'Candidate signal qualified'
                       : 'Candidate signal only (trade not recorded)'}
                   </span>
                   <span className="text-[10px] text-[var(--mu)] flex items-center gap-1 mt-0.5">
@@ -1220,15 +1226,17 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                 strategyState.stage !== 'ACTIVE_SECOND_ENTRY' &&
                 strategyState.stage !== 'FIRST_BOOKSET_COMPLETED' &&
                 strategyState.stage !== 'FULL_BOOKSET_COMPLETED' ? (
-                  <button
-                    type="button"
-                    onClick={handleRecordFirstEntry}
-                    disabled={!bookmaker?.decimalBack || overridePending}
-                    className="px-2.5 py-1 text-xs font-semibold text-[var(--ok-tx)] bg-[var(--ok-bg)] border border-[var(--ok-bd)] rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
-                    title="Manual Override (saved on server)"
-                  >
-                    Manual Override: 1st Entry
-                  </button>
+                  isAdmin ? (
+                    <button
+                      type="button"
+                      onClick={handleRecordFirstEntry}
+                      disabled={!bookmaker?.decimalBack || overridePending}
+                      className="px-2.5 py-1 text-xs font-semibold text-[var(--ok-tx)] bg-[var(--ok-bg)] border border-[var(--ok-bd)] rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
+                      title="Manual Override (saved on server)"
+                    >
+                      Manual Override: 1st Entry
+                    </button>
+                  ) : null
                 ) : (
                   <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--ok-tx)] bg-[var(--ok-bg)] px-2.5 py-1 rounded-lg border border-[var(--ok-bd)]">
                     <CheckCircle2 className="w-3.5 h-3.5" />
@@ -1307,7 +1315,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     ? `2nd Entered @ ${strategyState.secondEntryTrade?.entryDecimal?.toFixed(2) ?? strategyState.secondEntryPosition.entryOdds ?? '—'} (${strategyState.secondEntryTrade?.entryPaise ?? Math.round(((strategyState.secondEntryPosition.entryOdds ?? 1) - 1) * 100)}p) • ${strategyState.secondEntryTrade?.entryOver ?? strategyState.secondEntryPosition.entryOver ?? '—'} ov`
                     : 'Server monitoring automatic 2nd entry'}
                 </span>
-                {strategyState.secondEntryPosition.status !== 'RECORDED_ENTRY' &&
+                {isAdmin &&
+                  strategyState.secondEntryPosition.status !== 'RECORDED_ENTRY' &&
                   strategyState.secondEntryPosition.status !== 'RECORDED_EXIT' && (
                     <button
                       type="button"
@@ -1373,7 +1382,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                     ? `Exited @ ${strategyState.firstEntryTrade?.exitDecimal?.toFixed(2) ?? strategyState.firstEntryPosition.exitOdds ?? '—'} (${strategyState.firstEntryTrade?.exitOver ?? strategyState.firstEntryPosition.exitOver ?? '—'} ov)`
                     : 'Awaiting automatic server exit'}
                 </span>
-                {strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' && (
+                {isAdmin && strategyState.firstEntryPosition.status === 'RECORDED_ENTRY' && (
                   <button
                     type="button"
                     onClick={handleRecordFirstExit}

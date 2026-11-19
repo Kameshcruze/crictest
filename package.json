@@ -11,15 +11,19 @@
     "worker": "node live-worker.js",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/services/strategy/__tests__/strategy.test.ts"
+    "test": "tsx --test src/services/strategy/__tests__/strategy.test.ts src/services/security/__tests__/adminAuth.test.ts src/services/security/__tests__/telegramConfig.test.ts",
+    "admin:hash": "tsx scripts/hash-admin-password.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
+    "@types/bcryptjs": "^2.4.6",
     "@types/pg": "^8.23.1",
     "@vitejs/plugin-react": "^6.1.1",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "helmet": "^8.3.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "pg": "^8.23.1",

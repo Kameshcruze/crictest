@@ -2,8 +2,6 @@ import React from 'react';
 import {
   Radio,
   Target,
-  Bell,
-  Send,
   SlidersHorizontal,
   Search,
   X,
@@ -39,8 +37,6 @@ interface AppShellNavProps {
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
   onOpenEntryRadarModal: () => void;
-  onOpenAlertsModal: () => void;
-  onOpenTelegramModal: () => void;
   onOpenInspectorModal: () => void;
   entryOpportunitiesCount: number;
   liveCount: number;
@@ -61,8 +57,6 @@ export const DesktopSidebar: React.FC<
     | 'sport'
     | 'onSelectSport'
     | 'onOpenEntryRadarModal'
-    | 'onOpenAlertsModal'
-    | 'onOpenTelegramModal'
     | 'onOpenInspectorModal'
     | 'entryOpportunitiesCount'
   >
@@ -72,8 +66,6 @@ export const DesktopSidebar: React.FC<
   sport,
   onSelectSport,
   onOpenEntryRadarModal,
-  onOpenAlertsModal,
-  onOpenTelegramModal,
   onOpenInspectorModal,
   entryOpportunitiesCount,
 }) => {
@@ -156,24 +148,6 @@ export const DesktopSidebar: React.FC<
 
           <button
             type="button"
-            onClick={onOpenAlertsModal}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-[var(--tx)] hover:bg-[var(--sf-2)] transition-colors"
-          >
-            <Bell className="w-4 h-4 shrink-0" />
-            <span>Alerts</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenTelegramModal}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-[var(--tx)] hover:bg-[var(--sf-2)] transition-colors"
-          >
-            <Send className="w-4 h-4 shrink-0" />
-            <span>Telegram</span>
-          </button>
-
-          <button
-            type="button"
             aria-current={activeNav === 'settings' ? 'page' : undefined}
             onClick={() => onSelectNav('settings')}
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-colors ${
@@ -188,15 +162,8 @@ export const DesktopSidebar: React.FC<
         </nav>
       </div>
 
-      {/* Plain Bottom Utility Links (no divider border, no icons) */}
+      {/* Plain Bottom Utility Links */}
       <div className="space-y-2 text-[11px] px-1">
-        <button
-          type="button"
-          onClick={onOpenTelegramModal}
-          className="block w-full text-left text-[var(--mu)] hover:text-[var(--tx)] transition-colors font-medium rounded"
-        >
-          Telegram Settings
-        </button>
         <button
           type="button"
           onClick={onOpenInspectorModal}
@@ -215,14 +182,12 @@ export const TabletRail: React.FC<
     | 'activeNav'
     | 'onSelectNav'
     | 'onOpenEntryRadarModal'
-    | 'onOpenAlertsModal'
     | 'entryOpportunitiesCount'
   >
 > = ({
   activeNav,
   onSelectNav,
   onOpenEntryRadarModal,
-  onOpenAlertsModal,
   entryOpportunitiesCount,
 }) => {
   return (
@@ -269,15 +234,6 @@ export const TabletRail: React.FC<
 
         <button
           type="button"
-          onClick={onOpenAlertsModal}
-          className="flex flex-col items-center gap-1 py-2 px-2 rounded-xl w-full text-[var(--mu)] hover:text-[var(--tx)] transition-colors"
-        >
-          <Bell className="w-4 h-4" />
-          <span className="text-[11px] font-semibold">Alerts</span>
-        </button>
-
-        <button
-          type="button"
           aria-current={activeNav === 'settings' ? 'page' : undefined}
           onClick={() => onSelectNav('settings')}
           className={`flex flex-col items-center gap-1 py-2 px-2 rounded-xl w-full transition-colors ${
@@ -301,7 +257,6 @@ export const TopHeaderBar: React.FC<AppShellNavProps> = ({
   theme,
   onThemeChange,
   onOpenEntryRadarModal,
-  onOpenTelegramModal,
   entryOpportunitiesCount,
   liveCount,
   searchQuery,
@@ -393,16 +348,6 @@ export const TopHeaderBar: React.FC<AppShellNavProps> = ({
             </span>
           </button>
 
-          <button
-            type="button"
-            onClick={onOpenTelegramModal}
-            aria-label="Telegram Settings"
-            className="inline-flex items-center gap-1.5 px-2.5 xl:px-3.5 py-2 rounded-xl text-xs font-semibold bg-[var(--rd)] text-white hover:opacity-90 transition-opacity whitespace-nowrap shadow-xs shrink-0"
-          >
-            <Send className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline">Telegram</span>
-          </button>
-
           <ThemeToggle theme={theme} onToggle={onThemeChange} />
         </div>
       </header>
@@ -437,14 +382,6 @@ export const TopHeaderBar: React.FC<AppShellNavProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={onOpenTelegramModal}
-            className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[var(--rd)] text-white hover:opacity-90 transition-opacity"
-          >
-            <Send className="w-3.5 h-3.5" />
-            <span>Telegram</span>
-          </button>
           <ThemeToggle theme={theme} onToggle={onThemeChange} />
         </div>
       </header>
@@ -487,14 +424,12 @@ export const MobileBottomNav: React.FC<
     | 'activeNav'
     | 'onSelectNav'
     | 'onOpenEntryRadarModal'
-    | 'onOpenAlertsModal'
     | 'entryOpportunitiesCount'
   >
 > = ({
   activeNav,
   onSelectNav,
   onOpenEntryRadarModal,
-  onOpenAlertsModal,
   entryOpportunitiesCount,
 }) => {
   return (
@@ -502,7 +437,7 @@ export const MobileBottomNav: React.FC<
       aria-label="Mobile navigation"
       className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-[var(--sf)] border-t border-[var(--bd)] px-2 py-1.5"
     >
-      <div className="grid grid-cols-4 gap-1 max-w-md mx-auto">
+      <div className="grid grid-cols-3 gap-1 max-w-md mx-auto">
         <button
           type="button"
           aria-current={activeNav === 'matches' ? 'page' : undefined}
@@ -523,17 +458,8 @@ export const MobileBottomNav: React.FC<
           <Target className="w-4 h-4 mb-0.5" />
           <span>Radar</span>
           {entryOpportunitiesCount > 0 && (
-            <span className="absolute top-1 right-6 w-2 h-2 rounded-full bg-[var(--rd)]" />
+            <span className="absolute top-1 right-8 w-2 h-2 rounded-full bg-[var(--rd)]" />
           )}
-        </button>
-
-        <button
-          type="button"
-          onClick={onOpenAlertsModal}
-          className="flex flex-col items-center justify-center py-1 rounded-xl text-[11px] font-semibold text-[var(--mu)] hover:text-[var(--tx)] transition-colors"
-        >
-          <Bell className="w-4 h-4 mb-0.5" />
-          <span>Alerts</span>
         </button>
 
         <button

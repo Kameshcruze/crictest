@@ -14,7 +14,6 @@ import {
   SerializedMatchStrategyState,
   PositionType,
 } from './strategy/types';
-import { TelegramConfig } from './telegramService';
 
 export interface MatchTimelineTick {
   id: number;
@@ -51,80 +50,6 @@ export interface TimelineResponse {
   missedTicks: number;
   count: number;
   data: MatchTimelineTick[];
-}
-
-/**
- * Migration Result Metrics
- */
-export interface LocalMigrationResult {
-  discovered: number;
-  migrated: number;
-  skipped: number;
-  failed: number;
-  details: string[];
-}
-
-/**
- * Safe migration of existing browser localStorage data to Local PostgreSQL
- */
-export async function migrateLocalStorageToSupabase(): Promise<LocalMigrationResult> {
-  const result: LocalMigrationResult = {
-    discovered: 0,
-    migrated: 0,
-    skipped: 0,
-    failed: 0,
-    details: [],
-  };
-
-  if (typeof window === 'undefined') {
-    result.details.push('Non-browser environment; skipping localStorage migration');
-    return result;
-  }
-
-  try {
-    const STORAGE_KEY = 'crex_telegram_bot_config_v2';
-    const localRaw = localStorage.getItem(STORAGE_KEY);
-
-    if (localRaw) {
-      result.discovered += 1;
-      let parsed: TelegramConfig;
-      try {
-        parsed = JSON.parse(localRaw);
-      } catch {
-        result.failed += 1;
-        result.details.push('Local telegram config JSON was malformed');
-        return result;
-      }
-
-      // Check remote config
-      const checkRes = await fetch('/api/db/telegram-config');
-      const existing = checkRes.ok ? await checkRes.json() : null;
-
-      if (existing?.data) {
-        result.skipped += 1;
-        result.details.push('Remote telegram_config already present in PostgreSQL (preserved remote)');
-      } else {
-        const postRes = await fetch('/api/db/telegram-config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(parsed),
-        });
-
-        if (postRes.ok) {
-          result.migrated += 1;
-          result.details.push('Successfully migrated telegram bot config to PostgreSQL app_settings');
-        } else {
-          result.failed += 1;
-          result.details.push('Failed to save telegram config to PostgreSQL');
-        }
-      }
-    }
-  } catch (err: any) {
-    result.failed += 1;
-    result.details.push(`Unexpected error during migration: ${err?.message || err}`);
-  }
-
-  return result;
 }
 
 /**
