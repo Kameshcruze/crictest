@@ -33,6 +33,13 @@ import {
   strategyEngine,
   detectTeamInControl,
 } from '../services/strategy';
+import {
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  EvaluableMatchFormat,
+  normalizeMatchFormat,
+  isFormatAllowedForStrategy,
+  formatDisplayLabel,
+} from '../services/strategy/formatFilter';
 import { SerializedMatchStrategyState } from '../services/strategy/types';
 import {
   loadMatchStrategyFromSupabase,
@@ -56,6 +63,7 @@ interface MatchAnalysisPageProps {
   theme?: ThemeMode;
   onThemeChange?: (theme: ThemeMode) => void;
   isAdmin?: boolean;
+  strategyAllowedFormats?: readonly EvaluableMatchFormat[];
 }
 
 export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
@@ -71,6 +79,7 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   theme,
   onThemeChange,
   isAdmin = false,
+  strategyAllowedFormats = DEFAULT_STRATEGY_ALLOWED_FORMATS,
 }) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [freshnessSec, setFreshnessSec] = useState<number>(0);
@@ -85,6 +94,16 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
   const isLive = match?.status === 'live';
   const isCompleted = match?.status === 'completed';
   const isUpcoming = match?.status === 'upcoming';
+  const detectedFormat = match
+    ? normalizeMatchFormat(match.raw?.fo ?? match.format, match.raw?.t)
+    : 'UNKNOWN';
+  const isStrategyFormatEvaluated =
+    !match ||
+    isFormatAllowedForStrategy(
+      match.raw?.fo ?? match.format,
+      strategyAllowedFormats,
+      match.raw?.t
+    );
 
   // Live seconds elapsed counter since last odds update
   useEffect(() => {
@@ -1092,11 +1111,17 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
               <h2 className="text-xs font-bold uppercase tracking-wider text-[var(--mu)]">
                 Section C: Server Strategy Engine (Read-Only UI)
               </h2>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
-                24/7 Server Evaluated
-              </span>
+              {isStrategyFormatEvaluated ? (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
+                  24/7 Server Evaluated
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-[var(--warn-bg)] text-[var(--warn-tx)] border border-[var(--warn-bd)]">
+                  Skipped (format)
+                </span>
+              )}
             </div>
-            {isAdmin && (
+            {isAdmin && isStrategyFormatEvaluated && (
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -1112,6 +1137,30 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             )}
           </div>
 
+          {!isStrategyFormatEvaluated ? (
+            <div className="p-4 sm:p-5 rounded-xl bg-[var(--warn-bg)] border border-[var(--warn-bd)] text-[var(--warn-tx)] flex items-start gap-3">
+              <ShieldAlert className="w-5 h-5 shrink-0 mt-0.5" />
+              <div className="space-y-1 text-xs">
+                <div className="font-bold text-sm">
+                  Strategy is not evaluated for this format
+                </div>
+                <p className="leading-relaxed text-[var(--tx)]">
+                  This match was detected as{' '}
+                  <strong className="font-mono">{formatDisplayLabel(detectedFormat)}</strong>. The
+                  strategy engine currently evaluates only{' '}
+                  <strong className="font-mono">
+                    {strategyAllowedFormats.length > 0
+                      ? strategyAllowedFormats.map(formatDisplayLabel).join(', ')
+                      : 'no formats'}
+                  </strong>{' '}
+                  matches (over limits 10.0 / 6.0). No live strategy signals, trades, or alerts are
+                  generated for this match. Live scores, live odds, session markets, and the saved
+                  match timeline below remain active and fully tracked.
+                </p>
+              </div>
+            </div>
+          ) : (
+          <>
           {/* 4 Strategy Rule Cards */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* 1. FIRST-ENTRY STATUS */}
@@ -1587,6 +1636,8 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
               </div>
             )}
           </div>
+          </>
+          )}
 
           {/* Append-Only Saved Timeline History (Ball 1 to Now) */}
           <div className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)]">

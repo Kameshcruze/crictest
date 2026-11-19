@@ -182,7 +182,10 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
 
   const venueName = raw.vname || resolveVenue(raw.v);
   const seriesName = raw.sfullname || raw.sname || resolveSeries(raw.q);
-  const format = (raw.fo || raw.t || 'Match').toString().trim();
+  const rawTFormat = typeof raw.t === 'string' && raw.t.trim() && !/^-?\d+(?:\.\d+)?$/.test(raw.t.trim())
+    ? raw.t.trim()
+    : '';
+  const format = String(raw.fo || rawTFormat || 'Match').trim();
   const matchTitlePrefix = raw.matchNums ? `${raw.matchNums} ${format}` : format;
 
   // Innings parsing (item.k counts as 2nd innings ONLY if it parses as a real score AND overs/balls > 0)
@@ -347,48 +350,25 @@ export interface FetchResult {
 }
 
 /**
- * Strict Tournament Filter:
- * Only allows matches belonging to:
- * 1. WBBL - Women's Big Bash League 2026 (series key 2KG / ^2KG)
- * 2. Abu Dhabi T10 2026 (series key 2IO / ^2IO)
+/**
+ * Tournament filtering is enforced server-side via Admin -> Settings (allowedSeriesFilter)
+ * and publicVisibleFormats. The browser no longer hardcodes WBBL / Abu Dhabi T10 only.
  */
-export function isAllowedTournament(match: {
+export function isAllowedTournament(_match: {
   seriesName?: string;
   seriesKey?: string;
   format?: string;
   matchTitlePrefix?: string;
   raw?: any;
 }): boolean {
-  const rawQ = String(match.seriesKey || match.raw?.q || '').replace(/^\^/, '').toUpperCase();
-  const sName = String(match.seriesName || match.raw?.sfullname || match.raw?.sname || '').toLowerCase();
-  const fName = String(match.matchTitlePrefix || match.raw?.fName || '').toLowerCase();
-  const fmt = String(match.format || match.raw?.fo || '').toLowerCase();
-  const combined = `${sName} ${fName} ${fmt}`.toLowerCase();
-
-  // 1. WBBL - Women's Big Bash League 2026
-  const isWbbl =
-    rawQ === '2KG' ||
-    combined.includes('wbbl') ||
-    combined.includes('big bash');
-
-  // 2. Abu Dhabi T10 2026
-  const isAbuDhabiT10 =
-    rawQ === '2IO' ||
-    (combined.includes('abu dhabi') && (combined.includes('t10') || combined.includes('t-10'))) ||
-    combined.includes('abudhabi t10');
-
-  return isWbbl || isAbuDhabiT10;
+  return true;
 }
 
 export function parseMatchesMap(rawData: RawApiResponse): ParsedCricketMatch[] {
   const matches: ParsedCricketMatch[] = [];
   for (const [id, rawMatch] of Object.entries(rawData)) {
     if (rawMatch && typeof rawMatch === 'object' && rawMatch.b && rawMatch.c) {
-      const parsed = transformCrexMatch(id, rawMatch);
-      // Strictly restrict matches to WBBL 2026 and Abu Dhabi T10 2026 only
-      if (isAllowedTournament(parsed)) {
-        matches.push(parsed);
-      }
+      matches.push(transformCrexMatch(id, rawMatch));
     }
   }
 
@@ -542,15 +522,13 @@ export async function fetchCrexTopMatches(countryCode = 'IN'): Promise<FetchResu
   }
 
   if (freshUpdates) {
-    // Merge new updates into combined pool only if allowed tournament
+    // Merge all matches sent by the server (server enforces allowedSeriesFilter)
     for (const [id, m] of Object.entries(freshUpdates)) {
-      if (isAllowedTournament({ raw: m })) {
+      if (m && typeof m === 'object') {
         combinedMatchesPool[id] = {
           ...(combinedMatchesPool[id] || {}),
           ...(m as any),
         };
-      } else {
-        delete combinedMatchesPool[id];
       }
     }
   }

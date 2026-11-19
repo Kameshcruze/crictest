@@ -7,14 +7,23 @@ import {
   RotateCcw,
   Sliders,
   Bell,
+  Filter,
+  Save,
 } from 'lucide-react';
 import type { PositionType } from '../../services/strategy/types';
+import {
+  ALL_KNOWN_FORMATS,
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  EvaluableMatchFormat,
+  formatDisplayLabel,
+} from '../../services/strategy/formatFilter';
 import {
   fetchAdminStrategyRules,
   postAdminManualEntry,
   postAdminManualExit,
   postAdminStrategyReset,
   toggleAdminStrategyAlerts,
+  saveAdminStrategyFormats,
   AdminStrategyRulesResponse,
   AdminSessionExpiredError,
 } from '../../services/adminApi';
@@ -27,6 +36,10 @@ interface AdminStrategySectionProps {
 type StrategyPendingAction =
   | {
       type: 'alerts-on';
+    }
+  | {
+      type: 'formats';
+      allowedFormats: EvaluableMatchFormat[];
     }
   | {
       type: 'entry';
@@ -64,6 +77,9 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
   const [banner, setBanner] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   const [selectedMatchId, setSelectedMatchId] = useState<string>('');
+  const [formatsDraft, setFormatsDraft] = useState<EvaluableMatchFormat[]>([
+    ...DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  ]);
 
   // Manual Entry Form
   const [entryPosType, setEntryPosType] = useState<PositionType>('FIRST_ENTRY');
@@ -86,6 +102,11 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
     try {
       const res = await fetchAdminStrategyRules();
       setData(res);
+      setFormatsDraft(
+        Array.isArray(res.strategyAllowedFormats)
+          ? res.strategyAllowedFormats
+          : [...DEFAULT_STRATEGY_ALLOWED_FORMATS]
+      );
       setSelectedMatchId((prev) => {
         if (prev && res.matches.some((m) => m.id === prev)) return prev;
         return res.matches[0]?.id || '';
@@ -218,6 +239,20 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
         });
         setPendingAction(null);
         return;
+      } else if (pendingAction.type === 'formats') {
+        const res = await saveAdminStrategyFormats({
+          allowedFormats: pendingAction.allowedFormats,
+          confirm: true,
+        });
+        setFormatsDraft(res.strategyAllowedFormats);
+        setBanner({
+          type: 'ok',
+          text: `Strategy allowed formats updated immediately without restart: ${
+            res.strategyAllowedFormats.length > 0
+              ? res.strategyAllowedFormats.map(formatDisplayLabel).join(', ')
+              : 'None (all matches skipped)'
+          }. Saved in app_settings and logged in audit log.`,
+        });
       } else if (pendingAction.type === 'entry') {
         await postAdminManualEntry({
           matchId: pendingAction.matchId,
@@ -398,6 +433,100 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
         </div>
       </section>
 
+      {/* Formats the strategy may evaluate */}
+      <section
+        className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5 space-y-3.5"
+        style={{ boxShadow: 'var(--card-shadow)' }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <Filter className="w-4 h-4 text-[var(--rdt)]" strokeWidth={1.8} />
+              <h3 className="text-sm font-bold text-[var(--tx)]">Formats the Strategy May Evaluate</h3>
+            </div>
+            <p className="text-xs text-[var(--mu)] mt-0.5">
+              Strategy over limits (10.0 / 6.0) apply only to short formats. Non-selected and UNKNOWN formats stay tracked in live scores, odds, and timeline history, but never generate signals, trades, or strategy alerts.
+            </p>
+          </div>
+          <span className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[var(--sf-2)] text-[var(--tx)] border border-[var(--bd)]">
+            Active:{' '}
+            {data?.strategyAllowedFormats?.length
+              ? data.strategyAllowedFormats.map(formatDisplayLabel).join(', ')
+              : 'None'}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {ALL_KNOWN_FORMATS.map((fmt) => {
+            const checked = formatsDraft.includes(fmt);
+            return (
+              <label
+                key={fmt}
+                className={`min-h-[44px] px-3.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition-colors ${
+                  checked
+                    ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
+                    : 'bg-[var(--sf-2)] text-[var(--mu)] border-[var(--bd)] hover:text-[var(--tx)]'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => {
+                    setFormatsDraft((prev) =>
+                      prev.includes(fmt)
+                        ? prev.filter((item) => item !== fmt)
+                        : [...prev, fmt]
+                    );
+                  }}
+                  className="w-4 h-4 accent-[var(--rd)]"
+                />
+                <span>{formatDisplayLabel(fmt)}</span>
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <div className="text-[11px] text-[var(--mu)]">
+            Default: <strong className="text-[var(--tx)]">T10, T20</strong>.
+            {data?.strategyFormatsUpdatedAt && (
+              <span>
+                {' '}
+                Last updated {new Date(data.strategyFormatsUpdatedAt).toLocaleString()}.
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setFormatsDraft([...DEFAULT_STRATEGY_ALLOWED_FORMATS])}
+              className="min-h-[44px] px-3.5 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--bd)]/35 border border-[var(--bd)] text-[var(--tx)] text-xs font-semibold transition-colors disabled:opacity-45"
+            >
+              Reset Default (T10, T20)
+            </button>
+            <button
+              type="button"
+              disabled={
+                busy ||
+                JSON.stringify([...formatsDraft].sort()) ===
+                  JSON.stringify([...(data?.strategyAllowedFormats || [])].sort())
+              }
+              onClick={() =>
+                setPendingAction({
+                  type: 'formats',
+                  allowedFormats: formatsDraft,
+                })
+              }
+              className="min-h-[44px] px-4 rounded-xl bg-[var(--rd)] hover:opacity-90 text-white text-xs font-semibold inline-flex items-center gap-2 transition-opacity disabled:opacity-45"
+            >
+              <Save className="w-4 h-4" strokeWidth={1.8} />
+              <span>Save Allowed Formats</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
       {/* Read-Only Strategy Rules (Single Source of Truth from Real Engine Config) */}
       <section
         className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5 space-y-3"
@@ -501,7 +630,8 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
             {data?.matches.length ? (
               data.matches.map((m) => (
                 <option key={m.id} value={m.id}>
-                  [{m.status.toUpperCase()}] {m.title} ({m.format}) — {m.seriesName} [ID: {m.id}]
+                  [{m.status.toUpperCase()}] {m.title} ({formatDisplayLabel(m.detectedFormat)}
+                  {m.strategyFormatAllowed ? '' : ' · Skipped (format)'}) — {m.seriesName} [ID: {m.id}]
                 </option>
               ))
             ) : (
@@ -519,8 +649,17 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
               </div>
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="px-2 py-0.5 rounded-md font-mono text-[11px] bg-[var(--sf)] border border-[var(--bd)] text-[var(--tx)]">
-                  {activeState?.stage || 'WAITING_FOR_CONFIRMATION'}
+                  Format: {selectedMatch.detectedFormat}
                 </span>
+                {!selectedMatch.strategyFormatAllowed ? (
+                  <span className="px-2 py-0.5 rounded-md font-bold text-[11px] bg-[var(--warn-bg)] text-[var(--warn-tx)] border border-[var(--warn-bd)]">
+                    Skipped (format)
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-md font-mono text-[11px] bg-[var(--sf)] border border-[var(--bd)] text-[var(--tx)]">
+                    {activeState?.stage || 'WAITING_FOR_CONFIRMATION'}
+                  </span>
+                )}
                 {(activeState?.firstEntryTrade?.isManual ||
                   activeState?.firstEntryTrade?.source === 'MANUAL' ||
                   activeState?.secondEntryTrade?.isManual ||
@@ -531,6 +670,16 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
                 )}
               </div>
             </div>
+            {!selectedMatch.strategyFormatAllowed && (
+              <div className="p-2.5 rounded-lg bg-[var(--warn-bg)] border border-[var(--warn-bd)] text-[var(--warn-tx)] text-[11px]">
+                <strong>Skipped (format):</strong> Strategy is not evaluated for{' '}
+                <span className="font-mono font-semibold">{selectedMatch.detectedFormat}</span>{' '}
+                matches (raw.fo: <span className="font-mono">{String(selectedMatch.rawFo ?? '—')}</span>).
+                {activeState
+                  ? ` Historical saved stage (${activeState.stage}) is preserved read-only and does not represent active strategy evaluation.`
+                  : ' No signals, trades, or strategy alerts will be generated.'}
+              </div>
+            )}
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[var(--mu)] tabular-nums">
               <span>Score 1: {selectedMatch.score1 || '—'}</span>
               <span>Score 2: {selectedMatch.score2 || '—'}</span>
@@ -804,6 +953,8 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
         title={
           pendingAction?.type === 'alerts-on'
             ? 'Enable Master Strategy Alerts?'
+            : pendingAction?.type === 'formats'
+            ? 'Update Allowed Strategy Formats?'
             : pendingAction?.type === 'reset'
             ? `Reset Strategy: ${pendingAction.matchTitle}`
             : pendingAction?.type === 'entry'
@@ -815,6 +966,12 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
         description={
           pendingAction?.type === 'alerts-on'
             ? 'Turning Master Strategy Alerts ON takes effect immediately without a server restart. Automated strategy entry and exit Telegram messages will be dispatched whenever Telegram is enabled and configured. This change will be saved in app_settings and logged in the admin audit log.'
+            : pendingAction?.type === 'formats'
+            ? `This takes effect immediately without a server restart and will be saved in app_settings and logged in the admin audit log. The strategy engine will evaluate ONLY: ${
+                pendingAction.allowedFormats.length > 0
+                  ? pendingAction.allowedFormats.map(formatDisplayLabel).join(', ')
+                  : 'NONE (all formats skipped)'
+              }. All other formats and UNKNOWN formats will remain tracked in live scores and timeline history without strategy evaluation.`
             : pendingAction?.type === 'reset'
             ? `This permanently resets the strategy state for ${pendingAction.matchTitle} (${pendingAction.matchId}) on the server and broadcasts the reset to all live viewers.`
             : pendingAction?.type === 'entry'
@@ -826,6 +983,8 @@ export const AdminStrategySection: React.FC<AdminStrategySectionProps> = ({
         confirmLabel={
           pendingAction?.type === 'alerts-on'
             ? 'Turn Alerts ON'
+            : pendingAction?.type === 'formats'
+            ? 'Apply Format Rules'
             : pendingAction?.type === 'reset'
             ? 'Reset Strategy'
             : 'Confirm Override'

@@ -9,8 +9,11 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronRight,
+  CheckCircle2,
+  Tags,
 } from 'lucide-react';
 import type { RawApiResponse } from '../../types/cricket';
+import { formatDisplayLabel } from '../../services/strategy/formatFilter';
 import {
   fetchAdminOddsDiagnostics,
   fetchAdminDbStatus,
@@ -172,6 +175,153 @@ export const AdminDiagnosticsSection: React.FC<AdminDiagnosticsSectionProps> = (
         </div>
       </section>
 
+      {/* Tracked Match Format Detection & UNKNOWN Matches */}
+      <section
+        className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5 space-y-4"
+        style={{ boxShadow: 'var(--card-shadow)' }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Tags className="w-4 h-4 text-[var(--rdt)]" strokeWidth={1.8} />
+            <div>
+              <h3 className="text-sm font-bold text-[var(--tx)]">Tracked Match Format Detection</h3>
+              <p className="text-[11px] text-[var(--mu)]">
+                Exact <code className="font-mono">raw.fo</code> and <code className="font-mono">raw.t</code> values normalized by the server. Strategy evaluates:{' '}
+                <strong className="text-[var(--tx)]">
+                  {oddsDiag?.strategyAllowedFormats?.length
+                    ? oddsDiag.strategyAllowedFormats.map(formatDisplayLabel).join(', ')
+                    : 'None'}
+                </strong>
+                .
+              </p>
+            </div>
+          </div>
+          {oddsDiag && (
+            <span
+              className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${
+                (oddsDiag.unknownFormatMatches?.length ?? 0) > 0
+                  ? 'bg-[var(--rds)] text-[var(--rdt)] border-[var(--rd)]/30'
+                  : 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
+              }`}
+            >
+              {oddsDiag.unknownFormatMatches?.length ?? 0} UNKNOWN
+            </span>
+          )}
+        </div>
+
+        {/* UNKNOWN Format Matches View */}
+        {oddsDiag && (
+          oddsDiag.unknownFormatMatches && oddsDiag.unknownFormatMatches.length > 0 ? (
+            <div className="p-3.5 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/30 space-y-2">
+              <div className="flex items-center gap-2 text-xs font-bold text-[var(--rdt)]">
+                <AlertTriangle className="w-4 h-4 shrink-0" strokeWidth={1.8} />
+                <span>
+                  UNKNOWN Format Matches ({oddsDiag.unknownFormatMatches.length}) — Skipped by Strategy Engine
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[var(--rd)]/20 text-[11px] text-[var(--rdt)]">
+                      <th className="py-1.5 pr-3 font-semibold">Match</th>
+                      <th className="py-1.5 pr-3 font-semibold">Series</th>
+                      <th className="py-1.5 pr-3 font-semibold">raw.fo</th>
+                      <th className="py-1.5 font-semibold">raw.t</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--rd)]/15 font-mono text-[11px]">
+                    {oddsDiag.unknownFormatMatches.map((u) => (
+                      <tr key={u.matchId}>
+                        <td className="py-1.5 pr-3 font-sans font-semibold text-[var(--tx)]">
+                          {u.title} <span className="font-mono text-[10px] text-[var(--mu)]">[{u.matchId}]</span>
+                        </td>
+                        <td className="py-1.5 pr-3 font-sans text-[var(--mu)]">{u.seriesName}</td>
+                        <td className="py-1.5 pr-3 text-[var(--rdt)]">
+                          {u.rawFo === undefined ? 'undefined' : JSON.stringify(u.rawFo)}
+                        </td>
+                        <td className="py-1.5 text-[var(--rdt)]">
+                          {u.rawT === undefined ? 'undefined' : JSON.stringify(u.rawT)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 rounded-xl bg-[var(--ok-bg)] border border-[var(--ok-bd)] text-[var(--ok-tx)] text-xs flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" strokeWidth={1.8} />
+              <span>0 UNKNOWN format matches currently tracked. All tracked matches classified cleanly.</span>
+            </div>
+          )
+        )}
+
+        {/* Per-match Format Table */}
+        {oddsDiag && oddsDiag.items.length > 0 ? (
+          <div className="overflow-x-auto rounded-xl border border-[var(--bd)]">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-[var(--bd)] bg-[var(--sf-2)] text-[11px] text-[var(--mu)]">
+                  <th className="py-2 px-3 font-semibold whitespace-nowrap">Match</th>
+                  <th className="py-2 px-3 font-semibold whitespace-nowrap">Status</th>
+                  <th className="py-2 px-3 font-semibold whitespace-nowrap">raw.fo</th>
+                  <th className="py-2 px-3 font-semibold whitespace-nowrap">raw.t</th>
+                  <th className="py-2 px-3 font-semibold whitespace-nowrap">Detected Format</th>
+                  <th className="py-2 px-3 font-semibold whitespace-nowrap">Strategy</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--bd)]">
+                {oddsDiag.items.map((item) => (
+                  <tr key={`fmt-${item.matchId}`} className="hover:bg-[var(--sf-2)]/60">
+                    <td className="py-2 px-3">
+                      <div className="font-semibold text-[var(--tx)]">{item.title}</div>
+                      <div className="text-[10px] text-[var(--mu)] truncate max-w-[220px]">
+                        {item.seriesName} · <span className="font-mono">{item.matchId}</span>
+                      </div>
+                    </td>
+                    <td className="py-2 px-3 whitespace-nowrap font-mono text-[11px] uppercase text-[var(--mu)]">
+                      {item.matchStatus}
+                    </td>
+                    <td className="py-2 px-3 whitespace-nowrap font-mono text-[11px] text-[var(--tx)]">
+                      {item.rawFo === undefined ? 'undefined' : JSON.stringify(item.rawFo)}
+                    </td>
+                    <td className="py-2 px-3 whitespace-nowrap font-mono text-[11px] text-[var(--mu)]">
+                      {item.rawT === undefined ? 'undefined' : JSON.stringify(item.rawT)}
+                    </td>
+                    <td className="py-2 px-3 whitespace-nowrap">
+                      <span
+                        className={`px-2 py-0.5 rounded-md font-mono text-[10px] font-bold border ${
+                          item.detectedFormat === 'UNKNOWN'
+                            ? 'bg-[var(--rds)] text-[var(--rdt)] border-[var(--rd)]/30'
+                            : 'bg-[var(--sf-2)] text-[var(--tx)] border-[var(--bd)]'
+                        }`}
+                      >
+                        {item.detectedFormat}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 whitespace-nowrap">
+                      {item.strategyFormatAllowed ? (
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[var(--ok-bg)] text-[var(--ok-tx)] border border-[var(--ok-bd)]">
+                          Evaluated
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[var(--warn-bg)] text-[var(--warn-tx)] border border-[var(--warn-bd)]">
+                          Skipped (format)
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-4 text-center text-xs text-[var(--mu)] border border-dashed border-[var(--bd)] rounded-xl">
+            No tracked matches in server memory yet.
+          </div>
+        )}
+      </section>
+
       {/* Live Odds Diagnostics (Server-backed replacement for OddsDiagnosticModal) */}
       <section
         className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5 space-y-3"
@@ -207,6 +357,14 @@ export const AdminDiagnosticsSection: React.FC<AdminDiagnosticsSectionProps> = (
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-xs font-bold text-[var(--tx)]">{item.title}</span>
                         <span className="text-[10px] font-mono text-[var(--mu)]">{item.matchId}</span>
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-[var(--sf)] text-[var(--tx)] border border-[var(--bd)]">
+                          {item.detectedFormat}
+                        </span>
+                        {!item.strategyFormatAllowed && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--warn-bg)] text-[var(--warn-tx)] border border-[var(--warn-bd)]">
+                            Skipped (format)
+                          </span>
+                        )}
                         <span
                           className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
                             item.oddsStatus === 'READY'
@@ -314,6 +472,50 @@ export const AdminDiagnosticsSection: React.FC<AdminDiagnosticsSectionProps> = (
               </div>
             ) : (
               <div className="text-xs text-[var(--rdt)]">{dbStatus.error}</div>
+            )}
+
+            {/* Saved Strategy Data by Format (Read-Only, zero deletions) */}
+            {oddsDiag && oddsDiag.savedStrategyByFormat && oddsDiag.savedStrategyByFormat.length > 0 && (
+              <div className="pt-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-bold text-[var(--tx)]">
+                    Saved Strategy Records by Format (Read-Only)
+                  </div>
+                  <span className="text-[10px] text-[var(--mu)]">
+                    Historical non-T10/T20 rows are preserved, never deleted
+                  </span>
+                </div>
+                <div className="overflow-x-auto rounded-xl border border-[var(--bd)]">
+                  <table className="w-full text-left border-collapse text-xs tabular-nums">
+                    <thead>
+                      <tr className="border-b border-[var(--bd)] bg-[var(--sf-2)] text-[11px] text-[var(--mu)]">
+                        <th className="py-2 px-3 font-semibold">Saved Format</th>
+                        <th className="py-2 px-3 font-semibold">Detected</th>
+                        <th className="py-2 px-3 font-semibold">Signals</th>
+                        <th className="py-2 px-3 font-semibold">Trades</th>
+                        <th className="py-2 px-3 font-semibold">Positions</th>
+                        <th className="py-2 px-3 font-semibold">States</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--bd)]">
+                      {oddsDiag.savedStrategyByFormat.map((row) => (
+                        <tr key={`${row.format}-${row.detectedFormat}`}>
+                          <td className="py-2 px-3 font-mono text-[11px] text-[var(--tx)]">
+                            {row.format}
+                          </td>
+                          <td className="py-2 px-3 font-mono text-[11px] font-semibold text-[var(--tx)]">
+                            {row.detectedFormat}
+                          </td>
+                          <td className="py-2 px-3 font-mono">{row.signals}</td>
+                          <td className="py-2 px-3 font-mono">{row.trades}</td>
+                          <td className="py-2 px-3 font-mono">{row.positions}</td>
+                          <td className="py-2 px-3 font-mono">{row.states}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             )}
           </div>
         )}

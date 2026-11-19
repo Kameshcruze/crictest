@@ -1,14 +1,22 @@
 import type { QueryableDb } from './adminAuth';
 import { sanitizeCountryCode } from './adminRateLimit';
+import {
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  EvaluableMatchFormat,
+  sanitizeCanonicalFormatList,
+} from '../src/services/strategy/formatFilter';
 
 export const PUBLIC_SITE_CONFIG_DB_KEY = 'public_site_config';
 export const STRATEGY_ALERTS_CONFIG_DB_KEY = 'strategy_alerts_config';
+export const STRATEGY_FORMATS_CONFIG_DB_KEY = 'strategy_formats_config';
 
 export interface PublicSiteConfig {
   defaultCountryCode: string;
   defaultSoundEnabled: boolean;
   maintenanceBannerEnabled: boolean;
   maintenanceBannerText: string;
+  /** Empty array = show all formats tracked by the server (default). */
+  publicVisibleFormats: EvaluableMatchFormat[];
 }
 
 export interface AdminSiteSettings extends PublicSiteConfig {
@@ -22,12 +30,18 @@ export interface StrategyAlertsStatus {
   updatedAt: string | null;
 }
 
+export interface StrategyFormatsConfig {
+  allowedFormats: EvaluableMatchFormat[];
+  updatedAt: string | null;
+}
+
 export const DEFAULT_ADMIN_SITE_SETTINGS: AdminSiteSettings = {
   defaultCountryCode: 'IN',
   defaultSoundEnabled: true,
   allowedSeriesFilter: [],
   maintenanceBannerEnabled: false,
   maintenanceBannerText: '',
+  publicVisibleFormats: [],
 };
 
 export const READ_ONLY_REFRESH_INTERVALS = Object.freeze({
@@ -85,12 +99,18 @@ export function sanitizeAdminSiteSettings(
       ? obj.maintenanceBannerText.trim().slice(0, 500)
       : fallback.maintenanceBannerText;
 
+  const publicVisibleFormats =
+    obj.publicVisibleFormats !== undefined
+      ? sanitizeCanonicalFormatList(obj.publicVisibleFormats, fallback.publicVisibleFormats)
+      : [...fallback.publicVisibleFormats];
+
   return {
     defaultCountryCode,
     defaultSoundEnabled,
     allowedSeriesFilter,
     maintenanceBannerEnabled,
     maintenanceBannerText,
+    publicVisibleFormats,
   };
 }
 
@@ -100,6 +120,7 @@ export function toPublicSiteConfig(settings: AdminSiteSettings): PublicSiteConfi
     defaultSoundEnabled: settings.defaultSoundEnabled,
     maintenanceBannerEnabled: settings.maintenanceBannerEnabled,
     maintenanceBannerText: settings.maintenanceBannerText,
+    publicVisibleFormats: [...settings.publicVisibleFormats],
   };
 }
 
@@ -128,7 +149,7 @@ export async function saveAdminSiteSettingsToDb(
     [
       PUBLIC_SITE_CONFIG_DB_KEY,
       JSON.stringify(next),
-      'Admin-managed site defaults, allowed series filter, and maintenance banner',
+      'Admin-managed site defaults, allowed series filter, public visible formats, and maintenance banner',
     ]
   );
   return next;
@@ -197,5 +218,51 @@ export async function clearStrategyAlertsOverrideInDb(
     source: 'env',
     envDefault,
     updatedAt: null,
+  };
+}
+
+export async function loadStrategyFormatsFromDb(
+  db: QueryableDb
+): Promise<StrategyFormatsConfig> {
+  const res = await db.query('SELECT value, updated_at FROM app_settings WHERE key = $1 LIMIT 1', [
+    STRATEGY_FORMATS_CONFIG_DB_KEY,
+  ]);
+  const row = res.rows[0];
+  if (row?.value && typeof row.value === 'object' && Array.isArray((row.value as any).allowedFormats)) {
+    return {
+      allowedFormats: sanitizeCanonicalFormatList((row.value as any).allowedFormats, []),
+      updatedAt:
+        typeof (row.value as any).updatedAt === 'string'
+          ? (row.value as any).updatedAt
+          : row.updated_at instanceof Date
+          ? row.updated_at.toISOString()
+          : null,
+    };
+  }
+  return {
+    allowedFormats: [...DEFAULT_STRATEGY_ALLOWED_FORMATS],
+    updatedAt: null,
+  };
+}
+
+export async function saveStrategyFormatsToDb(
+  db: QueryableDb,
+  allowedFormats: unknown
+): Promise<StrategyFormatsConfig> {
+  const sanitized = sanitizeCanonicalFormatList(allowedFormats, []);
+  const updatedAt = new Date().toISOString();
+  await db.query(
+    `INSERT INTO app_settings (key, value, description, updated_at)
+     VALUES ($1, $2::jsonb, $3, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [
+      STRATEGY_FORMATS_CONFIG_DB_KEY,
+      JSON.stringify({ allowedFormats: sanitized, updatedAt }),
+      'Match formats the strategy engine is permitted to evaluate (default T10, T20)',
+    ]
+  );
+  return {
+    allowedFormats: sanitized,
+    updatedAt,
   };
 }

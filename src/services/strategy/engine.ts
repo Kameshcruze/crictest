@@ -38,6 +38,13 @@ import {
   SerializedMatchStrategyState,
 } from './types';
 import { StrategyConfig, DEFAULT_STRATEGY_CONFIG } from './config';
+import {
+  CanonicalMatchFormat,
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  EvaluableMatchFormat,
+  normalizeMatchFormat,
+  sanitizeCanonicalFormatList,
+} from './formatFilter';
 
 /**
  * Converts decimal odds to integer paise rate (e.g. 1.86 -> 86 paise).
@@ -475,6 +482,45 @@ export class CricketStrategyEngine {
 
   public getConfig(): StrategyConfig {
     return this.config;
+  }
+
+  private allowedFormats: EvaluableMatchFormat[] = [...DEFAULT_STRATEGY_ALLOWED_FORMATS];
+  private warnedUnknownFormatMatches = new Set<string>();
+
+  public getAllowedFormats(): EvaluableMatchFormat[] {
+    return [...this.allowedFormats];
+  }
+
+  public setAllowedFormats(formats: readonly EvaluableMatchFormat[]): void {
+    this.allowedFormats = sanitizeCanonicalFormatList(formats, []);
+  }
+
+  public checkFormatEligibility(match: Pick<ParsedCricketMatch, 'id' | 'format' | 'raw'>): {
+    allowed: boolean;
+    detectedFormat: CanonicalMatchFormat;
+    wasUnknownWarningLogged: boolean;
+  } {
+    const rawFo = match.raw?.fo !== undefined ? match.raw.fo : match.format;
+    const rawT = match.raw?.t;
+    const detectedFormat = normalizeMatchFormat(rawFo, rawT);
+
+    if (detectedFormat === 'UNKNOWN') {
+      let wasUnknownWarningLogged = false;
+      if (!this.warnedUnknownFormatMatches.has(match.id)) {
+        this.warnedUnknownFormatMatches.add(match.id);
+        wasUnknownWarningLogged = true;
+        console.warn(
+          `[Strategy Format Warning] match_id=${match.id} has missing/unknown format (raw.fo=${JSON.stringify(match.raw?.fo ?? null)}, raw.t=${JSON.stringify(match.raw?.t ?? null)}, format=${JSON.stringify(match.format ?? null)}) — skipping strategy evaluation.`
+        );
+      }
+      return { allowed: false, detectedFormat, wasUnknownWarningLogged };
+    }
+
+    return {
+      allowed: this.allowedFormats.includes(detectedFormat),
+      detectedFormat,
+      wasUnknownWarningLogged: false,
+    };
   }
 
   public getState(matchId: string): MatchStrategyState {
@@ -1866,6 +1912,11 @@ export class CricketStrategyEngine {
       sameGetSV3ScorePacket?: boolean;
     }
   ): StrategySignal[] {
+    const eligibility = this.checkFormatEligibility(match);
+    if (!eligibility.allowed) {
+      return [];
+    }
+
     const signals: StrategySignal[] = [];
     const matchId = match.id;
     const state = this.getState(matchId);

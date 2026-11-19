@@ -33,6 +33,11 @@ import {
   TradePosition,
   StrategySignal,
   buildSignalDedupeHash,
+  normalizeMatchFormat,
+  isFormatAllowedForStrategy,
+  isFormatVisibleToPublic,
+  sanitizeCanonicalFormatList,
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
 } from '../index';
 import {
   isValidActiveSecondInningsScore,
@@ -1815,6 +1820,232 @@ describe('Phase 3 & 4 Cricket Trading Strategy Engine Suite', () => {
       assert.equal(manualSignals.length, 2);
       assert.ok(manualSignals.every((s) => s.metadata?.isManual === true && s.metadata?.source === 'MANUAL'));
       assert.ok(manualSignals.every((s) => s.explanation.startsWith('[MANUAL]')));
+    });
+  });
+
+  // =========================================================================
+  // 14. FORMAT NORMALIZATION & STRATEGY FORMAT RESTRICTION
+  // =========================================================================
+  describe('Format Normalization & Strategy Format Restriction', () => {
+    it('normalizes realistic Crex/Goscorer format values accurately and rejects numeric/empty/generic values as UNKNOWN', () => {
+      // T20 variants
+      assert.equal(normalizeMatchFormat('T20'), 'T20');
+      assert.equal(normalizeMatchFormat('T20I'), 'T20');
+      assert.equal(normalizeMatchFormat('WT20'), 'T20');
+      assert.equal(normalizeMatchFormat('T-20'), 'T20');
+      assert.equal(normalizeMatchFormat('T20', 0), 'T20');
+
+      // T10 variants
+      assert.equal(normalizeMatchFormat('T10'), 'T10');
+      assert.equal(normalizeMatchFormat('T10I'), 'T10');
+      assert.equal(normalizeMatchFormat('T10', 0), 'T10');
+
+      // ODI variants (Crex sends "One Day")
+      assert.equal(normalizeMatchFormat('ODI'), 'ODI');
+      assert.equal(normalizeMatchFormat('WODI'), 'ODI');
+      assert.equal(normalizeMatchFormat('One Day'), 'ODI');
+      assert.equal(normalizeMatchFormat('One Day', 0), 'ODI');
+      assert.equal(normalizeMatchFormat('List A'), 'ODI');
+
+      // Test & Hundred
+      assert.equal(normalizeMatchFormat('Test'), 'TEST');
+      assert.equal(normalizeMatchFormat('Test', 0), 'TEST');
+      assert.equal(normalizeMatchFormat('First Class'), 'TEST');
+      assert.equal(normalizeMatchFormat('Hundred'), 'HUNDRED');
+      assert.equal(normalizeMatchFormat('The Hundred'), 'HUNDRED');
+
+      // Missing, generic, and numeric values must NEVER be treated as T10/T20
+      assert.equal(normalizeMatchFormat(''), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat('   '), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat('Match'), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat('Unknown'), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat(undefined, undefined), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat(null, 0), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat('', 0), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat(0), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat('0'), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat('1730000000'), 'UNKNOWN');
+      assert.equal(normalizeMatchFormat(undefined, '1730000000'), 'UNKNOWN');
+
+      // Fallback to raw.t only when raw.fo is missing/unknown and raw.t is a valid string format
+      assert.equal(normalizeMatchFormat('', 'T20'), 'T20');
+      assert.equal(normalizeMatchFormat(undefined, 'T10'), 'T10');
+
+      // Default allowed formats & sanitization
+      assert.deepEqual([...DEFAULT_STRATEGY_ALLOWED_FORMATS], ['T10', 'T20']);
+      assert.deepEqual(sanitizeCanonicalFormatList(['t10', 'One Day', 'UNKNOWN', 'T20', 't20']), [
+        'T10',
+        'ODI',
+        'T20',
+      ]);
+
+      // Public visibility filter: empty = show everything
+      assert.equal(isFormatVisibleToPublic('Test', []), true);
+      assert.equal(isFormatVisibleToPublic('One Day', []), true);
+      assert.equal(isFormatVisibleToPublic('', []), true);
+      assert.equal(isFormatVisibleToPublic('Test', ['T10', 'T20']), false);
+      assert.equal(isFormatVisibleToPublic('T20', ['T10', 'T20']), true);
+      assert.equal(isFormatAllowedForStrategy('Test', ['T10', 'T20']), false);
+      assert.equal(isFormatAllowedForStrategy('', ['T10', 'T20'], 0), false);
+      assert.equal(isFormatAllowedForStrategy('T20', ['T10', 'T20'], 0), true);
+    });
+
+    it('skips Test, ODI ("One Day"), and UNKNOWN formats with zero signals/trades/DB writes/alerts, and warns once per UNKNOWN match', async () => {
+      const storedSignals: StrategySignal[] = [];
+      const storedTrades: StrategyTradeRecord[] = [];
+      const storedSnapshots: SerializedMatchStrategyState[] = [];
+      let alertsSent = 0;
+
+      const storage: StrategyStorageAdapter = {
+        async loadAllSnapshots() { return []; },
+        async loadAllTrades() { return []; },
+        async loadAllPositions() { return []; },
+        async loadRecentSignals() { return []; },
+        async upsertTrade(t) { storedTrades.push({ ...t }); },
+        async upsertPosition() {},
+        async insertSignal(s) { storedSignals.push({ ...s }); },
+        async upsertSnapshot(s) { storedSnapshots.push({ ...s }); },
+      };
+
+      const coord = new StrategyPersistenceCoordinator({
+        storage,
+        strategyAlertsEnabled: true,
+        onStrategyAlert: async () => {
+          alertsSent += 1;
+        },
+      });
+
+      // Capture console.warn calls to verify UNKNOWN logs once per match
+      const origWarn = console.warn;
+      const warnings: string[] = [];
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((a) => String(a)).join(' '));
+      };
+
+      try {
+        const t0 = 1_700_000_500_000;
+        const cases: Array<{ id: string; format: string; rawFo?: unknown; rawT?: unknown }> = [
+          { id: 'FMT_TEST_1', format: 'Test', rawFo: 'Test', rawT: 0 },
+          { id: 'FMT_ODI_1', format: 'One Day', rawFo: 'One Day', rawT: 0 },
+          { id: 'FMT_UNKNOWN_1', format: 'Match', rawFo: '', rawT: 0 },
+        ];
+
+        for (const c of cases) {
+          const m1 = {
+            ...makeMockMatch(c.id, { runs: 10, wickets: 0, overs: 1.0 }),
+            format: c.format,
+            raw: { fo: c.rawFo, t: c.rawT },
+          };
+          const m2 = {
+            ...makeMockMatch(c.id, { runs: 14, wickets: 0, overs: 1.1 }),
+            format: c.format,
+            raw: { fo: c.rawFo, t: c.rawT },
+          };
+          const m3 = {
+            ...makeMockMatch(c.id, { runs: 18, wickets: 0, overs: 1.2 }),
+            format: c.format,
+            raw: { fo: c.rawFo, t: c.rawT },
+          };
+
+          const r1 = await coord.evaluateMatchSnapshot(
+            m1,
+            makeMockOdds(c.id, 'BH-W', 'Brisbane Heat Women', 98, { rawF: '^BH-W', oddsFetchedAt: new Date(t0) }),
+            { now: t0, scoreFetchedAt: new Date(t0), scoreChangedAt: new Date(t0), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+          );
+          const r2 = await coord.evaluateMatchSnapshot(
+            m2,
+            makeMockOdds(c.id, 'ADS-W', 'Adelaide Strikers Women', 90, { rawF: '^ADS-W', oddsFetchedAt: new Date(t0 + 1000) }),
+            { now: t0 + 1000, scoreFetchedAt: new Date(t0 + 1000), scoreChangedAt: new Date(t0 + 1000), oddsFetchedAt: new Date(t0 + 1000), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+          );
+          const r3 = await coord.evaluateMatchSnapshot(
+            m3,
+            makeMockOdds(c.id, 'ADS-W', 'Adelaide Strikers Women', 95, { rawF: '^ADS-W', oddsFetchedAt: new Date(t0 + 2000) }),
+            { now: t0 + 2000, scoreFetchedAt: new Date(t0 + 2000), scoreChangedAt: new Date(t0 + 2000), oddsFetchedAt: new Date(t0 + 2000), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+          );
+
+          assert.equal(r1.signals.length, 0);
+          assert.equal(r2.signals.length, 0);
+          assert.equal(r3.signals.length, 0);
+          assert.equal(r2.skippedFormat, true);
+        }
+
+        assert.equal(storedSignals.length, 0);
+        assert.equal(storedTrades.length, 0);
+        assert.equal(storedSnapshots.length, 0);
+        assert.equal(alertsSent, 0);
+
+        const unknownWarns = warnings.filter((w) => w.includes('[Strategy Format Warning]') && w.includes('FMT_UNKNOWN_1'));
+        assert.equal(unknownWarns.length, 1, 'UNKNOWN format warning must be logged exactly once per match');
+
+        // Confirm a T10 match DOES evaluate normally under default settings
+        const t10Id = 'FMT_T10_ALLOWED';
+        await coord.evaluateMatchSnapshot(
+          { ...makeMockMatch(t10Id, { runs: 10, wickets: 0, overs: 1.0 }), format: 'T10', raw: { fo: 'T10', t: 0 } },
+          makeMockOdds(t10Id, 'BH-W', 'Brisbane Heat Women', 98, { rawF: '^BH-W', oddsFetchedAt: new Date(t0) }),
+          { now: t0, scoreFetchedAt: new Date(t0), scoreChangedAt: new Date(t0), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+        );
+        const t10Res = await coord.evaluateMatchSnapshot(
+          { ...makeMockMatch(t10Id, { runs: 14, wickets: 0, overs: 1.1 }), format: 'T10', raw: { fo: 'T10', t: 0 } },
+          makeMockOdds(t10Id, 'ADS-W', 'Adelaide Strikers Women', 90, { rawF: '^ADS-W', oddsFetchedAt: new Date(t0 + 1000) }),
+          { now: t0 + 1000, scoreFetchedAt: new Date(t0 + 1000), scoreChangedAt: new Date(t0 + 1000), oddsFetchedAt: new Date(t0 + 1000), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+        );
+        assert.ok(t10Res.signals.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED'));
+      } finally {
+        console.warn = origWarn;
+      }
+    });
+
+    it('applies dynamic setAllowedFormats changes immediately without a restart', async () => {
+      const storage: StrategyStorageAdapter = {
+        async loadAllSnapshots() { return []; },
+        async loadAllTrades() { return []; },
+        async loadAllPositions() { return []; },
+        async loadRecentSignals() { return []; },
+        async upsertTrade() {},
+        async upsertPosition() {},
+        async insertSignal() {},
+        async upsertSnapshot() {},
+      };
+      const coord = new StrategyPersistenceCoordinator({ storage });
+      const odiId = 'FMT_ODI_DYNAMIC';
+      const t0 = 1_700_000_800_000;
+
+      // Under default [T10, T20], ODI is skipped
+      const skippedRes = await coord.evaluateMatchSnapshot(
+        { ...makeMockMatch(odiId, { runs: 10, wickets: 0, overs: 1.0 }), format: 'One Day', raw: { fo: 'One Day', t: 0 } },
+        makeMockOdds(odiId, 'BH-W', 'Brisbane Heat Women', 98, { rawF: '^BH-W', oddsFetchedAt: new Date(t0) }),
+        { now: t0, scoreFetchedAt: new Date(t0), scoreChangedAt: new Date(t0), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+      );
+      assert.equal(skippedRes.skippedFormat, true);
+      assert.equal(skippedRes.signals.length, 0);
+
+      // Admin adds ODI dynamically — takes effect immediately on the same coordinator instance
+      coord.setAllowedFormats(['T10', 'T20', 'ODI']);
+      assert.deepEqual(coord.getAllowedFormats(), ['T10', 'T20', 'ODI']);
+
+      await coord.evaluateMatchSnapshot(
+        { ...makeMockMatch(odiId, { runs: 10, wickets: 0, overs: 1.0 }), format: 'One Day', raw: { fo: 'One Day', t: 0 } },
+        makeMockOdds(odiId, 'BH-W', 'Brisbane Heat Women', 98, { rawF: '^BH-W', oddsFetchedAt: new Date(t0 + 1000) }),
+        { now: t0 + 1000, scoreFetchedAt: new Date(t0 + 1000), scoreChangedAt: new Date(t0 + 1000), oddsFetchedAt: new Date(t0 + 1000), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+      );
+      const allowedRes = await coord.evaluateMatchSnapshot(
+        { ...makeMockMatch(odiId, { runs: 14, wickets: 0, overs: 1.1 }), format: 'One Day', raw: { fo: 'One Day', t: 0 } },
+        makeMockOdds(odiId, 'ADS-W', 'Adelaide Strikers Women', 90, { rawF: '^ADS-W', oddsFetchedAt: new Date(t0 + 2000) }),
+        { now: t0 + 2000, scoreFetchedAt: new Date(t0 + 2000), scoreChangedAt: new Date(t0 + 2000), oddsFetchedAt: new Date(t0 + 2000), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+      );
+      assert.equal(allowedRes.skippedFormat, false);
+      assert.ok(allowedRes.signals.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED'));
+
+      // Admin removes ODI again — immediately stops evaluating without deleting state
+      coord.setAllowedFormats(['T10', 'T20']);
+      const skippedAgain = await coord.evaluateMatchSnapshot(
+        { ...makeMockMatch(odiId, { runs: 18, wickets: 0, overs: 1.2 }), format: 'One Day', raw: { fo: 'One Day', t: 0 } },
+        makeMockOdds(odiId, 'ADS-W', 'Adelaide Strikers Women', 92, { rawF: '^ADS-W', oddsFetchedAt: new Date(t0 + 3000) }),
+        { now: t0 + 3000, scoreFetchedAt: new Date(t0 + 3000), scoreChangedAt: new Date(t0 + 3000), oddsFetchedAt: new Date(t0 + 3000), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+      );
+      assert.equal(skippedAgain.skippedFormat, true);
+      assert.equal(skippedAgain.signals.length, 0);
+      assert.equal(coord.engine.getState(odiId).stage, 'CONFIRMED_BOOKING_TEAM');
     });
   });
 });

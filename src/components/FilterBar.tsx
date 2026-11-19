@@ -1,24 +1,38 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Search, X } from 'lucide-react';
 
+export interface FormatOption {
+  value: string;
+  label: string;
+}
+
 interface FilterBarProps {
   activeTab: 'all' | 'live' | 'upcoming' | 'completed';
   onTabChange: (tab: 'all' | 'live' | 'upcoming' | 'completed') => void;
   selectedFormat: string;
   onFormatChange: (format: string) => void;
+  formatOptions?: FormatOption[];
   searchQuery: string;
   onSearchChange: (query: string) => void;
   liveCount: number;
   totalCount: number;
 }
 
-const FORMAT_OPTIONS = ['All', 'T10', 'T20'];
+const DEFAULT_FORMAT_OPTIONS: FormatOption[] = [
+  { value: 'All', label: 'All Formats' },
+  { value: 'T10', label: 'T10' },
+  { value: 'T20', label: 'T20' },
+  { value: 'ODI', label: 'ODI' },
+  { value: 'TEST', label: 'Test' },
+  { value: 'HUNDRED', label: 'Hundred' },
+];
 
 export const FilterBar: React.FC<FilterBarProps> = ({
   activeTab,
   onTabChange,
   selectedFormat,
   onFormatChange,
+  formatOptions = DEFAULT_FORMAT_OPTIONS,
   searchQuery,
   onSearchChange,
   liveCount,
@@ -163,9 +177,9 @@ export const FilterBar: React.FC<FilterBarProps> = ({
           onChange={(e) => onFormatChange(e.target.value)}
           className="hidden md:block lg:hidden bg-[var(--sf)] border border-[var(--rd)]/40 text-xs font-semibold text-[var(--rdt)] rounded-xl px-3 py-1.5 cursor-pointer focus:border-[var(--rd)] shrink-0"
         >
-          {FORMAT_OPTIONS.map((f) => (
-            <option key={f} value={f}>
-              {f === 'All' ? 'All Formats' : f}
+          {formatOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
             </option>
           ))}
         </select>
@@ -217,9 +231,9 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             onChange={(e) => onFormatChange(e.target.value)}
             className="bg-[var(--sf-2)] border border-[var(--bd)] text-xs font-semibold text-[var(--tx)] rounded-xl px-2.5 py-2 cursor-pointer focus:border-[var(--rd)] shrink-0"
           >
-            {FORMAT_OPTIONS.map((f) => (
-              <option key={f} value={f}>
-                {f === 'All' ? 'All Formats' : f}
+            {formatOptions.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
               </option>
             ))}
           </select>

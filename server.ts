@@ -24,12 +24,15 @@ import {
   DEFAULT_ADMIN_SITE_SETTINGS,
   READ_ONLY_REFRESH_INTERVALS,
   StrategyAlertsStatus,
+  StrategyFormatsConfig,
   clearStrategyAlertsOverrideInDb,
   loadAdminSiteSettingsFromDb,
   loadStrategyAlertsStatusFromDb,
+  loadStrategyFormatsFromDb,
   sanitizeSeriesFilterList,
   saveAdminSiteSettingsToDb,
   saveStrategyAlertsOverrideToDb,
+  saveStrategyFormatsToDb,
   toPublicSiteConfig,
 } from './server/appSettingsConfig';
 import { parseBookmakerRate, parseSessionMarkets, transformGetSV3Response } from './src/services/oddsApi';
@@ -39,6 +42,7 @@ import { ParsedCricketMatch, ParsedInningsScore } from './src/types/cricket';
 import { MatchOddsState } from './src/types/odds';
 import {
   CricketStrategyEngine,
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
   PositionType,
   SerializedMatchStrategyState,
   StrategyPersistenceCoordinator,
@@ -46,6 +50,8 @@ import {
   StrategyStorageAdapter,
   StrategyTradeRecord,
   TradePosition,
+  isFormatAllowedForStrategy,
+  normalizeMatchFormat,
   resolveExactTeamControl,
   normalizeTeamKey,
 } from './src/services/strategy/index';
@@ -63,6 +69,15 @@ let activeStrategyAlertsStatus: StrategyAlertsStatus = {
   enabled: ENV_STRATEGY_ALERTS_DEFAULT,
   source: 'env',
   envDefault: ENV_STRATEGY_ALERTS_DEFAULT,
+  updatedAt: null,
+};
+
+/**
+ * Formats the strategy engine is permitted to evaluate (stored in app_settings['strategy_formats_config']).
+ * Defaults strictly to ['T10', 'T20'] because over limits (10.0 / 6.0) only apply to T10 and T20.
+ */
+let activeStrategyFormatsConfig: StrategyFormatsConfig = {
+  allowedFormats: [...DEFAULT_STRATEGY_ALLOWED_FORMATS],
   updatedAt: null,
 };
 
@@ -452,17 +467,20 @@ async function reloadTelegramConfigFromDb() {
 
 async function reloadAppSettingsFromDb() {
   try {
-    const [loadedSite, loadedAlerts] = await Promise.all([
+    const [loadedSite, loadedAlerts, loadedFormats] = await Promise.all([
       loadAdminSiteSettingsFromDb(dbPool),
       loadStrategyAlertsStatusFromDb(dbPool, ENV_STRATEGY_ALERTS_DEFAULT),
+      loadStrategyFormatsFromDb(dbPool),
     ]);
     if (loadedSite) {
       activeSiteSettings = loadedSite;
       ALLOWED_SERIES_FILTER = [...loadedSite.allowedSeriesFilter];
     }
     activeStrategyAlertsStatus = loadedAlerts;
+    activeStrategyFormatsConfig = loadedFormats;
     if (typeof strategyCoordinator !== 'undefined') {
       strategyCoordinator.setStrategyAlertsEnabled(loadedAlerts.enabled);
+      strategyCoordinator.setAllowedFormats(loadedFormats.allowedFormats);
     }
   } catch {
     // Non-blocking if database is offline or starting up
@@ -2142,7 +2160,9 @@ function buildSnapshotForEvaluation(
     seriesKey: item.q ? String(item.q) : '',
     venueName: item.vname || resolveVenue(item.v) || 'Stadium',
     venueKey: item.v ? String(item.v) : '',
-    format: String(item.fo || item.t || 'Match'),
+    format: String(
+      item.fo || (typeof item.t === 'string' && item.t.trim() ? item.t.trim() : '') || 'Match'
+    ),
     matchTitlePrefix: item.matchNums ? `${item.matchNums} ${item.fo || 'Match'}` : item.fo || undefined,
     innings: inningsList,
     team1Score: inn1,
@@ -2306,8 +2326,9 @@ async function persistLiveTimelineTicks() {
           const battingTeamObj = innings === 2 ? team2 : team1;
           const bowlingTeamObj = innings === 2 ? team1 : team2;
 
-          // Log a warning once per match if team order or innings metadata looks inconsistent
-          if (!warnedInconsistentMatches.has(matchId)) {
+          // Log a warning at most once per match per innings change if team order or innings metadata looks inconsistent
+          const metadataWarningKey = `${matchId}:${innings}`;
+          if (!warnedInconsistentMatches.has(metadataWarningKey)) {
             const kTrimmed = typeof item.k === 'string' ? item.k.trim() : '';
             const relFkeyNorm = item.relevant_team_fkey ? normalizeTeamKey(String(item.relevant_team_fkey)) : '';
             const batNorm = normalizeTeamKey(battingTeamObj.key);
@@ -2326,7 +2347,7 @@ async function persistLiveTimelineTicks() {
               }
             }
             if (issues.length > 0) {
-              warnedInconsistentMatches.add(matchId);
+              warnedInconsistentMatches.add(metadataWarningKey);
               console.warn(
                 `[Team/Innings Metadata Warning] match_id=${matchId} (${team1.shortName} vs ${team2.shortName}) innings=${innings} item.b="${item.b}" item.c="${item.c}" item.j="${item.j ?? ''}" item.k="${item.k ?? ''}": ${issues.join('; ')}`
               );
@@ -3536,12 +3557,13 @@ app.get('/api/strategy/state', (_req, res) => {
   });
 });
 
-// Public Read-Only Site Defaults & Maintenance Banner (zero secrets)
+// Public Read-Only Site Defaults, Visible Formats, Strategy Allowed Formats & Maintenance Banner (zero secrets)
 app.get('/api/public/config', (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   return res.json({
     ok: true,
     ...toPublicSiteConfig(activeSiteSettings),
+    strategyAllowedFormats: [...activeStrategyFormatsConfig.allowedFormats],
     timestamp: new Date().toISOString(),
   });
 });
@@ -3875,6 +3897,10 @@ app.post('/api/admin/settings', adminAuth.requireAdmin, async (req: Authenticate
     return res.status(400).json({ ok: false, error: 'allowedSeriesFilter must be an array of strings' });
   }
 
+  if (body.publicVisibleFormats !== undefined && !Array.isArray(body.publicVisibleFormats)) {
+    return res.status(400).json({ ok: false, error: 'publicVisibleFormats must be an array of format strings' });
+  }
+
   const prevFilter = [...ALLOWED_SERIES_FILTER];
   try {
     const saved = await saveAdminSiteSettingsToDb(dbPool, activeSiteSettings, body);
@@ -3914,6 +3940,7 @@ app.post('/api/admin/settings', adminAuth.requireAdmin, async (req: Authenticate
         defaultCountryCode: saved.defaultCountryCode,
         defaultSoundEnabled: saved.defaultSoundEnabled,
         allowedSeriesFilter: saved.allowedSeriesFilter,
+        publicVisibleFormats: saved.publicVisibleFormats,
         maintenanceBannerEnabled: saved.maintenanceBannerEnabled,
         maintenanceBannerLength: saved.maintenanceBannerText.length,
         prunedMatchesCount: prunedCount,
@@ -3998,6 +4025,47 @@ app.post('/api/admin/strategy/alerts', adminAuth.requireAdmin, async (req: Authe
   }
 });
 
+// Admin Strategy Allowed Formats (DB-backed, effective immediately without restart)
+app.post('/api/admin/strategy/formats', adminAuth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+
+  if (!Array.isArray(body.allowedFormats)) {
+    return res.status(400).json({ ok: false, error: 'allowedFormats must be an array of format strings' });
+  }
+  if (body.confirm !== true) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Explicit confirmation (confirm: true) is required to update strategy formats',
+    });
+  }
+
+  const previousFormats = [...activeStrategyFormatsConfig.allowedFormats];
+  try {
+    const saved = await saveStrategyFormatsToDb(dbPool, body.allowedFormats);
+    activeStrategyFormatsConfig = saved;
+    strategyCoordinator.setAllowedFormats(saved.allowedFormats);
+
+    void adminAuth.recordAdminAudit(
+      'STRATEGY_FORMATS_UPDATE',
+      'strategy_formats_config',
+      {
+        previousFormats,
+        allowedFormats: saved.allowedFormats,
+      },
+      req.adminUser?.ip || adminAuth.getClientIp(req)
+    );
+
+    return res.json({
+      ok: true,
+      strategyAllowedFormats: saved.allowedFormats,
+      updatedAt: saved.updatedAt,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Admin Strategy Rules (Read-Only — Single Source of Truth directly from real engine config) + Active Match Strategy Snapshots
 app.get('/api/admin/strategy/rules', adminAuth.requireAdmin, async (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -4005,6 +4073,7 @@ app.get('/api/admin/strategy/rules', adminAuth.requireAdmin, async (_req, res) =
   const engineConfig = strategyCoordinator.engine.getConfig();
   const states = strategyCoordinator.engine.getAllSerializedStates();
   const oddsMap = getSerializedOddsMap();
+  const allowedFormats = strategyCoordinator.getAllowedFormats();
 
   const matches = Object.entries(matchStore.matches).map(([id, raw]) => {
     const t1 = resolveFullTeamInfo(raw.b, raw.t1Name || raw.team1, raw.t1Sname);
@@ -4017,6 +4086,8 @@ app.get('/api/admin/strategy/rules', adminAuth.requireAdmin, async (_req, res) =
     const inn2 = isValidActiveSecondInningsScore(raw.k);
     const activeScore = inn2 || inn1;
     const currentInnings = inn2 ? 2 : 1;
+    const detectedFormat = normalizeMatchFormat(raw.fo, raw.t);
+    const strategyFormatAllowed = isFormatAllowedForStrategy(raw.fo, allowedFormats, raw.t);
 
     return {
       id,
@@ -4026,7 +4097,11 @@ app.get('/api/admin/strategy/rules', adminAuth.requireAdmin, async (_req, res) =
       team1Name: t1.name,
       team2Name: t2.name,
       seriesName,
-      format: raw.fo || raw.t || 'Match',
+      format: String(raw.fo || (typeof raw.t === 'string' && raw.t.trim() ? raw.t.trim() : '') || 'Match'),
+      rawFo: raw.fo ?? null,
+      rawT: raw.t ?? null,
+      detectedFormat,
+      strategyFormatAllowed,
       status: isFinished ? 'completed' : isLive ? 'live' : 'upcoming',
       innings: currentInnings,
       over: activeScore?.overs ?? 0,
@@ -4052,6 +4127,8 @@ app.get('/api/admin/strategy/rules', adminAuth.requireAdmin, async (_req, res) =
     rules: engineConfig,
     strategyAlerts: activeStrategyAlertsStatus,
     strategyAlertsEnabled: activeStrategyAlertsStatus.enabled,
+    strategyAllowedFormats: allowedFormats,
+    strategyFormatsUpdatedAt: activeStrategyFormatsConfig.updatedAt,
     leaderActive: hasPgAdvisoryLock || !isDbAvailable,
     pendingOutbox: strategyCoordinator.getPendingCounts(),
     matches,
@@ -4060,11 +4137,12 @@ app.get('/api/admin/strategy/rules', adminAuth.requireAdmin, async (_req, res) =
   });
 });
 
-// Admin Diagnostics: Live Server-Side Odds Cache & Health per Match
-app.get('/api/admin/diagnostics/odds', adminAuth.requireAdmin, (_req, res) => {
+// Admin Diagnostics: Live Server-Side Odds Cache, Format Detection & Saved DB Strategy Counts by Format
+app.get('/api/admin/diagnostics/odds', adminAuth.requireAdmin, async (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   const now = Date.now();
   const oddsMap = getSerializedOddsMap();
+  const allowedFormats = strategyCoordinator.getAllowedFormats();
 
   const items = Object.entries(matchStore.matches).map(([id, raw]) => {
     const t1 = resolveFullTeamInfo(raw.b, raw.t1Name || raw.team1, raw.t1Sname);
@@ -4089,12 +4167,18 @@ app.get('/api/admin/diagnostics/odds', adminAuth.requireAdmin, (_req, res) => {
         : cachedEntry?.data
         ? 'READY'
         : 'LOADING';
+    const detectedFormat = normalizeMatchFormat(raw.fo, raw.t);
+    const strategyFormatAllowed = isFormatAllowedForStrategy(raw.fo, allowedFormats, raw.t);
 
     return {
       matchId: id,
       title: `${t1.shortName} vs ${t2.shortName}`,
       seriesName: resolveSeriesNameFromMapping(raw),
-      format: raw.fo || raw.t || 'Match',
+      format: String(raw.fo || (typeof raw.t === 'string' && raw.t.trim() ? raw.t.trim() : '') || 'Match'),
+      rawFo: raw.fo ?? null,
+      rawT: raw.t ?? null,
+      detectedFormat,
+      strategyFormatAllowed,
       matchStatus,
       score1: raw.j || null,
       score2: raw.k || null,
@@ -4122,10 +4206,85 @@ app.get('/api/admin/diagnostics/odds', adminAuth.requireAdmin, (_req, res) => {
   };
   items.sort((a, b) => prio[a.matchStatus] - prio[b.matchStatus]);
 
+  const unknownFormatMatches = items.filter((i) => i.detectedFormat === 'UNKNOWN');
+
+  // Read-only audit of already-saved strategy records grouped by match format (never deletes rows)
+  let savedStrategyByFormat: Array<{
+    format: string;
+    detectedFormat: string;
+    signals: number;
+    trades: number;
+    positions: number;
+    states: number;
+  }> = [];
+
+  if (isDbAvailable) {
+    try {
+      const [sigRes, tradeRes, posRes, stateRes] = await Promise.all([
+        dbPool.query(
+          `SELECT COALESCE(m.format, 'Unknown') AS fmt, COUNT(*)::int AS cnt
+           FROM strategy_signals s
+           LEFT JOIN matches m ON m.external_match_id = s.match_id
+           GROUP BY 1`
+        ),
+        dbPool.query(
+          `SELECT COALESCE(m.format, 'Unknown') AS fmt, COUNT(*)::int AS cnt
+           FROM strategy_trades t
+           LEFT JOIN matches m ON m.external_match_id = t.match_id
+           GROUP BY 1`
+        ),
+        dbPool.query(
+          `SELECT COALESCE(m.format, 'Unknown') AS fmt, COUNT(*)::int AS cnt
+           FROM trade_positions p
+           LEFT JOIN matches m ON m.id::text = p.match_id::text OR m.external_match_id = p.match_id::text
+           GROUP BY 1`
+        ),
+        dbPool.query(
+          `SELECT COALESCE(m.format, 'Unknown') AS fmt, COUNT(*)::int AS cnt
+           FROM strategy_match_states s
+           LEFT JOIN matches m ON m.external_match_id = s.match_id
+           GROUP BY 1`
+        ),
+      ]);
+
+      const byFmt = new Map<
+        string,
+        { format: string; detectedFormat: string; signals: number; trades: number; positions: number; states: number }
+      >();
+      const ensure = (fmt: string) => {
+        const key = fmt || 'Unknown';
+        if (!byFmt.has(key)) {
+          byFmt.set(key, {
+            format: key,
+            detectedFormat: normalizeMatchFormat(key),
+            signals: 0,
+            trades: 0,
+            positions: 0,
+            states: 0,
+          });
+        }
+        return byFmt.get(key)!;
+      };
+      for (const r of sigRes.rows) ensure(String(r.fmt)).signals = Number(r.cnt) || 0;
+      for (const r of tradeRes.rows) ensure(String(r.fmt)).trades = Number(r.cnt) || 0;
+      for (const r of posRes.rows) ensure(String(r.fmt)).positions = Number(r.cnt) || 0;
+      for (const r of stateRes.rows) ensure(String(r.fmt)).states = Number(r.cnt) || 0;
+
+      savedStrategyByFormat = Array.from(byFmt.values()).sort(
+        (a, b) => b.signals + b.trades + b.positions + b.states - (a.signals + a.trades + a.positions + a.states)
+      );
+    } catch {
+      savedStrategyByFormat = [];
+    }
+  }
+
   return res.json({
     ok: true,
     totalMatches: items.length,
     cachedOddsCount: items.filter((i) => i.cached).length,
+    strategyAllowedFormats: allowedFormats,
+    unknownFormatMatches,
+    savedStrategyByFormat,
     items,
     timestamp: new Date().toISOString(),
   });

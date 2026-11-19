@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   fetchCrexTopMatches,
   playAlertSound,
-  isAllowedTournament,
   registerDynamicMapping,
   transformCrexMatch,
 } from './services/cricketApi';
@@ -27,6 +26,14 @@ import { EntryPossibilitiesModal } from './components/EntryPossibilitiesModal';
 import { AdminApp } from './components/admin/AdminApp';
 import { useOddsManager } from './hooks/useOddsManager';
 import { strategyEngine, detectTeamInControl, isWithinEntryWindow } from './services/strategy/engine';
+import {
+  ALL_KNOWN_FORMATS,
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  normalizeMatchFormat,
+  isFormatAllowedForStrategy,
+  isFormatVisibleToPublic,
+  formatDisplayLabel,
+} from './services/strategy/formatFilter';
 import { SerializedMatchStrategyState } from './services/strategy/types';
 import { clearLegacyTelegramLocalStorage } from './services/telegramService';
 import { fetchPublicSiteConfig, PublicSiteConfig } from './services/adminApi';
@@ -281,6 +288,10 @@ export default function App() {
         defaultSoundEnabled: cfg.defaultSoundEnabled,
         maintenanceBannerEnabled: cfg.maintenanceBannerEnabled,
         maintenanceBannerText: cfg.maintenanceBannerText,
+        publicVisibleFormats: Array.isArray(cfg.publicVisibleFormats) ? cfg.publicVisibleFormats : [],
+        strategyAllowedFormats: Array.isArray(cfg.strategyAllowedFormats)
+          ? cfg.strategyAllowedFormats
+          : [...DEFAULT_STRATEGY_ALLOWED_FORMATS],
       });
       try {
         if (!localStorage.getItem('crex_user_cc') && cfg.defaultCountryCode) {
@@ -358,8 +369,7 @@ export default function App() {
         if (allParsed.length > 0) {
           setAllServerMatches(allParsed);
         }
-        const allowedMatches = result.matches.filter(isAllowedTournament);
-        setMatches([...allowedMatches]);
+        setMatches([...result.matches]);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to fetch Crex matches';
         setError(msg);
@@ -371,11 +381,51 @@ export default function App() {
     [countryCode, soundEnabled]
   );
 
-  // Real-time Entry Opportunities Count for Radar Badge
+  const strategyAllowedFormats = useMemo(
+    () => publicConfig?.strategyAllowedFormats ?? [...DEFAULT_STRATEGY_ALLOWED_FORMATS],
+    [publicConfig?.strategyAllowedFormats]
+  );
+
+  const publicVisibleFormats = useMemo(
+    () => publicConfig?.publicVisibleFormats ?? [],
+    [publicConfig?.publicVisibleFormats]
+  );
+
+  const visibleMatches = useMemo(() => {
+    if (publicVisibleFormats.length === 0) return matches;
+    return matches.filter((m) =>
+      isFormatVisibleToPublic(m.raw?.fo ?? m.format, publicVisibleFormats, m.raw?.t)
+    );
+  }, [matches, publicVisibleFormats]);
+
+  const availableFormatOptions = useMemo(() => {
+    const allowedList =
+      publicVisibleFormats.length > 0 ? publicVisibleFormats : ALL_KNOWN_FORMATS;
+    return [
+      { value: 'All', label: 'All Formats' },
+      ...allowedList.map((fmt) => ({
+        value: fmt,
+        label: formatDisplayLabel(fmt),
+      })),
+    ];
+  }, [publicVisibleFormats]);
+
+  useEffect(() => {
+    if (
+      selectedFormat !== 'All' &&
+      !availableFormatOptions.some((opt) => opt.value === selectedFormat)
+    ) {
+      setSelectedFormat('All');
+    }
+  }, [selectedFormat, availableFormatOptions]);
+
+  // Real-time Entry Opportunities Count for Radar Badge (strictly strategy-allowed formats only)
   const entryOpportunitiesCount = useMemo(() => {
     let count = 0;
-    const liveMatches = matches.filter(
-      (m) => m.status === 'live' || (m.status !== 'completed' && (m.team1Score || m.team2Score))
+    const liveMatches = visibleMatches.filter(
+      (m) =>
+        (m.status === 'live' || (m.status !== 'completed' && (m.team1Score || m.team2Score))) &&
+        isFormatAllowedForStrategy(m.raw?.fo ?? m.format, strategyAllowedFormats, m.raw?.t)
     );
     for (const m of liveMatches) {
       const oddsState = oddsByMatchId[m.id];
@@ -399,7 +449,7 @@ export default function App() {
       }
     }
     return count;
-  }, [matches, oddsByMatchId, recordedFirstEntries, strategyVersion]);
+  }, [visibleMatches, strategyAllowedFormats, oddsByMatchId, recordedFirstEntries, strategyVersion]);
 
   useEffect(() => {
     if (isAdminRoute) return;
@@ -443,13 +493,13 @@ export default function App() {
           }
           if (allParsed.length > 0) {
             setAllServerMatches(allParsed);
-            const allowed = allParsed.filter(isAllowedTournament);
-            allowed.sort((a, b) => {
+            const sorted = [...allParsed];
+            sorted.sort((a, b) => {
               const prio = { live: 0, upcoming: 1, completed: 2 };
               if (prio[a.status] !== prio[b.status]) return prio[a.status] - prio[b.status];
               return b.startTime.getTime() - a.startTime.getTime();
             });
-            setMatches(allowed);
+            setMatches(sorted);
           }
           setLastUpdated(new Date());
           setTickCounter((prev) => prev + 1);
@@ -495,15 +545,14 @@ export default function App() {
 
   // Filtered Matches
   const filteredMatches = useMemo(() => {
-    return matches.filter((m) => {
+    return visibleMatches.filter((m) => {
       if (activeTab === 'live' && m.status !== 'live') return false;
       if (activeTab === 'upcoming' && m.status !== 'upcoming') return false;
       if (activeTab === 'completed' && m.status !== 'completed') return false;
 
       if (selectedFormat !== 'All') {
-        const fmt = m.format.toLowerCase();
-        const sel = selectedFormat.toLowerCase();
-        if (!fmt.includes(sel)) return false;
+        const detected = normalizeMatchFormat(m.raw?.fo ?? m.format, m.raw?.t);
+        if (detected !== selectedFormat) return false;
       }
 
       if (searchQuery.trim()) {
@@ -514,9 +563,9 @@ export default function App() {
 
       return true;
     });
-  }, [matches, activeTab, selectedFormat, searchQuery]);
+  }, [visibleMatches, activeTab, selectedFormat, searchQuery]);
 
-  const liveMatchesCount = matches.filter((m) => m.status === 'live').length;
+  const liveMatchesCount = visibleMatches.filter((m) => m.status === 'live').length;
 
   // Dedicated Admin Console Route (/admin)
   if (isAdminRoute) {
@@ -533,10 +582,11 @@ export default function App() {
       <EntryPossibilitiesModal
         isOpen={isEntryRadarOpen}
         onClose={() => setIsEntryRadarOpen(false)}
-        matches={matches}
+        matches={visibleMatches}
         oddsByMatchId={oddsByMatchId}
         onSelectMatch={navigateToAnalysis}
         recordedFirstEntries={recordedFirstEntries}
+        strategyAllowedFormats={strategyAllowedFormats}
       />
     </>
   );
@@ -567,7 +617,7 @@ export default function App() {
           matchId={activeAnalysisMatchId}
           match={analysisMatch}
           oddsState={getMatchOdds(activeAnalysisMatchId)}
-          allMatches={matches.length > 0 ? matches : allServerMatches}
+          allMatches={visibleMatches.length > 0 ? visibleMatches : allServerMatches}
           strategyVersion={strategyVersion}
           onStrategyStateSync={(snap) => applyServerStrategyStates({ [activeAnalysisMatchId]: snap })}
           onBack={navigateToDashboard}
@@ -575,6 +625,7 @@ export default function App() {
           onRefreshOdds={refreshMatchOdds}
           theme={theme}
           onThemeChange={handleThemeChange}
+          strategyAllowedFormats={strategyAllowedFormats}
         />
         {sharedModals}
       </div>
@@ -627,6 +678,7 @@ export default function App() {
             onSearchChange={setSearchQuery}
             selectedFormat={selectedFormat}
             onFormatChange={setSelectedFormat}
+            formatOptions={availableFormatOptions}
             isSseConnected={isSseConnected}
           />
 
@@ -663,7 +715,7 @@ export default function App() {
           ) : (
             <>
               <StatsHeader
-                matches={matches}
+                matches={visibleMatches}
                 latencyMs={latencyMs}
                 lastUpdated={lastUpdated}
                 activeTab={activeTab}
@@ -675,10 +727,11 @@ export default function App() {
                 onTabChange={setActiveTab}
                 selectedFormat={selectedFormat}
                 onFormatChange={setSelectedFormat}
+                formatOptions={availableFormatOptions}
                 searchQuery={searchQuery}
                 onSearchChange={setSearchQuery}
                 liveCount={liveMatchesCount}
-                totalCount={matches.length}
+                totalCount={visibleMatches.length}
               />
 
               {error && (
@@ -702,7 +755,7 @@ export default function App() {
               )}
 
               <section className="mt-4">
-                {isFetching && matches.length === 0 ? (
+                {isFetching && visibleMatches.length === 0 ? (
                   <div
                     aria-busy="true"
                     aria-label="Loading live cricket matches"
@@ -754,7 +807,7 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                ) : matches.length === 0 ? (
+                ) : visibleMatches.length === 0 ? (
                   <div className="py-16 flex flex-col items-center justify-center text-center border border-dashed border-[var(--bd)] bg-[var(--sf)] rounded-2xl p-8">
                     <div className="w-11 h-11 rounded-2xl bg-[var(--sf-2)] flex items-center justify-center text-[var(--mu)] mb-3">
                       <Info className="w-5 h-5" />

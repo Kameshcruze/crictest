@@ -43,10 +43,18 @@ interface AppShellNavProps {
   onSearchChange: (q: string) => void;
   selectedFormat: string;
   onFormatChange: (fmt: string) => void;
+  formatOptions?: Array<{ value: string; label: string }>;
   isSseConnected?: boolean;
 }
 
-const FORMAT_OPTIONS = ['All', 'T10', 'T20'];
+const DEFAULT_FORMAT_OPTIONS = [
+  { value: 'All', label: 'All Formats' },
+  { value: 'T10', label: 'T10' },
+  { value: 'T20', label: 'T20' },
+  { value: 'ODI', label: 'ODI' },
+  { value: 'TEST', label: 'Test' },
+  { value: 'HUNDRED', label: 'Hundred' },
+];
 
 export const DesktopSidebar: React.FC<
   Pick<
@@ -249,6 +257,7 @@ export const TopHeaderBar: React.FC<AppShellNavProps> = ({
   onSearchChange,
   selectedFormat,
   onFormatChange,
+  formatOptions = DEFAULT_FORMAT_OPTIONS,
   isSseConnected = true,
 }) => {
   return (
@@ -310,9 +319,9 @@ export const TopHeaderBar: React.FC<AppShellNavProps> = ({
                 onChange={(e) => onFormatChange(e.target.value)}
                 className="bg-[var(--sf)] border border-[var(--rd)]/40 text-xs font-semibold text-[var(--rdt)] rounded-xl px-2.5 xl:px-3 py-2 cursor-pointer focus:border-[var(--rd)] shrink-0"
               >
-                {FORMAT_OPTIONS.map((f) => (
-                  <option key={f} value={f}>
-                    {f === 'All' ? 'All Formats' : f}
+                {formatOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
                   </option>
                 ))}
               </select>

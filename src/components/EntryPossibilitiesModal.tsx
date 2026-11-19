@@ -19,6 +19,12 @@ import {
   isWithinEntryWindow,
   detectTeamInControl,
 } from '../services/strategy/engine';
+import {
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  EvaluableMatchFormat,
+  isFormatAllowedForStrategy,
+  formatDisplayLabel,
+} from '../services/strategy/formatFilter';
 import { useModalFocusTrap } from './useModalFocusTrap';
 
 export interface EntryOpportunity {
@@ -65,6 +71,7 @@ interface EntryPossibilitiesModalProps {
   oddsByMatchId: Record<string, MatchOddsState>;
   onSelectMatch: (matchId: string) => void;
   recordedFirstEntries?: Set<string>;
+  strategyAllowedFormats?: readonly EvaluableMatchFormat[];
 }
 
 export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = ({
@@ -74,17 +81,22 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
   oddsByMatchId,
   onSelectMatch,
   recordedFirstEntries = new Set(),
+  strategyAllowedFormats = DEFAULT_STRATEGY_ALLOWED_FORMATS,
 }) => {
   const [filterMode, setFilterMode] = useState<'all' | 'opportunities' | 'monitoring'>('all');
   const dialogRef = useModalFocusTrap(isOpen, onClose);
 
-  const { opportunities, radarWatchlist } = useMemo(() => {
+  const { opportunities, radarWatchlist, skippedByFormatCount } = useMemo(() => {
     const oppList: EntryOpportunity[] = [];
     const watchList: MatchRadarStatus[] = [];
 
-    const liveMatches = matches.filter(
+    const allLiveMatches = matches.filter(
       (m) => m.status === 'live' || (m.status !== 'completed' && (m.team1Score || m.team2Score))
     );
+    const liveMatches = allLiveMatches.filter((m) =>
+      isFormatAllowedForStrategy(m.raw?.fo ?? m.format, strategyAllowedFormats, m.raw?.t)
+    );
+    const skippedCount = allLiveMatches.length - liveMatches.length;
 
     for (const match of liveMatches) {
       const oddsState = oddsByMatchId[match.id];
@@ -244,8 +256,12 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       });
     }
 
-    return { opportunities: oppList, radarWatchlist: watchList };
-  }, [matches, oddsByMatchId, recordedFirstEntries]);
+    return {
+      opportunities: oppList,
+      radarWatchlist: watchList,
+      skippedByFormatCount: skippedCount,
+    };
+  }, [matches, oddsByMatchId, recordedFirstEntries, strategyAllowedFormats]);
 
   if (!isOpen) return null;
 
@@ -294,7 +310,15 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
                 )}
               </div>
               <p className="text-xs text-[var(--mu)] truncate">
-                Ball 0.0 to match end surveillance · Strict rule: 2nd entry never fires without prior 1st entry
+                Monitoring{' '}
+                {strategyAllowedFormats.length > 0
+                  ? strategyAllowedFormats.map(formatDisplayLabel).join(', ')
+                  : 'no'}{' '}
+                matches only
+                {skippedByFormatCount > 0
+                  ? ` · ${skippedByFormatCount} other-format live match${skippedByFormatCount === 1 ? '' : 'es'} ignored`
+                  : ''}{' '}
+                · Strict rule: 2nd entry never fires without prior 1st entry
               </p>
             </div>
           </div>

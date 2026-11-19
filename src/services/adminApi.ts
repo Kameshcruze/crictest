@@ -2,6 +2,7 @@ import type { SafeTelegramConfigStatus } from './telegramService';
 import type { RawApiResponse } from '../types/cricket';
 import type { SerializedMatchStrategyState, PositionType } from './strategy/types';
 import type { StrategyConfig } from './strategy/config';
+import type { CanonicalMatchFormat, EvaluableMatchFormat } from './strategy/formatFilter';
 
 export class AdminSessionExpiredError extends Error {
   constructor(message = 'Your admin session has expired. Please sign in again.') {
@@ -42,9 +43,11 @@ export interface PublicSiteConfig {
   defaultSoundEnabled: boolean;
   maintenanceBannerEnabled: boolean;
   maintenanceBannerText: string;
+  publicVisibleFormats: EvaluableMatchFormat[];
+  strategyAllowedFormats?: EvaluableMatchFormat[];
 }
 
-export interface AdminSiteSettings extends PublicSiteConfig {
+export interface AdminSiteSettings extends Omit<PublicSiteConfig, 'strategyAllowedFormats'> {
   allowedSeriesFilter: string[];
 }
 
@@ -124,6 +127,10 @@ export interface AdminStrategyMatchItem {
   team2Name: string;
   seriesName: string;
   format: string;
+  rawFo: unknown;
+  rawT: unknown;
+  detectedFormat: CanonicalMatchFormat;
+  strategyFormatAllowed: boolean;
   status: 'live' | 'upcoming' | 'completed';
   innings: number;
   over: number;
@@ -141,6 +148,8 @@ export interface AdminStrategyRulesResponse {
   rules: StrategyConfig;
   strategyAlerts: StrategyAlertsStatus;
   strategyAlertsEnabled: boolean;
+  strategyAllowedFormats: EvaluableMatchFormat[];
+  strategyFormatsUpdatedAt: string | null;
   leaderActive: boolean;
   pendingOutbox: { trades: number; signals: number; positions: number };
   matches: AdminStrategyMatchItem[];
@@ -153,6 +162,10 @@ export interface AdminOddsDiagnosticItem {
   title: string;
   seriesName: string;
   format: string;
+  rawFo: unknown;
+  rawT: unknown;
+  detectedFormat: CanonicalMatchFormat;
+  strategyFormatAllowed: boolean;
   matchStatus: 'live' | 'upcoming' | 'completed';
   score1: string | null;
   score2: string | null;
@@ -172,10 +185,22 @@ export interface AdminOddsDiagnosticItem {
   rawSnapshot: Record<string, unknown> | null;
 }
 
+export interface SavedStrategyFormatCount {
+  format: string;
+  detectedFormat: string;
+  signals: number;
+  trades: number;
+  positions: number;
+  states: number;
+}
+
 export interface AdminOddsDiagnosticsResponse {
   ok: boolean;
   totalMatches: number;
   cachedOddsCount: number;
+  strategyAllowedFormats: EvaluableMatchFormat[];
+  unknownFormatMatches: AdminOddsDiagnosticItem[];
+  savedStrategyByFormat: SavedStrategyFormatCount[];
   items: AdminOddsDiagnosticItem[];
   timestamp: string;
 }
@@ -466,6 +491,20 @@ export function toggleAdminStrategyAlerts(payload: {
       body: JSON.stringify(payload),
     }
   );
+}
+
+export function saveAdminStrategyFormats(payload: {
+  allowedFormats: EvaluableMatchFormat[];
+  confirm: boolean;
+}): Promise<{ ok: boolean; strategyAllowedFormats: EvaluableMatchFormat[]; updatedAt: string | null }> {
+  return adminRequest<{
+    ok: boolean;
+    strategyAllowedFormats: EvaluableMatchFormat[];
+    updatedAt: string | null;
+  }>('/api/admin/strategy/formats', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function fetchPublicSiteConfig(): Promise<

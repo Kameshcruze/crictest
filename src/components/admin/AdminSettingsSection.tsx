@@ -11,7 +11,13 @@ import {
   Volume2,
   Megaphone,
   Filter,
+  Eye,
 } from 'lucide-react';
+import {
+  ALL_KNOWN_FORMATS,
+  EvaluableMatchFormat,
+  formatDisplayLabel,
+} from '../../services/strategy/formatFilter';
 import {
   fetchAdminSettings,
   previewAdminSeriesFilter,
@@ -48,6 +54,7 @@ export const AdminSettingsSection: React.FC<AdminSettingsSectionProps> = ({
   const [defaultCountryCode, setDefaultCountryCode] = useState('IN');
   const [defaultSoundEnabled, setDefaultSoundEnabled] = useState(true);
   const [allowedSeriesFilter, setAllowedSeriesFilter] = useState<string[]>([]);
+  const [publicVisibleFormats, setPublicVisibleFormats] = useState<EvaluableMatchFormat[]>([]);
   const [seriesInput, setSeriesInput] = useState('');
   const [maintenanceBannerEnabled, setMaintenanceBannerEnabled] = useState(false);
   const [maintenanceBannerText, setMaintenanceBannerText] = useState('');
@@ -66,6 +73,7 @@ export const AdminSettingsSection: React.FC<AdminSettingsSectionProps> = ({
       setDefaultCountryCode(res.data.defaultCountryCode);
       setDefaultSoundEnabled(res.data.defaultSoundEnabled);
       setAllowedSeriesFilter(res.data.allowedSeriesFilter || []);
+      setPublicVisibleFormats(res.data.publicVisibleFormats || []);
       setMaintenanceBannerEnabled(res.data.maintenanceBannerEnabled);
       setMaintenanceBannerText(res.data.maintenanceBannerText || '');
     } catch (err: unknown) {
@@ -119,6 +127,7 @@ export const AdminSettingsSection: React.FC<AdminSettingsSectionProps> = ({
         defaultCountryCode: defaultCountryCode.trim().toUpperCase(),
         defaultSoundEnabled,
         allowedSeriesFilter: finalFilter,
+        publicVisibleFormats,
         maintenanceBannerEnabled,
         maintenanceBannerText: maintenanceBannerText.trim(),
       });
@@ -127,6 +136,7 @@ export const AdminSettingsSection: React.FC<AdminSettingsSectionProps> = ({
       setDefaultCountryCode(res.data.defaultCountryCode);
       setDefaultSoundEnabled(res.data.defaultSoundEnabled);
       setAllowedSeriesFilter(res.data.allowedSeriesFilter);
+      setPublicVisibleFormats(res.data.publicVisibleFormats || []);
       setMaintenanceBannerEnabled(res.data.maintenanceBannerEnabled);
       setMaintenanceBannerText(res.data.maintenanceBannerText);
       setSeriesPreview(null);
@@ -407,6 +417,69 @@ export const AdminSettingsSection: React.FC<AdminSettingsSectionProps> = ({
                 className="min-h-[44px] px-3 rounded-xl text-xs font-semibold text-[var(--rdt)] hover:bg-[var(--rds)] transition-colors"
               >
                 Clear all filters (allow all series)
+              </button>
+            </div>
+          )}
+        </section>
+
+        {/* Formats Shown to Visitors */}
+        <section
+          className="rounded-2xl bg-[var(--sf)] border border-[var(--bd)] p-4 sm:p-5 space-y-3.5"
+          style={{ boxShadow: 'var(--card-shadow)' }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Eye className="w-4 h-4 text-[var(--rdt)]" strokeWidth={1.8} />
+              <h3 className="text-sm font-bold text-[var(--tx)]">Formats Shown to Visitors</h3>
+            </div>
+            <span className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[var(--sf-2)] text-[var(--mu)] border border-[var(--bd)]">
+              {publicVisibleFormats.length === 0
+                ? 'All server-tracked formats'
+                : publicVisibleFormats.map(formatDisplayLabel).join(', ')}
+            </span>
+          </div>
+          <p className="text-xs text-[var(--mu)]">
+            Optional display filter served via <code className="font-mono">GET /api/public/config</code>. Leave all unchecked to show every format the server tracks (default). Does not stop server timeline tracking or change strategy format rules.
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            {ALL_KNOWN_FORMATS.map((fmt) => {
+              const checked = publicVisibleFormats.includes(fmt);
+              return (
+                <label
+                  key={fmt}
+                  className={`min-h-[44px] px-3.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition-colors ${
+                    checked
+                      ? 'bg-[var(--ok-bg)] text-[var(--ok-tx)] border-[var(--ok-bd)]'
+                      : 'bg-[var(--sf-2)] text-[var(--mu)] border-[var(--bd)] hover:text-[var(--tx)]'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => {
+                      setPublicVisibleFormats((prev) =>
+                        prev.includes(fmt)
+                          ? prev.filter((item) => item !== fmt)
+                          : [...prev, fmt]
+                      );
+                    }}
+                    className="w-4 h-4 accent-[var(--rd)]"
+                  />
+                  <span>{formatDisplayLabel(fmt)}</span>
+                </label>
+              );
+            })}
+          </div>
+
+          {publicVisibleFormats.length > 0 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setPublicVisibleFormats([])}
+                className="min-h-[44px] px-3 rounded-xl text-xs font-semibold text-[var(--rdt)] hover:bg-[var(--rds)] transition-colors"
+              >
+                Show all server-tracked formats (default)
               </button>
             </div>
           )}

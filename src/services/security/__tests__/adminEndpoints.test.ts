@@ -27,17 +27,26 @@ import {
   PUBLIC_SITE_CONFIG_DB_KEY,
   READ_ONLY_REFRESH_INTERVALS,
   STRATEGY_ALERTS_CONFIG_DB_KEY,
+  STRATEGY_FORMATS_CONFIG_DB_KEY,
   AdminSiteSettings,
   StrategyAlertsStatus,
+  StrategyFormatsConfig,
   clearStrategyAlertsOverrideInDb,
   loadAdminSiteSettingsFromDb,
   loadStrategyAlertsStatusFromDb,
+  loadStrategyFormatsFromDb,
   sanitizeSeriesFilterList,
   saveAdminSiteSettingsToDb,
   saveStrategyAlertsOverrideToDb,
+  saveStrategyFormatsToDb,
   toPublicSiteConfig,
 } from '../../../../server/appSettingsConfig';
 import { DEFAULT_STRATEGY_CONFIG } from '../../strategy/config';
+import {
+  CricketStrategyEngine,
+  DEFAULT_STRATEGY_ALLOWED_FORMATS,
+  sanitizeCanonicalFormatList,
+} from '../../strategy';
 
 const TEST_USERNAME = 'opsadmin';
 const TEST_PASSWORD = 'Phase3AdminPassword!2026';
@@ -135,6 +144,11 @@ function createInMemoryAdminApp(opts: { envToken?: string; nowFn?: () => number 
     envDefault: envStrategyAlertsDefault,
     updatedAt: null,
   };
+  let activeStrategyFormats: StrategyFormatsConfig = {
+    allowedFormats: [...DEFAULT_STRATEGY_ALLOWED_FORMATS],
+    updatedAt: null,
+  };
+  const liveStrategyEngine = new CricketStrategyEngine();
   const liveMatches = [
     { id: 'M1', title: 'IND vs AUS', seriesName: 'IPL 2026', format: 'T20', status: 'live' },
     { id: 'M2', title: 'SYS vs MEL', seriesName: 'Big Bash League', format: 'T20', status: 'live' },
@@ -260,6 +274,7 @@ function createInMemoryAdminApp(opts: { envToken?: string; nowFn?: () => number 
     res.json({
       ok: true,
       ...toPublicSiteConfig(activeSiteSettings),
+      strategyAllowedFormats: activeStrategyFormats.allowedFormats,
       timestamp: new Date().toISOString(),
     });
   });
@@ -345,13 +360,41 @@ function createInMemoryAdminApp(opts: { envToken?: string; nowFn?: () => number 
     return res.json({ ok: true, strategyAlerts: activeStrategyAlerts });
   });
 
+  app.post('/api/admin/strategy/formats', auth.requireAdmin, async (req: AuthenticatedAdminRequest, res) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    if (!Array.isArray(body.allowedFormats)) {
+      return res.status(400).json({ ok: false, error: 'allowedFormats must be an array' });
+    }
+    if (body.confirm !== true) {
+      return res.status(400).json({ ok: false, error: 'Explicit confirmation required' });
+    }
+    const previous = [...activeStrategyFormats.allowedFormats];
+    const sanitized = sanitizeCanonicalFormatList(body.allowedFormats, []);
+    activeStrategyFormats = await saveStrategyFormatsToDb(mockDb, sanitized);
+    liveStrategyEngine.setAllowedFormats(activeStrategyFormats.allowedFormats);
+    await auth.recordAdminAudit(
+      'STRATEGY_FORMATS_UPDATE',
+      STRATEGY_FORMATS_CONFIG_DB_KEY,
+      { previous, allowedFormats: activeStrategyFormats.allowedFormats },
+      req.adminUser?.ip || '127.0.0.1'
+    );
+    return res.json({
+      ok: true,
+      strategyAllowedFormats: activeStrategyFormats.allowedFormats,
+      updatedAt: activeStrategyFormats.updatedAt,
+    });
+  });
+
   app.get('/api/admin/strategy/rules', auth.requireAdmin, async (_req, res) => {
     activeStrategyAlerts = await loadStrategyAlertsStatusFromDb(mockDb, envStrategyAlertsDefault);
+    activeStrategyFormats = await loadStrategyFormatsFromDb(mockDb);
     res.json({
       ok: true,
       rules: DEFAULT_STRATEGY_CONFIG,
       strategyAlerts: activeStrategyAlerts,
       strategyAlertsEnabled: activeStrategyAlerts.enabled,
+      strategyAllowedFormats: activeStrategyFormats.allowedFormats,
+      strategyFormatsUpdatedAt: activeStrategyFormats.updatedAt,
       matches: liveMatches,
     });
   });
@@ -402,7 +445,7 @@ function createInMemoryAdminApp(opts: { envToken?: string; nowFn?: () => number 
     res.send('<!doctype html><html><body>Admin SPA</body></html>');
   });
 
-  return { app, auditLogs, settingsRows };
+  return { app, auditLogs, settingsRows, liveStrategyEngine };
 }
 
 async function withServer(app: express.Express, fn: (baseUrl: string) => Promise<void>) {
@@ -447,6 +490,7 @@ describe('Phase 3 Admin Endpoints, Rate Limits & Session Guards', () => {
         { method: 'POST', path: '/api/admin/settings/preview-series', body: { allowedSeriesFilter: ['IPL'] } },
         { method: 'POST', path: '/api/admin/settings', body: { defaultCountryCode: 'AU' } },
         { method: 'POST', path: '/api/admin/strategy/alerts', body: { enabled: true, confirm: true } },
+        { method: 'POST', path: '/api/admin/strategy/formats', body: { allowedFormats: ['T10', 'T20'], confirm: true } },
         { method: 'GET', path: '/api/admin/strategy/rules' },
         { method: 'POST', path: '/api/strategy/M1/override-entry', body: { entryOdds: 1.88 } },
         { method: 'POST', path: '/api/strategy/M1/override-exit', body: { exitOdds: 1.5 } },
@@ -676,6 +720,105 @@ describe('Phase 3 Admin Endpoints, Rate Limits & Session Guards', () => {
       const alertsResetJson = (await alertsReset.json()) as any;
       assert.equal(alertsResetJson.strategyAlerts.enabled, false);
       assert.equal(alertsResetJson.strategyAlerts.source, 'env');
+    });
+  });
+
+  it('updates strategy allowed formats immediately without restart (with confirm + audit) and publicVisibleFormats', async () => {
+    const { app, auditLogs, liveStrategyEngine } = createInMemoryAdminApp();
+
+    await withServer(app, async (baseUrl) => {
+      const cookie = await loginAndGetCookie(baseUrl);
+      const authHeaders = {
+        Cookie: cookie,
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      };
+
+      // Initially default T10 & T20 — an ODI match is NOT evaluable
+      assert.deepEqual(liveStrategyEngine.getAllowedFormats(), ['T10', 'T20']);
+      const odiTick1 = {
+        id: 'LIVE_ODI_1',
+        format: 'One Day',
+        raw: { fo: 'One Day', t: 0 },
+        status: 'live',
+        battingTeamKey: 'T1',
+        team1: { key: 'T1', name: 'Team 1', shortName: 'T1' },
+        team2: { key: 'T2', name: 'Team 2', shortName: 'T2' },
+        team1Score: { runs: 10, wickets: 0, overs: 1.0, completedOvers: 1, ballsInOver: 0 },
+      } as any;
+      const odiTick2 = {
+        ...odiTick1,
+        team1Score: { runs: 14, wickets: 0, overs: 1.1, completedOvers: 1, ballsInOver: 1 },
+      };
+      const oddsBefore = {
+        matchId: 'LIVE_ODI_1',
+        oddsKey: 'LIVE_ODI_1',
+        status: 'success',
+        recordsCount: 1,
+        odds: {
+          favoriteTeamKey: 'T2',
+          favoriteTeamName: 'Team 2',
+          bookmaker: { backRate: 98, layRate: 99, decimalBack: 1.98, decimalLay: 1.99, isSuspended: false },
+          raw: { F: '^T2', R: '98+1' },
+        },
+      } as any;
+      const oddsAfter = {
+        matchId: 'LIVE_ODI_1',
+        oddsKey: 'LIVE_ODI_1',
+        status: 'success',
+        recordsCount: 1,
+        odds: {
+          favoriteTeamKey: 'T1',
+          favoriteTeamName: 'Team 1',
+          bookmaker: { backRate: 90, layRate: 91, decimalBack: 1.90, decimalLay: 1.91, isSuspended: false },
+          raw: { F: '^T1', R: '90+1' },
+        },
+      } as any;
+
+      assert.equal(liveStrategyEngine.evaluateMatch(odiTick1, oddsBefore).length, 0);
+      assert.equal(liveStrategyEngine.evaluateMatch(odiTick2, oddsAfter).length, 0);
+
+      // Missing confirm: true rejected with 400
+      const unconfirmedRes = await fetch(`${baseUrl}/api/admin/strategy/formats`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ allowedFormats: ['T10', 'T20', 'ODI'] }),
+      });
+      assert.equal(unconfirmedRes.status, 400);
+
+      // Confirmed format update takes effect IMMEDIATELY without restart
+      const confirmRes = await fetch(`${baseUrl}/api/admin/strategy/formats`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ allowedFormats: ['T10', 'T20', 'ODI'], confirm: true }),
+      });
+      assert.equal(confirmRes.status, 200);
+      const confirmJson = (await confirmRes.json()) as any;
+      assert.deepEqual(confirmJson.strategyAllowedFormats, ['T10', 'T20', 'ODI']);
+      assert.deepEqual(liveStrategyEngine.getAllowedFormats(), ['T10', 'T20', 'ODI']);
+      assert.ok(auditLogs.some((e) => e.action === 'STRATEGY_FORMATS_UPDATE'));
+
+      // Live engine evaluates the ODI match immediately on the next tick
+      liveStrategyEngine.evaluateMatch(odiTick1, oddsBefore);
+      const evalAfterUpdate = liveStrategyEngine.evaluateMatch(odiTick2, oddsAfter);
+      assert.ok(
+        evalAfterUpdate.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED'),
+        'Expected ODI match to be evaluated immediately after admin format update'
+      );
+
+      // Save publicVisibleFormats via /api/admin/settings and confirm GET /api/public/config reflects both
+      const pubVisRes = await fetch(`${baseUrl}/api/admin/settings`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ publicVisibleFormats: ['T10', 'T20'] }),
+      });
+      assert.equal(pubVisRes.status, 200);
+
+      const pubCfgRes = await fetch(`${baseUrl}/api/public/config`);
+      assert.equal(pubCfgRes.status, 200);
+      const pubCfg = (await pubCfgRes.json()) as any;
+      assert.deepEqual(pubCfg.publicVisibleFormats, ['T10', 'T20']);
+      assert.deepEqual(pubCfg.strategyAllowedFormats, ['T10', 'T20', 'ODI']);
     });
   });
 

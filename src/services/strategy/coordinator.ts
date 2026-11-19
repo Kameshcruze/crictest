@@ -1,6 +1,7 @@
 import { ParsedCricketMatch } from '../../types/cricket';
 import { MatchOddsState } from '../../types/odds';
 import { CricketStrategyEngine } from './engine';
+import type { CanonicalMatchFormat, EvaluableMatchFormat } from './formatFilter';
 import {
   MatchStrategyState,
   PositionType,
@@ -162,6 +163,14 @@ export class StrategyPersistenceCoordinator {
 
   public isStrategyAlertsEnabled(): boolean {
     return this.strategyAlertsEnabled;
+  }
+
+  public setAllowedFormats(formats: readonly EvaluableMatchFormat[]): void {
+    this.engine.setAllowedFormats(formats);
+  }
+
+  public getAllowedFormats(): EvaluableMatchFormat[] {
+    return this.engine.getAllowedFormats();
   }
 
   public getHasRehydrated(): boolean {
@@ -420,9 +429,22 @@ export class StrategyPersistenceCoordinator {
     }
   ): Promise<{
     signals: StrategySignal[];
-    state: SerializedMatchStrategyState;
+    state: SerializedMatchStrategyState | null;
     tradesEmitted: StrategyTradeRecord[];
+    skippedFormat?: boolean;
+    detectedFormat?: CanonicalMatchFormat;
   }> {
+    const eligibility = this.engine.checkFormatEligibility(match);
+    if (!eligibility.allowed) {
+      return {
+        signals: [],
+        state: this.engine.hasState(match.id) ? this.engine.serializeState(match.id) : null,
+        tradesEmitted: [],
+        skippedFormat: true,
+        detectedFormat: eligibility.detectedFormat,
+      };
+    }
+
     this.activeMatchContext.set(match.id, match);
     this.emittedTradesBuffer = [];
 
@@ -450,6 +472,8 @@ export class StrategyPersistenceCoordinator {
       signals,
       state: this.engine.serializeState(match.id),
       tradesEmitted: emittedTrades,
+      skippedFormat: false,
+      detectedFormat: eligibility.detectedFormat,
     };
   }
 
