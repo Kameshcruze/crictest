@@ -24,6 +24,7 @@ import {
   isWithinEntryWindow,
   calculatePaiseChange,
   detectTeamInControl,
+  resolveExactTeamControl,
   getLegalBallCount,
   StrategyPersistenceCoordinator,
   StrategyStorageAdapter,
@@ -33,6 +34,11 @@ import {
   StrategySignal,
   buildSignalDedupeHash,
 } from '../index';
+import {
+  isValidActiveSecondInningsScore,
+  resolveInningsAndBattingTeam,
+  transformCrexMatch,
+} from '../../cricketApi';
 
 function makeMockMatch(
   matchId: string,
@@ -100,32 +106,47 @@ function makeMockOdds(
   matchId: string,
   favoriteKey: string | null,
   favoriteName: string | null,
-  backRate: number | null
+  backRate: number | null,
+  opts?: {
+    rawF?: string | null;
+    cl?: Array<{ code: string; name: string }>;
+    oddsFetchedAt?: Date | string | null;
+    oddsSource?: 'getSV3' | 'flb' | 'none';
+  }
 ): any {
-  const suspended = backRate === null || favoriteKey === null;
+  const suspended = backRate === null || (favoriteKey === null && opts?.rawF === undefined && !opts?.cl);
+  const effectiveRawF = opts?.rawF !== undefined ? opts.rawF : favoriteKey ? `^${favoriteKey}` : null;
+  const effectiveOddsSource = opts?.oddsSource ?? 'getSV3';
   return {
     matchId,
     oddsKey: matchId,
     status: suspended ? 'unavailable' : 'success',
     recordsCount: 1,
-    odds: {
-      matchKey: matchId,
-      favoriteTeamKey: favoriteKey || '',
-      favoriteTeamName: favoriteName || '',
-      bookmaker: {
-        rawRateString: suspended ? '0+0' : `${backRate}+1`,
-        backRate: suspended ? null : backRate,
-        layRate: suspended ? null : (backRate as number) + 1,
-        decimalBack: suspended ? null : Number((1 + (backRate as number) / 100).toFixed(2)),
-        decimalLay: suspended ? null : Number((1 + ((backRate as number) + 1) / 100).toFixed(2)),
-        spread: suspended ? null : 1,
-        isSuspended: suspended,
-      },
-      raw: {
-        F: favoriteKey ? `^${favoriteKey}` : '',
-        R: suspended ? '0+0' : `${backRate}+1`,
-      },
-    },
+    oddsFetchedAt: opts?.oddsFetchedAt,
+    oddsSource: effectiveOddsSource,
+    odds:
+      effectiveOddsSource === 'none'
+        ? null
+        : {
+            matchKey: matchId,
+            favoriteTeamKey: favoriteKey || '',
+            favoriteTeamName: favoriteName || '',
+            timestamp: opts?.oddsFetchedAt ? new Date(opts.oddsFetchedAt) : undefined,
+            bookmaker: {
+              rawRateString: suspended ? '0+0' : `${backRate}+1`,
+              backRate: suspended ? null : backRate,
+              layRate: suspended ? null : (backRate as number) + 1,
+              decimalBack: suspended ? null : Number((1 + (backRate as number) / 100).toFixed(2)),
+              decimalLay: suspended ? null : Number((1 + ((backRate as number) + 1) / 100).toFixed(2)),
+              spread: suspended ? null : 1,
+              isSuspended: suspended,
+            },
+            raw: {
+              F: effectiveRawF,
+              R: suspended ? '0+0' : `${backRate}+1`,
+              ...(opts?.cl ? { cl: opts.cl } : {}),
+            },
+          },
   };
 }
 
@@ -1404,6 +1425,396 @@ describe('Phase 3 & 4 Cricket Trading Strategy Engine Suite', () => {
 
       assert.equal(storage.trades.get(`${matchId}:FIRST_ENTRY`)?.status, 'BOOKSET_COMPLETED');
       assert.equal(alertSpy.length, 0);
+    });
+  });
+
+  // =========================================================================
+  // 13. LIVE-MATCH AUDIT FIXES (CONTROL, INNINGS, FRESH getSV3, RESET, MANUAL)
+  // =========================================================================
+  describe('Live-Match Audit Fixes (Exact Control, Innings 2 Validation, Fresh getSV3, Resets, Guards)', () => {
+    it('(a) 1-letter raw.F keys and empty shortName/name do NOT match the wrong team via substring or empty-string match', () => {
+      // Case 1: raw.F = "^O", battingTeamName contains "O" ("Hobart Hurricanes") with empty shortName ""
+      // Old substring bug allowed batN.includes("o") OR fn.includes("") === true -> FALSE BATTING!
+      const res1 = resolveExactTeamControl({
+        rawF: '^O',
+        battingTeamKey: 'HH',
+        battingTeamName: 'Hobart Hurricanes',
+        battingTeamShortName: '',
+        bowlingTeamKey: 'MR',
+        bowlingTeamName: 'Melbourne Renegades',
+        bowlingTeamShortName: '',
+      });
+      assert.equal(res1.teamInControl, 'UNKNOWN');
+      assert.notEqual(res1.controlTeamKey, res1.battingTeamKey);
+
+      // Case 2: Single-letter raw.F = "^A", batting team shortName is "" (empty) and name is "Adelaide"
+      const m = {
+        id: 'EMPTY_SHORT',
+        format: 'T20',
+        seriesName: 'Test',
+        status: 'live',
+        battingTeamKey: 'ADS',
+        team1: { key: 'ADS', name: 'Adelaide Strikers', shortName: '' },
+        team2: { key: 'BH', name: 'Brisbane Heat', shortName: '' },
+        team1Score: { runs: 10, wickets: 0, overs: 1.0, completedOvers: 1, ballsInOver: 0 },
+      } as any;
+      const oddA = makeMockOdds('EMPTY_SHORT', null, '', 85, { rawF: '^A' });
+      const detectedA = detectTeamInControl(m, oddA);
+      assert.equal(detectedA.teamInControl, 'UNKNOWN');
+      assert.equal(detectedA.rawF, '^A');
+
+      // Case 3: Exact normalized key match works even with ^ prefix & mixed case
+      const resExactKey = resolveExactTeamControl({
+        rawF: '^ads',
+        battingTeamKey: 'ADS',
+        battingTeamName: 'Adelaide Strikers',
+        battingTeamShortName: 'ADS',
+        bowlingTeamKey: 'BH',
+        bowlingTeamName: 'Brisbane Heat',
+        bowlingTeamShortName: 'BH',
+      });
+      assert.equal(resExactKey.teamInControl, 'BATTING');
+      assert.equal(resExactKey.controlTeamKey, 'ADS');
+      assert.equal(resExactKey.battingTeamKey, 'ADS');
+
+      // Case 4: Exact raw.cl lookup matches exact full/short team name only (never substring)
+      const resClSubstringFail = resolveExactTeamControl({
+        rawF: '^X9',
+        clList: [{ code: 'X9', name: 'Hobart' }], // substring of "Hobart Hurricanes", NOT exact
+        battingTeamKey: 'HH',
+        battingTeamName: 'Hobart Hurricanes',
+        battingTeamShortName: 'HH',
+        bowlingTeamKey: 'MR',
+        bowlingTeamName: 'Melbourne Renegades',
+        bowlingTeamShortName: 'MR',
+      });
+      assert.equal(resClSubstringFail.teamInControl, 'UNKNOWN');
+
+      const resClExactPass = resolveExactTeamControl({
+        rawF: '^X9',
+        clList: [{ code: 'X9', name: 'Melbourne Renegades' }],
+        battingTeamKey: 'HH',
+        battingTeamName: 'Hobart Hurricanes',
+        battingTeamShortName: 'HH',
+        bowlingTeamKey: 'MR',
+        bowlingTeamName: 'Melbourne Renegades',
+        bowlingTeamShortName: 'MR',
+      });
+      assert.equal(resClExactPass.teamInControl, 'BOWLING');
+      assert.equal(resClExactPass.controlTeamKey, 'MR');
+    });
+
+    it('(b) Placeholder item.k values ("-", "Yet to bat", "0/0(0.0)") do NOT start Innings 2', () => {
+      assert.equal(isValidActiveSecondInningsScore('-'), undefined);
+      assert.equal(isValidActiveSecondInningsScore('Yet to bat'), undefined);
+      assert.equal(isValidActiveSecondInningsScore('0/0(0.0)'), undefined);
+      assert.equal(isValidActiveSecondInningsScore('0/0(0.0'), undefined);
+      assert.equal(isValidActiveSecondInningsScore('0/0(0)'), undefined);
+
+      for (const kVal of ['-', 'Yet to bat', '0/0(0.0)', '']) {
+        const res = resolveInningsAndBattingTeam({
+          b: 'TEAM1',
+          c: 'TEAM2',
+          j: '12/0(0.3',
+          k: kVal,
+        });
+        assert.equal(res.innings, 1, `Expected innings=1 for item.k="${kVal}"`);
+        assert.equal(res.hasInn2, false);
+        assert.equal(res.battingTeamKey, 'TEAM1');
+        assert.equal(res.bowlingTeamKey, 'TEAM2');
+
+        const parsed = transformCrexMatch('PH_MATCH', {
+          b: 'TEAM1',
+          c: 'TEAM2',
+          d: 1,
+          q: 'SER1',
+          ti: String(Date.now()),
+          v: 'VEN1',
+          j: '12/0(0.3',
+          k: kVal,
+          t: Date.now(),
+        });
+        assert.equal(parsed.team2Score, undefined, `transformCrexMatch must leave team2Score undefined for k="${kVal}"`);
+        assert.equal(parsed.battingTeamKey, 'TEAM1');
+      }
+
+      // Real 2nd innings ball 0.1 starts Innings 2
+      const activeInn2 = isValidActiveSecondInningsScore('4/0(0.1');
+      assert.ok(activeInn2);
+      assert.equal(activeInn2.overs, 0.1);
+      const resInn2 = resolveInningsAndBattingTeam({
+        b: 'TEAM1',
+        c: 'TEAM2',
+        j: '165/6(20.0',
+        k: '4/0(0.1',
+      });
+      assert.equal(resInn2.innings, 2);
+      assert.equal(resInn2.battingTeamKey, 'TEAM2');
+    });
+
+    it('(c) Boundary 4 at over 0.3 where control after the ball is BOWLING or UNKNOWN produces NO booking confirmation or entry', () => {
+      // Subcase 1: BOWLING in control after 0.3 FOUR
+      const idBowl = 'MATCH_0_3_BOWLING';
+      engine.evaluateMatch(
+        makeMockMatch(idBowl, { runs: 2, wickets: 0, overs: 0.2 }),
+        makeMockOdds(idBowl, 'BH-W', 'Brisbane Heat Women', 98)
+      );
+      const sigsBowl = engine.evaluateMatch(
+        makeMockMatch(idBowl, { runs: 6, wickets: 0, overs: 0.3 }),
+        makeMockOdds(idBowl, 'BH-W', 'Brisbane Heat Women', 84) // Still BOWLING after FOUR!
+      );
+      assert.equal(engine.getState(idBowl).stage, 'WAITING_FOR_CONFIRMATION');
+      assert.equal(engine.getState(idBowl).bookingTeamKey, null);
+      assert.equal(engine.getState(idBowl).firstEntryTrade, null);
+      assert.ok(!sigsBowl.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED'));
+
+      // Subcase 2: UNKNOWN control after 0.3 FOUR (e.g. ambiguous raw.F = "^Z")
+      const idUnk = 'MATCH_0_3_UNKNOWN';
+      engine.evaluateMatch(
+        makeMockMatch(idUnk, { runs: 2, wickets: 0, overs: 0.2 }),
+        makeMockOdds(idUnk, 'BH-W', 'Brisbane Heat Women', 98)
+      );
+      const sigsUnk = engine.evaluateMatch(
+        makeMockMatch(idUnk, { runs: 6, wickets: 0, overs: 0.3 }),
+        makeMockOdds(idUnk, null, null, 88, { rawF: '^Z' })
+      );
+      assert.equal(engine.getState(idUnk).stage, 'WAITING_FOR_CONFIRMATION');
+      assert.equal(engine.getState(idUnk).bookingTeamKey, null);
+      assert.equal(engine.getState(idUnk).firstEntryTrade, null);
+      assert.ok(!sigsUnk.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED'));
+    });
+
+    it('(d) Stale/pre-score oddsFetchedAt or item.flb waits for fresh getSV3, evaluates within 5s, and drops + emits BOUNDARY_SKIPPED_NO_FRESH_ODDS after > 5s', () => {
+      const idFresh = 'MATCH_FRESH_GETSV3_2S';
+      const t0 = 1_700_000_000_000;
+
+      // t=0: Ball 1.0, pre-ball BOWLING 98p from getSV3
+      engine.evaluateMatch(
+        makeMockMatch(idFresh, { runs: 10, wickets: 0, overs: 1.0 }),
+        makeMockOdds(idFresh, 'BH-W', 'Brisbane Heat Women', 98, { oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }),
+        undefined,
+        { now: t0, scoreFetchedAt: new Date(t0), scoreChangedAt: new Date(t0), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }
+      );
+
+      // t=1s: Score changes to 1.1 (+4 runs), but oddsFetchedAt is STILL t0 (stale pre-score snapshot!)
+      engine.evaluateMatch(
+        makeMockMatch(idFresh, { runs: 14, wickets: 0, overs: 1.1 }),
+        makeMockOdds(idFresh, 'ADS-W', 'Adelaide Strikers Women', 90, { oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }),
+        undefined,
+        { now: t0 + 1000, scoreFetchedAt: new Date(t0 + 1000), scoreChangedAt: new Date(t0 + 1000), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }
+      );
+      // Must NOT confirm yet while oddsFetchedAt <= boundary score timestamp!
+      assert.equal(engine.getState(idFresh).stage, 'WAITING_FOR_CONFIRMATION');
+      assert.ok(engine.getState(idFresh).pendingBoundaryBall);
+
+      // t=2s: item.flb snapshot arrives -> must NOT be used
+      engine.evaluateMatch(
+        makeMockMatch(idFresh, { runs: 14, wickets: 0, overs: 1.1 }),
+        makeMockOdds(idFresh, 'ADS-W', 'Adelaide Strikers Women', 90, { oddsFetchedAt: new Date(t0 + 2000), oddsSource: 'flb' }),
+        undefined,
+        { now: t0 + 2000, scoreFetchedAt: new Date(t0 + 2000), oddsFetchedAt: new Date(t0 + 2000), oddsSource: 'flb' }
+      );
+      assert.equal(engine.getState(idFresh).stage, 'WAITING_FOR_CONFIRMATION');
+
+      // t=3s: Fresh getSV3 snapshot arrives AFTER score change (t0 + 3000 > t0 + 1000) -> NOW evaluates!
+      const freshSigs = engine.evaluateMatch(
+        makeMockMatch(idFresh, { runs: 14, wickets: 0, overs: 1.1 }),
+        makeMockOdds(idFresh, 'ADS-W', 'Adelaide Strikers Women', 90, { oddsFetchedAt: new Date(t0 + 3000), oddsSource: 'getSV3' }),
+        undefined,
+        { now: t0 + 3000, scoreFetchedAt: new Date(t0 + 3000), oddsFetchedAt: new Date(t0 + 3000), oddsSource: 'getSV3' }
+      );
+      assert.equal(engine.getState(idFresh).stage, 'CONFIRMED_BOOKING_TEAM');
+      assert.ok(freshSigs.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED' && s.status === 'PASS'));
+
+      // Timeout case (> 5000ms without fresh post-score getSV3 odds -> BOUNDARY_SKIPPED_NO_FRESH_ODDS)
+      const idTimeout = 'MATCH_STALE_TIMEOUT_6S';
+      engine.evaluateMatch(
+        makeMockMatch(idTimeout, { runs: 10, wickets: 0, overs: 1.0 }),
+        makeMockOdds(idTimeout, 'BH-W', 'Brisbane Heat Women', 98, { oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }),
+        undefined,
+        { now: t0, scoreFetchedAt: new Date(t0), scoreChangedAt: new Date(t0), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }
+      );
+      engine.evaluateMatch(
+        makeMockMatch(idTimeout, { runs: 14, wickets: 0, overs: 1.1 }),
+        makeMockOdds(idTimeout, 'ADS-W', 'Adelaide Strikers Women', 90, { oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }),
+        undefined,
+        { now: t0 + 1000, scoreFetchedAt: new Date(t0 + 1000), scoreChangedAt: new Date(t0 + 1000), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }
+      );
+      const timeoutSigs = engine.evaluateMatch(
+        makeMockMatch(idTimeout, { runs: 14, wickets: 0, overs: 1.1 }),
+        makeMockOdds(idTimeout, 'ADS-W', 'Adelaide Strikers Women', 90, { oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }),
+        undefined,
+        { now: t0 + 6200, scoreFetchedAt: new Date(t0 + 6200), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }
+      );
+      assert.equal(engine.getState(idTimeout).stage, 'WAITING_FOR_CONFIRMATION');
+      assert.equal(engine.getState(idTimeout).pendingBoundaryBall, null);
+      const skipSig = timeoutSigs.find((s) => s.signalType === 'BOUNDARY_SKIPPED_NO_FRESH_ODDS');
+      assert.ok(skipSig);
+      assert.equal(skipSig.status, 'FAIL');
+      assert.ok(skipSig.metadata && 'odds_fetched_at' in skipSig.metadata && 'score_fetched_at' in skipSig.metadata);
+    });
+
+    it('(e) Innings change (1 -> 2) resets preBallControl, preBallPaise, pendingBoundaryBall, and all lastEvaluated* anchors', () => {
+      const id = 'MATCH_INN_CHANGE_RESET';
+      // Innings 1 late over: preBallControl=BATTING, preBallPaise=70, pendingBoundaryBall queued
+      engine.evaluateMatch(
+        makeMockMatch(id, { innings: 1, runs: 140, wickets: 2, overs: 8.1 }),
+        makeMockOdds(id, 'ADS-W', 'Adelaide Strikers Women', 70)
+      );
+      engine.evaluateMatch(
+        makeMockMatch(id, { innings: 1, runs: 144, wickets: 2, overs: 8.2 }),
+        makeMockOdds(id, null, null, null) // leaves pendingBoundaryBall active with preBall=BATTING 70p
+      );
+      assert.ok(engine.getState(id).pendingBoundaryBall);
+      assert.equal(engine.getState(id).preBallControl, 'BATTING');
+      assert.equal(engine.getState(id).preBallPaise, 70);
+
+      // Innings switches to Innings 2 at 0.1 with 4 runs (0 -> 4): MUST NOT compare Inn2 runs against Inn1 140 or preBall=70!
+      const inn2Sigs = engine.evaluateMatch(
+        makeMockMatch(id, { innings: 2, runs: 4, wickets: 0, overs: 0.1 }),
+        makeMockOdds(id, 'BH-W', 'Brisbane Heat Women', 91)
+      );
+      const st = engine.getState(id);
+      assert.equal(st.lastEvaluatedInnings, 2);
+      assert.equal(st.lastEvaluatedOver, 0.1);
+      assert.equal(st.lastEvaluatedRuns, 4);
+      assert.equal(st.lastEvaluatedWickets, 0);
+      assert.equal(st.pendingBoundaryBall, null);
+      // Because preBall was reset to UNKNOWN on innings transition, first ball of Inn 2 is NOT compared against Inn 1's 70p
+      assert.equal(st.stage, 'WAITING_FOR_CONFIRMATION');
+      assert.ok(!inn2Sigs.some((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED'));
+    });
+
+    it('(f) Mismatched bookingTeamKey !== battingTeamKey blocks entry confirmation, immediate entry, and deferred entry with FAIL signal', () => {
+      const id = 'MATCH_BOOKING_KEY_MISMATCH';
+      // Booking team stored from Inn 1 as ADS-W (Inn 1 batting team), now Inn 2 is batting BH-W
+      engine.hydrateState(id, {
+        stage: 'CONFIRMED_BOOKING_TEAM',
+        bookingTeamKey: 'ADS-W',
+        bookingTeamName: 'Adelaide Strikers Women',
+        lastEvaluatedInnings: 2,
+        lastEvaluatedOver: 1.0,
+        lastEvaluatedRuns: 10,
+        lastEvaluatedWickets: 0,
+        lastEvaluatedLegalBalls: 6,
+        preBallControl: 'BATTING',
+        preBallPaise: 70,
+        lastEvaluatedControl: 'BATTING',
+        lastEvaluatedPaise: 70,
+      });
+
+      const entryConfirmFailSigs = engine.evaluateMatch(
+        makeMockMatch(id, { innings: 2, runs: 16, wickets: 0, overs: 1.1 }), // +6 runs, BATTING=BH-W at 90p (+20p)
+        makeMockOdds(id, 'BH-W', 'Brisbane Heat Women', 90)
+      );
+      assert.equal(engine.getState(id).firstEntryTrade, null);
+      assert.equal(engine.getState(id).stage, 'CONFIRMED_BOOKING_TEAM');
+      assert.ok(
+        entryConfirmFailSigs.some(
+          (s) => s.signalType === 'ENTRY_CONFIRMATION_BOUNDARY' && s.status === 'FAIL' && /mismatch/i.test(s.explanation)
+        )
+      );
+
+      // Also verify CONFIRMED_PENDING_85 refuses deferred entry when bookingTeamKey !== battingTeamKey
+      engine.hydrateState(id, {
+        stage: 'CONFIRMED_PENDING_85',
+        pending85: true,
+        bookingTeamKey: 'ADS-W',
+        bookingTeamName: 'Adelaide Strikers Women',
+      });
+      const deferredFailSigs = engine.evaluateMatch(
+        makeMockMatch(id, { innings: 2, runs: 17, wickets: 0, overs: 1.2 }),
+        makeMockOdds(id, 'BH-W', 'Brisbane Heat Women', 88)
+      );
+      assert.equal(engine.getState(id).firstEntryTrade, null);
+      assert.ok(
+        deferredFailSigs.some(
+          (s) => s.signalType === 'FIRST_ENTRY_TRIGGER' && s.status === 'FAIL' && /mismatch/i.test(s.explanation)
+        )
+      );
+    });
+
+    it('(g) Records full audit telemetry in metadata + explanation AND marks MANUAL trades/signals on override', async () => {
+      const id = 'MATCH_TELEMETRY_AND_MANUAL';
+      const t0 = 1_700_000_100_000;
+      const storedSignals: StrategySignal[] = [];
+      const storedTrades: StrategyTradeRecord[] = [];
+      const storage: StrategyStorageAdapter = {
+        async loadAllSnapshots() { return []; },
+        async loadAllTrades() { return []; },
+        async loadAllPositions() { return []; },
+        async loadRecentSignals() { return []; },
+        async upsertTrade(t) { storedTrades.push({ ...t }); },
+        async upsertPosition() {},
+        async insertSignal(s) { storedSignals.push({ ...s }); },
+        async upsertSnapshot() {},
+      };
+      const coord = new StrategyPersistenceCoordinator({ storage });
+
+      // Step 1: Pre-ball BOWLING 98p
+      await coord.evaluateMatchSnapshot(
+        makeMockMatch(id, { runs: 10, wickets: 0, overs: 1.0 }),
+        makeMockOdds(id, 'BH-W', 'Brisbane Heat Women', 98, { rawF: '^BH-W', oddsFetchedAt: new Date(t0) }),
+        { now: t0, scoreFetchedAt: new Date(t0), scoreChangedAt: new Date(t0), oddsFetchedAt: new Date(t0), oddsSource: 'getSV3' }
+      );
+      // Step 2: FOUR -> BATTING 85p (Booking confirmation)
+      const resConfirm = await coord.evaluateMatchSnapshot(
+        makeMockMatch(id, { runs: 14, wickets: 0, overs: 1.1 }),
+        makeMockOdds(id, 'ADS-W', 'Adelaide Strikers Women', 85, { rawF: '^ADS-W', oddsFetchedAt: new Date(t0 + 1000) }),
+        { now: t0 + 1000, scoreFetchedAt: new Date(t0 + 1000), scoreChangedAt: new Date(t0 + 1000), oddsFetchedAt: new Date(t0 + 1000), oddsSource: 'getSV3', sameGetSV3ScorePacket: true }
+      );
+      const confirmSig = resConfirm.signals.find((s) => s.signalType === 'BOOKING_TEAM_CONFIRMED');
+      assert.ok(confirmSig);
+      for (const field of [
+        'innings',
+        'over',
+        'legal_ball_count',
+        'battingTeamKey',
+        'bowlingTeamKey',
+        'raw.F',
+        'controlTeamKey',
+        'control_before',
+        'control_after',
+        'odds_before',
+        'odds_after',
+        'move',
+        'odds_fetched_at',
+        'score_fetched_at',
+      ]) {
+        assert.ok(field in (confirmSig.metadata || {}), `Missing metadata field: ${field}`);
+        assert.ok(confirmSig.explanation.includes(`${field}=`), `Missing explanation field: ${field}`);
+      }
+
+      // Manual Override Entry + Manual Override Exit must clearly mark MANUAL on trade & signal
+      const manualId = 'MATCH_MANUAL_TAGGING';
+      await coord.recordManualEntry({
+        matchId: manualId,
+        positionType: 'FIRST_ENTRY',
+        entryOdds: 1.88,
+        innings: 1,
+        over: 2.4,
+        wickets: 0,
+        bookingTeam: 'Adelaide Strikers Women',
+        battingTeam: 'ADS-W',
+        bowlingTeam: 'BH-W',
+      });
+      await coord.recordManualExit({
+        matchId: manualId,
+        positionType: 'FIRST_ENTRY',
+        exitOdds: 1.89,
+        over: 7.2,
+      });
+
+      const manualTrade = storedTrades.find((t) => t.matchId === manualId);
+      assert.ok(manualTrade);
+      assert.equal(manualTrade.isManual, true);
+      assert.equal(manualTrade.source, 'MANUAL');
+      assert.match(manualTrade.bookingTeam, /^\[MANUAL\]/);
+
+      const manualSignals = storedSignals.filter((s) => s.matchId === manualId);
+      assert.equal(manualSignals.length, 2);
+      assert.ok(manualSignals.every((s) => s.metadata?.isManual === true && s.metadata?.source === 'MANUAL'));
+      assert.ok(manualSignals.every((s) => s.explanation.startsWith('[MANUAL]')));
     });
   });
 });

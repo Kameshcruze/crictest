@@ -1498,19 +1498,26 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                           })}
                         </td>
                         <td className="py-2 px-2.5 whitespace-nowrap">
-                          <span
-                            className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                              sig.signalType === 'WICKET_EVENT'
-                                ? 'bg-purple-950 text-purple-300 border border-purple-800'
-                                : sig.signalType.startsWith('ABNORMAL')
-                                ? 'bg-amber-950 text-amber-300 border border-amber-800'
-                                : sig.status === 'PASS'
-                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                                : 'bg-slate-900 text-slate-300 border border-slate-800'
-                            }`}
-                          >
-                            {sig.signalType.replace(/_/g, ' ')}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                sig.signalType === 'WICKET_EVENT'
+                                  ? 'bg-purple-950 text-purple-300 border border-purple-800'
+                                  : sig.signalType.startsWith('ABNORMAL')
+                                  ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                  : sig.status === 'PASS'
+                                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                  : 'bg-slate-900 text-slate-300 border border-slate-800'
+                              }`}
+                            >
+                              {sig.signalType.replace(/_/g, ' ')}
+                            </span>
+                            {(sig.metadata?.isManual || sig.metadata?.source === 'MANUAL') && (
+                              <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-950 text-amber-300 border border-amber-600/60">
+                                MANUAL
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="py-2 px-2.5 text-slate-400 whitespace-nowrap">
                           Inn {sig.currentInnings} • {sig.currentOver} ov

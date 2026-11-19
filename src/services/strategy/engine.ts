@@ -144,8 +144,198 @@ export function calculatePaiseChange(
 }
 
 /**
+ * Normalizes a Crex team key by stripping leading `^`, trimming, and lowercasing.
+ */
+export function normalizeTeamKey(key?: string | null): string {
+  return String(key || '').replace(/^\^/, '').trim().toLowerCase();
+}
+
+function cleanTeamKeyDisplay(key?: string | null): string {
+  return String(key || '').replace(/^\^/, '').trim();
+}
+
+export interface SignalAuditTelemetry {
+  innings: number;
+  over: number;
+  legal_ball_count: number;
+  battingTeamKey: string;
+  bowlingTeamKey: string;
+  'raw.F': string | null;
+  rawF: string | null;
+  controlTeamKey: string | null;
+  control_before: TeamControlState;
+  control_after: TeamControlState;
+  odds_before: number | null;
+  odds_after: number | null;
+  move: number | null;
+  odds_fetched_at: string | null;
+  score_fetched_at: string | null;
+}
+
+function buildAuditMetadata(
+  telemetry: SignalAuditTelemetry,
+  extra?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    innings: telemetry.innings,
+    over: telemetry.over,
+    legal_ball_count: telemetry.legal_ball_count,
+    battingTeamKey: telemetry.battingTeamKey,
+    bowlingTeamKey: telemetry.bowlingTeamKey,
+    'raw.F': telemetry['raw.F'],
+    rawF: telemetry.rawF,
+    controlTeamKey: telemetry.controlTeamKey,
+    control_before: telemetry.control_before,
+    control_after: telemetry.control_after,
+    odds_before: telemetry.odds_before,
+    odds_after: telemetry.odds_after,
+    move: telemetry.move,
+    odds_fetched_at: telemetry.odds_fetched_at,
+    score_fetched_at: telemetry.score_fetched_at,
+    ...(extra || {}),
+  };
+}
+
+function formatAuditTelemetrySuffix(telemetry: SignalAuditTelemetry): string {
+  return (
+    ` [innings=${telemetry.innings}, over=${telemetry.over}, legal_ball_count=${telemetry.legal_ball_count}, ` +
+    `battingTeamKey=${telemetry.battingTeamKey}, bowlingTeamKey=${telemetry.bowlingTeamKey}, ` +
+    `raw.F=${telemetry['raw.F'] ?? 'null'}, controlTeamKey=${telemetry.controlTeamKey ?? 'null'}, ` +
+    `control_before=${telemetry.control_before}, control_after=${telemetry.control_after}, ` +
+    `odds_before=${telemetry.odds_before ?? 'null'}, odds_after=${telemetry.odds_after ?? 'null'}, ` +
+    `move=${telemetry.move ?? 'null'}, odds_fetched_at=${telemetry.odds_fetched_at ?? 'null'}, ` +
+    `score_fetched_at=${telemetry.score_fetched_at ?? 'null'}]`
+  );
+}
+
+/**
+ * Exact normalized control matching shared between strategy engine & server timeline loop:
+ * - NO substring matching (includes) anywhere.
+ * - NO matching when shortName or name is empty.
+ * - NO fallback to winProbability or partial names.
+ * - Matches raw.F to battingTeamKey / bowlingTeamKey by EXACT normalized key first.
+ * - If no exact key match, tries raw.cl code lookup (exact code match -> exact non-empty team name/shortName match).
+ * - Otherwise returns UNKNOWN.
+ * - Control is BATTING only when resolved controlTeamKey === battingTeamKey (normalized exact equality).
+ */
+export function resolveExactTeamControl(params: {
+  rawF?: unknown;
+  favoriteTeamKey?: string | null;
+  favoriteTeamName?: string | null;
+  clList?: Array<{ code?: string; name?: string }>;
+  speechNames?: Record<string, string>;
+  battingTeamKey: string;
+  battingTeamName?: string;
+  battingTeamShortName?: string;
+  bowlingTeamKey: string;
+  bowlingTeamName?: string;
+  bowlingTeamShortName?: string;
+}): {
+  teamInControl: TeamControlState;
+  controlTeamKey?: string;
+  controlTeamName?: string;
+  battingTeamKey: string;
+  bowlingTeamKey: string;
+  rawF: string | null;
+} {
+  const battingTeamKey = cleanTeamKeyDisplay(params.battingTeamKey);
+  const bowlingTeamKey = cleanTeamKeyDisplay(params.bowlingTeamKey);
+  const batKeyNorm = normalizeTeamKey(battingTeamKey);
+  const bowlKeyNorm = normalizeTeamKey(bowlingTeamKey);
+
+  const rawFStr =
+    typeof params.rawF === 'string' && params.rawF.trim().length > 0 ? params.rawF.trim() : null;
+  const favKey = rawFStr
+    ? cleanTeamKeyDisplay(rawFStr)
+    : cleanTeamKeyDisplay(params.favoriteTeamKey);
+  const favKeyNorm = normalizeTeamKey(favKey);
+
+  let controlTeamKey: string | undefined;
+  let teamInControl: TeamControlState = 'UNKNOWN';
+
+  if (favKeyNorm) {
+    // 1. Exact normalized key match against batting / bowling key
+    if (batKeyNorm && favKeyNorm === batKeyNorm && favKeyNorm !== bowlKeyNorm) {
+      controlTeamKey = battingTeamKey;
+      teamInControl = 'BATTING';
+    } else if (bowlKeyNorm && favKeyNorm === bowlKeyNorm && favKeyNorm !== batKeyNorm) {
+      controlTeamKey = bowlingTeamKey;
+      teamInControl = 'BOWLING';
+    }
+    // 2. Exact raw.cl code lookup -> exact non-empty team name or shortName match only
+    else if (Array.isArray(params.clList)) {
+      const clEntry = params.clList.find(
+        (item) =>
+          item &&
+          typeof item.code === 'string' &&
+          normalizeTeamKey(item.code) === favKeyNorm
+      );
+      const clNameNorm =
+        clEntry && typeof clEntry.name === 'string' ? clEntry.name.trim().toLowerCase() : '';
+
+      if (clNameNorm.length > 0) {
+        const batNameNorm = String(params.battingTeamName || '').trim().toLowerCase();
+        const batShortNorm = String(params.battingTeamShortName || '').trim().toLowerCase();
+        const bowlNameNorm = String(params.bowlingTeamName || '').trim().toLowerCase();
+        const bowlShortNorm = String(params.bowlingTeamShortName || '').trim().toLowerCase();
+
+        const matchesBatting =
+          (batNameNorm.length > 0 && clNameNorm === batNameNorm) ||
+          (batShortNorm.length > 0 && clNameNorm === batShortNorm);
+        const matchesBowling =
+          (bowlNameNorm.length > 0 && clNameNorm === bowlNameNorm) ||
+          (bowlShortNorm.length > 0 && clNameNorm === bowlShortNorm);
+
+        if (matchesBatting && !matchesBowling && batKeyNorm) {
+          controlTeamKey = battingTeamKey;
+          teamInControl = 'BATTING';
+        } else if (matchesBowling && !matchesBatting && bowlKeyNorm) {
+          controlTeamKey = bowlingTeamKey;
+          teamInControl = 'BOWLING';
+        }
+      }
+    }
+  }
+
+  // Enforce strict invariant: control is BATTING ONLY when normalized controlTeamKey === battingTeamKey
+  if (
+    !controlTeamKey ||
+    !batKeyNorm ||
+    normalizeTeamKey(controlTeamKey) !== batKeyNorm
+  ) {
+    if (teamInControl === 'BATTING') {
+      teamInControl = 'UNKNOWN';
+    }
+  }
+
+  let controlTeamName: string | undefined;
+  if (teamInControl === 'BATTING') {
+    controlTeamName = params.battingTeamName || params.battingTeamShortName || battingTeamKey;
+  } else if (teamInControl === 'BOWLING') {
+    controlTeamName = params.bowlingTeamName || params.bowlingTeamShortName || bowlingTeamKey;
+  } else if (favKey) {
+    const speech = params.speechNames?.[favKey];
+    controlTeamName =
+      (typeof speech === 'string' && speech.trim()) ||
+      (params.favoriteTeamName && params.favoriteTeamName.trim()) ||
+      undefined;
+    controlTeamKey = favKey;
+  }
+
+  return {
+    teamInControl,
+    controlTeamKey,
+    controlTeamName,
+    battingTeamKey,
+    bowlingTeamKey,
+    rawF: rawFStr,
+  };
+}
+
+/**
  * Resolves which team is currently in control ('BATTING' | 'BOWLING' | 'UNKNOWN')
- * from Crex getSV3 API (field F) and returns Crex's raw `control_team_odds` directly.
+ * from Crex getSV3 API (field F) using exact normalized key / exact raw.cl lookup ONLY,
+ * and returns Crex's raw `control_team_odds` directly.
  */
 export function detectTeamInControl(
   match: ParsedCricketMatch,
@@ -160,99 +350,69 @@ export function detectTeamInControl(
   bowlingTeamName: string;
   currentPaise: number | null;
   decimalOdds: number | null;
+  rawF: string | null;
 } {
   const is2ndInnings = !!match.team2Score;
   const battingTeam = is2ndInnings ? match.team2 : match.team1;
   const bowlingTeam = is2ndInnings ? match.team1 : match.team2;
 
-  const battingTeamKey = (battingTeam.key || (is2ndInnings ? match.raw?.c : match.raw?.b) || 'BAT')
-    .replace(/^\^/, '')
-    .trim();
+  const battingTeamKey = cleanTeamKeyDisplay(
+    battingTeam.key || (is2ndInnings ? match.raw?.c : match.raw?.b) || 'BAT'
+  );
   const battingTeamName = battingTeam.name || battingTeam.shortName || 'Batting Team';
-  const bowlingTeamKey = (bowlingTeam.key || (is2ndInnings ? match.raw?.b : match.raw?.c) || 'BOWL')
-    .replace(/^\^/, '')
-    .trim();
+  const bowlingTeamKey = cleanTeamKeyDisplay(
+    bowlingTeam.key || (is2ndInnings ? match.raw?.b : match.raw?.c) || 'BOWL'
+  );
   const bowlingTeamName = bowlingTeam.name || bowlingTeam.shortName || 'Bowling Team';
 
-  const bookmaker = oddsState?.odds?.bookmaker;
+  // Reject non-getSV3 snapshots (e.g. item.flb) for control and odds evaluation
+  if (!oddsState || oddsState.oddsSource === 'flb' || oddsState.oddsSource === 'none' || !oddsState.odds) {
+    return {
+      teamInControl: 'UNKNOWN',
+      controlTeamKey: undefined,
+      controlTeamName: undefined,
+      battingTeamKey,
+      battingTeamName,
+      bowlingTeamKey,
+      bowlingTeamName,
+      currentPaise: null,
+      decimalOdds: null,
+      rawF: null,
+    };
+  }
+
+  const bookmaker = oddsState.odds.bookmaker;
   const decimalOdds = bookmaker?.decimalBack ?? bookmaker?.decimalLay ?? null;
   const currentPaise =
     bookmaker?.backRate !== null && bookmaker?.backRate !== undefined
       ? bookmaker.backRate
       : decimalOddsToPaise(decimalOdds);
 
-  // Extract raw F field from SV3 e.g. "^80" or "^O"
-  const rawF = oddsState?.odds?.raw?.F;
-  const favoriteKey =
-    typeof rawF === 'string'
-      ? rawF.replace(/^\^/, '').trim()
-      : (oddsState?.odds?.favoriteTeamKey || '').replace(/^\^/, '').trim();
-  const favoriteName = oddsState?.odds?.favoriteTeamName || '';
-
-  let teamInControl: TeamControlState = 'UNKNOWN';
-
-  if (favoriteKey || favoriteName) {
-    const batKeyNorm = battingTeamKey.toLowerCase();
-    const bowlKeyNorm = bowlingTeamKey.toLowerCase();
-    const favKeyNorm = favoriteKey.toLowerCase();
-    const batNameNorm = battingTeamName.toLowerCase();
-    const batShortNorm = (battingTeam.shortName || '').toLowerCase();
-    const bowlNameNorm = bowlingTeamName.toLowerCase();
-    const bowlShortNorm = (bowlingTeam.shortName || '').toLowerCase();
-    const favNameNorm = favoriteName.toLowerCase();
-
-    // 1. Direct key match
-    if (favKeyNorm && favKeyNorm === batKeyNorm) {
-      teamInControl = 'BATTING';
-    } else if (favKeyNorm && favKeyNorm === bowlKeyNorm) {
-      teamInControl = 'BOWLING';
-    }
-    // 2. Name / shortName match
-    else if (
-      (favNameNorm && (favNameNorm.includes(batShortNorm) || batNameNorm.includes(favNameNorm))) ||
-      (favKeyNorm && (favKeyNorm === batShortNorm || batNameNorm.includes(favKeyNorm)))
-    ) {
-      teamInControl = 'BATTING';
-    } else if (
-      (favNameNorm && (favNameNorm.includes(bowlShortNorm) || bowlNameNorm.includes(favNameNorm))) ||
-      (favKeyNorm && (favKeyNorm === bowlShortNorm || bowlNameNorm.includes(favKeyNorm)))
-    ) {
-      teamInControl = 'BOWLING';
-    }
-    // 3. Fallback: Check raw.cl list from Crex SV3 response if available
-    else if (oddsState?.odds?.raw?.cl && Array.isArray(oddsState.odds.raw.cl)) {
-      const matched = oddsState.odds.raw.cl.find((item) => item.code === favoriteKey);
-      if (matched?.name) {
-        const clName = matched.name.toLowerCase();
-        if (clName.includes(batShortNorm) || batNameNorm.includes(clName)) {
-          teamInControl = 'BATTING';
-        } else if (clName.includes(bowlShortNorm) || bowlNameNorm.includes(clName)) {
-          teamInControl = 'BOWLING';
-        }
-      }
-    }
-  }
-
-  // Fallback win probability favorite match
-  if (teamInControl === 'UNKNOWN' && match.winProbability?.favoriteTeamKey) {
-    const wpFav = match.winProbability.favoriteTeamKey.replace(/^\^/, '').trim().toLowerCase();
-    if (wpFav === battingTeamKey.toLowerCase()) {
-      teamInControl = 'BATTING';
-    } else if (wpFav === bowlingTeamKey.toLowerCase()) {
-      teamInControl = 'BOWLING';
-    }
-  }
-
-  return {
-    teamInControl,
-    controlTeamKey: favoriteKey || undefined,
-    controlTeamName: favoriteName || undefined,
+  const exactResolved = resolveExactTeamControl({
+    rawF: oddsState.odds.raw?.F,
+    favoriteTeamKey: oddsState.odds.favoriteTeamKey,
+    favoriteTeamName: oddsState.odds.favoriteTeamName,
+    clList: oddsState.odds.raw?.cl,
+    speechNames: oddsState.odds.speechNames,
     battingTeamKey,
     battingTeamName,
+    battingTeamShortName: battingTeam.shortName,
     bowlingTeamKey,
+    bowlingTeamName,
+    bowlingTeamShortName: bowlingTeam.shortName,
+  });
+
+  return {
+    teamInControl: exactResolved.teamInControl,
+    controlTeamKey: exactResolved.controlTeamKey,
+    controlTeamName: exactResolved.controlTeamName,
+    battingTeamKey: exactResolved.battingTeamKey,
+    battingTeamName,
+    bowlingTeamKey: exactResolved.bowlingTeamKey,
     bowlingTeamName,
     currentPaise,
     decimalOdds,
+    rawF: exactResolved.rawF,
   };
 }
 
@@ -362,6 +522,8 @@ export class CricketStrategyEngine {
       preBallControl: 'UNKNOWN',
       preBallPaise: null,
       pendingBoundaryBall: null,
+      lastScoreUpdatedAtMs: null,
+      lastOddsFetchedAtMs: null,
       bookingConfirmedBoundary: null,
       entryConfirmedBoundary: null,
       processedEventKeys: new Set<string>(),
@@ -487,6 +649,12 @@ export class CricketStrategyEngine {
     if (snapshot.pendingBoundaryBall !== undefined) {
       state.pendingBoundaryBall = snapshot.pendingBoundaryBall ? { ...snapshot.pendingBoundaryBall } : null;
     }
+    if (snapshot.lastScoreUpdatedAtMs !== undefined) {
+      state.lastScoreUpdatedAtMs = snapshot.lastScoreUpdatedAtMs;
+    }
+    if (snapshot.lastOddsFetchedAtMs !== undefined) {
+      state.lastOddsFetchedAtMs = snapshot.lastOddsFetchedAtMs;
+    }
     if (snapshot.abnormalActivityCount !== undefined) state.abnormalActivityCount = snapshot.abnormalActivityCount;
 
     if (snapshot.firstEntryPosition) {
@@ -557,7 +725,8 @@ export class CricketStrategyEngine {
     battingTeam = 'Batting Team',
     bowlingTeam = 'Bowling Team',
     matchName?: string,
-    seriesName?: string
+    seriesName?: string,
+    isManual = false
   ): TradePosition {
     const state = this.getState(matchId);
     const targetPos =
@@ -571,13 +740,19 @@ export class CricketStrategyEngine {
     targetPos.entryWickets = wickets;
 
     const entryPaise = Math.round((entryOdds - 1) * 100);
+    const rawBookingTeam = state.bookingTeamName || bookingTeam;
+    const formattedBookingTeam = isManual
+      ? /^\[?MANUAL\]?/i.test(rawBookingTeam)
+        ? rawBookingTeam.replace(/^manual\b/i, '[MANUAL]')
+        : `[MANUAL] ${rawBookingTeam}`
+      : rawBookingTeam;
 
     const tradeRecord: StrategyTradeRecord = {
       id: `${matchId}-${positionType}-${Date.now()}`,
       matchId,
       matchName,
       seriesName,
-      bookingTeam: state.bookingTeamName || bookingTeam,
+      bookingTeam: formattedBookingTeam,
       battingTeam,
       bowlingTeam,
       entryType: positionType,
@@ -588,6 +763,8 @@ export class CricketStrategyEngine {
       entryWickets: wickets,
       entryTime: timestamp,
       status: 'ACTIVE',
+      isManual,
+      source: isManual ? 'MANUAL' : 'AUTO',
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -616,7 +793,8 @@ export class CricketStrategyEngine {
     exitOdds: number,
     over: number,
     timestamp: Date = new Date(),
-    exitReason: 'FIRST_EXIT_BELOW_55' | 'FIRST_BOOKSET_45_55' | 'FULL_BOOKSET_OPPOSING_85' = 'FULL_BOOKSET_OPPOSING_85'
+    exitReason: 'FIRST_EXIT_BELOW_55' | 'FIRST_BOOKSET_45_55' | 'FULL_BOOKSET_OPPOSING_85' = 'FULL_BOOKSET_OPPOSING_85',
+    isManual = false
   ): TradePosition {
     const state = this.getState(matchId);
     const targetPos =
@@ -636,6 +814,13 @@ export class CricketStrategyEngine {
       state.firstEntryTrade.exitTime = timestamp;
       state.firstEntryTrade.exitReason = exitReason;
       state.firstEntryTrade.status = 'BOOKSET_COMPLETED';
+      if (isManual) {
+        state.firstEntryTrade.isManual = true;
+        state.firstEntryTrade.source = 'MANUAL';
+        if (!/^\[?MANUAL\]?/i.test(state.firstEntryTrade.bookingTeam || '')) {
+          state.firstEntryTrade.bookingTeam = `[MANUAL] ${state.firstEntryTrade.bookingTeam || 'Override'}`;
+        }
+      }
       state.firstEntryTrade.updatedAt = timestamp;
       state.stage = 'FIRST_BOOKSET_COMPLETED';
       this.notifyTrade(state.firstEntryTrade);
@@ -648,6 +833,13 @@ export class CricketStrategyEngine {
       state.secondEntryTrade.exitTime = timestamp;
       state.secondEntryTrade.exitReason = exitReason;
       state.secondEntryTrade.status = 'BOOKSET_COMPLETED';
+      if (isManual) {
+        state.secondEntryTrade.isManual = true;
+        state.secondEntryTrade.source = 'MANUAL';
+        if (!/^\[?MANUAL\]?/i.test(state.secondEntryTrade.bookingTeam || '')) {
+          state.secondEntryTrade.bookingTeam = `[MANUAL] ${state.secondEntryTrade.bookingTeam || 'Override'}`;
+        }
+      }
       state.secondEntryTrade.updatedAt = timestamp;
       state.stage = 'FULL_BOOKSET_COMPLETED';
       this.notifyTrade(state.secondEntryTrade);
@@ -667,6 +859,10 @@ export class CricketStrategyEngine {
         state.firstEntryTrade.exitTime = timestamp;
         state.firstEntryTrade.exitReason = 'FULL_BOOKSET_OPPOSING_85';
         state.firstEntryTrade.status = 'BOOKSET_COMPLETED';
+        if (isManual) {
+          state.firstEntryTrade.isManual = true;
+          state.firstEntryTrade.source = 'MANUAL';
+        }
         state.firstEntryTrade.updatedAt = timestamp;
         this.notifyTrade(state.firstEntryTrade);
       }
@@ -1280,6 +1476,7 @@ export class CricketStrategyEngine {
     measuredTeam: string;
     signalType?: 'FIRST_BOOKSET_TARGET' | 'SECOND_BOOKSET_TARGET' | 'FULL_BOOKSET_TARGET';
     timestamp?: Date;
+    auditTelemetry?: SignalAuditTelemetry;
   }): StrategySignal {
     const {
       matchId,
@@ -1292,6 +1489,7 @@ export class CricketStrategyEngine {
       measuredTeam,
       signalType = 'SECOND_BOOKSET_TARGET',
       timestamp = new Date(),
+      auditTelemetry,
     } = params;
 
     const state = this.getState(matchId);
@@ -1323,7 +1521,9 @@ export class CricketStrategyEngine {
         ruleEvaluated,
         status: 'FAIL',
         explanation: `Bookset waiting: Control is ${teamInControl} (requires BOWLING > ${minBowlingPaiseExclusive} paise).`,
-        metadata: { teamInControl, minBowlingPaiseExclusive, qualifies: false },
+        metadata: auditTelemetry
+          ? buildAuditMetadata(auditTelemetry, { teamInControl, minBowlingPaiseExclusive, qualifies: false })
+          : { teamInControl, minBowlingPaiseExclusive, qualifies: false },
       };
     }
 
@@ -1350,9 +1550,13 @@ export class CricketStrategyEngine {
 
     const qualifies = paise > minBowlingPaiseExclusive;
     const status: SignalStatus = qualifies ? 'PASS' : 'FAIL';
-    const explanation = qualifies
+    const baseExplanation = qualifies
       ? `Bookset target reached: Bowling team in control at ${paise} paise (> ${minBowlingPaiseExclusive} paise). Closing open position(s).`
       : `Bookset not reached: Bowling control odds ${paise} paise are not above ${minBowlingPaiseExclusive} paise (requires > ${minBowlingPaiseExclusive} paise).`;
+    const explanation =
+      qualifies && auditTelemetry
+        ? `${baseExplanation}${formatAuditTelemetrySuffix(auditTelemetry)}`
+        : baseExplanation;
 
     const signal: StrategySignal = {
       id: `${matchId}-${signalType}-${Date.now()}`,
@@ -1367,15 +1571,25 @@ export class CricketStrategyEngine {
         teamInControl,
         decimalOdds: effectiveDecimal,
         currentPaise: paise,
+        rawF: auditTelemetry?.rawF,
+        controlTeamKey: auditTelemetry?.controlTeamKey ?? undefined,
+        oddsFetchedAt: auditTelemetry?.odds_fetched_at,
+        scoreFetchedAt: auditTelemetry?.score_fetched_at,
       },
       ruleEvaluated,
       status,
       explanation,
-      metadata: {
-        controlTeamOdds: paise,
-        minBowlingPaiseExclusive,
-        qualifies,
-      },
+      metadata: auditTelemetry
+        ? buildAuditMetadata(auditTelemetry, {
+            controlTeamOdds: paise,
+            minBowlingPaiseExclusive,
+            qualifies,
+          })
+        : {
+            controlTeamOdds: paise,
+            minBowlingPaiseExclusive,
+            qualifies,
+          },
     };
 
     const booksetDedupeKey = `${matchId}-${signalType}-${status}-${currentInnings}-${currentOver}-${ballNumber}-${paise}`;
@@ -1411,6 +1625,7 @@ export class CricketStrategyEngine {
     ballNumber?: number;
     measuredTeam: string;
     timestamp?: Date;
+    auditTelemetry?: SignalAuditTelemetry;
   }): StrategySignal {
     return this.evaluateBooksetExit({ ...params, signalType: 'FIRST_BOOKSET_TARGET' });
   }
@@ -1425,6 +1640,7 @@ export class CricketStrategyEngine {
     ballNumber?: number;
     measuredTeam: string;
     timestamp?: Date;
+    auditTelemetry?: SignalAuditTelemetry;
   }): StrategySignal {
     return this.evaluateBooksetExit({ ...params, signalType: 'SECOND_BOOKSET_TARGET' });
   }
@@ -1447,6 +1663,7 @@ export class CricketStrategyEngine {
     ballNumber?: number;
     measuredTeam: string;
     timestamp?: Date;
+    auditTelemetry?: SignalAuditTelemetry;
   }): StrategySignal {
     const {
       matchId,
@@ -1459,6 +1676,7 @@ export class CricketStrategyEngine {
       ballNumber = 0,
       measuredTeam,
       timestamp = new Date(),
+      auditTelemetry,
     } = params;
 
     const state = this.getState(matchId);
@@ -1566,9 +1784,13 @@ export class CricketStrategyEngine {
 
     const qualifies = paise <= maxBattingPaiseInclusive;
     const status: SignalStatus = qualifies ? 'PASS' : 'FAIL';
-    const explanation = qualifies
+    const baseExplanation = qualifies
       ? `FIRST_EXIT_BELOW_55 triggered: No wicket since 1st entry and BATTING control_team_odds dropped to ${paise} paise (<= ${maxBattingPaiseInclusive}p). Closing 1st entry.`
       : `FIRST_EXIT_BELOW_55 holding: BATTING control_team_odds at ${paise} paise (> ${maxBattingPaiseInclusive}p).`;
+    const explanation =
+      qualifies && auditTelemetry
+        ? `${baseExplanation}${formatAuditTelemetrySuffix(auditTelemetry)}`
+        : baseExplanation;
 
     const signal: StrategySignal = {
       id: `${matchId}-${signalType}-${Date.now()}`,
@@ -1583,17 +1805,29 @@ export class CricketStrategyEngine {
         teamInControl,
         decimalOdds: effectiveDecimal,
         currentPaise: paise,
+        rawF: auditTelemetry?.rawF,
+        controlTeamKey: auditTelemetry?.controlTeamKey ?? undefined,
+        oddsFetchedAt: auditTelemetry?.odds_fetched_at,
+        scoreFetchedAt: auditTelemetry?.score_fetched_at,
       },
       ruleEvaluated,
       status,
       explanation,
-      metadata: {
-        controlTeamOdds: paise,
-        maxBattingPaiseInclusive,
-        anchorWickets,
-        currentWickets,
-        qualifies,
-      },
+      metadata: auditTelemetry
+        ? buildAuditMetadata(auditTelemetry, {
+            controlTeamOdds: paise,
+            maxBattingPaiseInclusive,
+            anchorWickets,
+            currentWickets,
+            qualifies,
+          })
+        : {
+            controlTeamOdds: paise,
+            maxBattingPaiseInclusive,
+            anchorWickets,
+            currentWickets,
+            qualifies,
+          },
     };
 
     if (qualifies && state.firstEntryPosition.status === 'RECORDED_ENTRY') {
@@ -1622,11 +1856,41 @@ export class CricketStrategyEngine {
     match: ParsedCricketMatch,
     oddsState: MatchOddsState,
     boundaryEvent?: { type: 'FOUR' | 'SIX'; oddsMovement: number },
-    options?: { isStale?: boolean }
+    options?: {
+      isStale?: boolean;
+      now?: Date | number;
+      scoreFetchedAt?: Date | string | null;
+      scoreChangedAt?: Date | string | null;
+      oddsFetchedAt?: Date | string | null;
+      oddsSource?: 'getSV3' | 'flb' | 'none';
+      sameGetSV3ScorePacket?: boolean;
+    }
   ): StrategySignal[] {
     const signals: StrategySignal[] = [];
     const matchId = match.id;
     const state = this.getState(matchId);
+
+    const toMs = (val: Date | string | number | null | undefined): number | null => {
+      if (val === null || val === undefined) return null;
+      if (typeof val === 'number') return isFinite(val) ? val : null;
+      if (val instanceof Date) return isNaN(val.getTime()) ? null : val.getTime();
+      const parsed = new Date(val).getTime();
+      return isNaN(parsed) ? null : parsed;
+    };
+
+    const nowMs = toMs(options?.now) ?? Date.now();
+    const nowDate = new Date(nowMs);
+    const currScoreFetchedAtMs = toMs(options?.scoreFetchedAt);
+    const currScoreChangedAtMs = toMs(options?.scoreChangedAt) ?? currScoreFetchedAtMs;
+    const currOddsFetchedAtMs = toMs(
+      options?.oddsFetchedAt !== undefined
+        ? options.oddsFetchedAt
+        : oddsState?.oddsFetchedAt ?? oddsState?.odds?.timestamp
+    );
+    const effectiveOddsSource: 'getSV3' | 'flb' | 'none' =
+      options?.oddsSource ?? oddsState?.oddsSource ?? (oddsState?.odds ? 'getSV3' : 'none');
+    const isFromGetSV3 = effectiveOddsSource === 'getSV3' && Boolean(oddsState?.odds);
+
     const activeScore = match.team2Score || match.team1Score;
     const currentInnings = match.team2Score ? 2 : 1;
     const currentOver = activeScore ? activeScore.overs : 0;
@@ -1635,16 +1899,61 @@ export class CricketStrategyEngine {
     const currentRuns = activeScore ? activeScore.runs : 0;
     const currentWickets = activeScore ? activeScore.wickets : 0;
 
-    // Detect active control and Crex raw control_team_odds (no 100-minus calculation)
-    const controlInfo = detectTeamInControl(match, oddsState);
-    const currControl = controlInfo.teamInControl;
-    const currentPaise = controlInfo.currentPaise;
-    const decimalOdds =
-      controlInfo.decimalOdds ??
-      (currentPaise !== null ? Number((1 + currentPaise / 100).toFixed(2)) : null);
+    // Detect active control and Crex raw control_team_odds strictly from getSV3 (never flb / winProbability / substring)
+    const rawControlInfo = detectTeamInControl(match, isFromGetSV3 ? oddsState : null);
+    const currControl: TeamControlState = isFromGetSV3 ? rawControlInfo.teamInControl : 'UNKNOWN';
+    const currentPaise: number | null = isFromGetSV3 ? rawControlInfo.currentPaise : null;
+    const decimalOdds: number | null = isFromGetSV3
+      ? rawControlInfo.decimalOdds ??
+        (currentPaise !== null ? Number((1 + currentPaise / 100).toFixed(2)) : null)
+      : null;
+    const controlInfo = {
+      ...rawControlInfo,
+      teamInControl: currControl,
+      currentPaise,
+      decimalOdds,
+    };
     const measuredTeam =
       controlInfo.controlTeamName ||
       (currControl === 'BATTING' ? controlInfo.battingTeamName : controlInfo.bowlingTeamName);
+
+    const scoreFetchedAtIso =
+      currScoreFetchedAtMs !== null
+        ? new Date(currScoreFetchedAtMs).toISOString()
+        : state.lastScoreUpdatedAtMs
+        ? new Date(state.lastScoreUpdatedAtMs).toISOString()
+        : null;
+    const oddsFetchedAtIso =
+      isFromGetSV3 && currOddsFetchedAtMs !== null
+        ? new Date(currOddsFetchedAtMs).toISOString()
+        : null;
+
+    const buildStepTelemetry = (overrides?: Partial<SignalAuditTelemetry>): SignalAuditTelemetry => {
+      const controlBefore = overrides?.control_before ?? state.preBallControl ?? state.lastEvaluatedControl ?? 'UNKNOWN';
+      const oddsBefore = overrides?.odds_before ?? state.preBallPaise ?? state.lastEvaluatedPaise ?? null;
+      return {
+        innings: overrides?.innings ?? currentInnings,
+        over: overrides?.over ?? currentOver,
+        legal_ball_count: overrides?.legal_ball_count ?? currentLegalBalls,
+        battingTeamKey: overrides?.battingTeamKey ?? controlInfo.battingTeamKey,
+        bowlingTeamKey: overrides?.bowlingTeamKey ?? controlInfo.bowlingTeamKey,
+        'raw.F': overrides?.['raw.F'] !== undefined ? overrides['raw.F'] : controlInfo.rawF,
+        rawF: overrides?.rawF !== undefined ? overrides.rawF : controlInfo.rawF,
+        controlTeamKey:
+          overrides?.controlTeamKey !== undefined
+            ? overrides.controlTeamKey
+            : controlInfo.controlTeamKey ?? null,
+        control_before: controlBefore,
+        control_after: overrides?.control_after ?? currControl,
+        odds_before: oddsBefore,
+        odds_after: overrides?.odds_after !== undefined ? overrides.odds_after : currentPaise,
+        move: overrides?.move !== undefined ? overrides.move : null,
+        odds_fetched_at:
+          overrides?.odds_fetched_at !== undefined ? overrides.odds_fetched_at : oddsFetchedAtIso,
+        score_fetched_at:
+          overrides?.score_fetched_at !== undefined ? overrides.score_fetched_at : scoreFetchedAtIso,
+      };
+    };
 
     state.teamInControl = currControl;
     state.battingTeamKey = controlInfo.battingTeamKey;
@@ -1667,11 +1976,21 @@ export class CricketStrategyEngine {
     const inningsChanged = !isFirstTick && state.lastEvaluatedInnings !== currentInnings;
     const sameInnings = !isFirstTick && state.lastEvaluatedInnings === currentInnings;
 
-    // Handle 1st -> 2nd innings transition cleanly
+    // 0. Handle 1st -> 2nd innings transition: NEVER carry preBall* / lastEvaluated* / pendingBoundaryBall across innings
     if (inningsChanged) {
       state.pendingBoundaryBall = null;
-      state.preBallControl = state.lastEvaluatedControl;
-      state.preBallPaise = state.lastEvaluatedPaise;
+      state.preBallControl = 'UNKNOWN';
+      state.preBallPaise = null;
+      state.lastEvaluatedOver = 0;
+      state.lastEvaluatedWickets = 0;
+      state.lastEvaluatedRuns = 0;
+      state.lastEvaluatedBalls = 0;
+      state.lastEvaluatedLegalBalls = 0;
+      state.lastEvaluatedOdds = null;
+      state.lastEvaluatedPaise = null;
+      state.lastEvaluatedControl = 'UNKNOWN';
+      state.lastScoreUpdatedAtMs = null;
+      state.lastOddsFetchedAtMs = null;
       if (!hasAnyEntry) {
         state.stage = 'WAITING_FOR_CONFIRMATION';
         state.bookingTeamName = null;
@@ -1690,24 +2009,28 @@ export class CricketStrategyEngine {
       state.lastEvaluatedRuns = currentRuns;
       state.lastEvaluatedBalls = currentBalls;
       state.lastEvaluatedLegalBalls = currentLegalBalls;
-      if (currControl !== 'UNKNOWN' && currentPaise !== null) {
+      if (isFromGetSV3 && currControl !== 'UNKNOWN' && currentPaise !== null) {
         state.lastEvaluatedOdds = decimalOdds;
         state.lastEvaluatedPaise = currentPaise;
         state.lastEvaluatedControl = currControl;
+        if (currOddsFetchedAtMs !== null) {
+          state.lastOddsFetchedAtMs = currOddsFetchedAtMs;
+        }
       }
-      state.lastUpdated = new Date();
+      state.lastUpdated = nowDate;
     };
 
     // 0A. Pre-entry Wicket Safety Filter (>= 3 wickets before entry in either innings skips the match)
     if (!hasAnyEntry && currentWickets >= this.config.wicketFilter.maxAllowedWicketsBeforeEntry) {
       state.pending85 = false;
+      state.pendingBoundaryBall = null;
       if (state.stage !== 'DISQUALIFIED_3_WICKETS') {
         state.stage = 'DISQUALIFIED_3_WICKETS';
         const skipSignal: StrategySignal = {
-          id: `${matchId}-DISQUALIFIED_WICKET_LIMIT-${Date.now()}`,
+          id: `${matchId}-DISQUALIFIED_WICKET_LIMIT-${nowMs}`,
           signalType: 'DISQUALIFIED_WICKET_LIMIT',
           matchId,
-          timestamp: new Date(),
+          timestamp: nowDate,
           currentInnings,
           currentOver,
           ballNumber: currentBalls,
@@ -1731,16 +2054,17 @@ export class CricketStrategyEngine {
     // 0B. Pre-entry Over Window Filter (1st Inn < 10.0 ov, 2nd Inn < 6.0 ov)
     if (!hasAnyEntry && !isWithinEntryWindow(currentInnings, currentOver, this.config)) {
       state.pending85 = false;
+      state.pendingBoundaryBall = null;
       if (state.stage !== 'WINDOW_EXPIRED' && state.stage !== 'DISQUALIFIED_3_WICKETS') {
         state.stage = 'WINDOW_EXPIRED';
         const expiredKey = `${matchId}-WINDOW_EXPIRED-Inn${currentInnings}`;
         if (!state.processedEventKeys.has(expiredKey)) {
           state.processedEventKeys.add(expiredKey);
           const expiredSignal: StrategySignal = {
-            id: `${matchId}-WINDOW_EXPIRED-${Date.now()}`,
+            id: `${matchId}-WINDOW_EXPIRED-${nowMs}`,
             signalType: 'FIRST_ENTRY_CANDIDATE',
             matchId,
-            timestamp: new Date(),
+            timestamp: nowDate,
             currentInnings,
             currentOver,
             ballNumber: currentBalls,
@@ -1769,10 +2093,10 @@ export class CricketStrategyEngine {
       if (!state.processedEventKeys.has(wicketKey)) {
         state.processedEventKeys.add(wicketKey);
         const wicketSignal: StrategySignal = {
-          id: `${matchId}-WICKET_EVENT-${Date.now()}`,
+          id: `${matchId}-WICKET_EVENT-${nowMs}`,
           signalType: 'WICKET_EVENT',
           matchId,
-          timestamp: new Date(),
+          timestamp: nowDate,
           currentInnings,
           currentOver,
           ballNumber: currentBalls,
@@ -1793,18 +2117,127 @@ export class CricketStrategyEngine {
       }
     }
 
-    // 2. Boundary Detection & Pre-Ball Snapshot Preservation
-    // Detects 4 or 6 across any legal ball progression (including 6th ball X.5 -> (X+1).0 and 0 -> 4/6).
+    // 2. Boundary Detection, Pre-Ball Snapshot Preservation & Strict Fresh getSV3 Pairing
     let activeBoundaryType: 'FOUR' | 'SIX' | null = boundaryEvent ? boundaryEvent.type : null;
+    let boundaryMoveDeltaOverride: number | undefined = boundaryEvent?.oddsMovement;
 
     if (sameInnings) {
       const prevLegalBalls = state.lastEvaluatedLegalBalls ?? 0;
       const ballProgressed = currentLegalBalls !== prevLegalBalls || currentRuns > state.lastEvaluatedRuns;
 
+      // Helper to determine whether current getSV3 odds snapshot is strictly fresh relative to the boundary ball
+      const checkFreshGetSV3ForBoundary = (
+        boundaryScoreTickMs: number,
+        preBallOddsFetchedMs: number | null | undefined,
+        isInitialScoreTick: boolean
+      ): boolean => {
+        if (!isFromGetSV3 || currControl === 'UNKNOWN' || currentPaise === null) {
+          return false;
+        }
+        const timestampsTracked =
+          currScoreChangedAtMs !== null ||
+          currOddsFetchedAtMs !== null ||
+          (preBallOddsFetchedMs !== null && preBallOddsFetchedMs !== undefined);
+
+        if (timestampsTracked) {
+          if (currOddsFetchedAtMs === null) return false;
+          if (currOddsFetchedAtMs > boundaryScoreTickMs) {
+            return true;
+          }
+          // Special case: server getSV3 endpoint delivered BOTH the boundary score and new odds in the exact same HTTP packet
+          if (
+            isInitialScoreTick &&
+            options?.sameGetSV3ScorePacket === true &&
+            currOddsFetchedAtMs >= boundaryScoreTickMs &&
+            (preBallOddsFetchedMs === null ||
+              preBallOddsFetchedMs === undefined ||
+              currOddsFetchedAtMs > preBallOddsFetchedMs)
+          ) {
+            return true;
+          }
+          return false;
+        }
+
+        // Fallback for synchronous unit tests without explicit timestamps:
+        // Wait only if odds remained identical to pre-ball snapshot on the score-update tick
+        const unchangedFromPreBall =
+          state.preBallPaise !== null &&
+          state.preBallPaise !== undefined &&
+          state.preBallControl !== undefined &&
+          state.preBallControl !== 'UNKNOWN' &&
+          currControl === state.preBallControl &&
+          currentPaise === state.preBallPaise;
+        return !unchangedFromPreBall;
+      };
+
+      // Check 5-second expiration on any existing pendingBoundaryBall BEFORE evaluating or replacing it
+      if (state.pendingBoundaryBall) {
+        const p = state.pendingBoundaryBall;
+        const elapsedMs = nowMs - (p.detectedAtMs ?? nowMs);
+        const canResolveThisTick =
+          !ballProgressed &&
+          p.innings === currentInnings &&
+          p.legalBalls === currentLegalBalls &&
+          checkFreshGetSV3ForBoundary(p.scoreUpdatedAtMs ?? p.detectedAtMs ?? nowMs, p.preBallOddsFetchedAtMs, false);
+
+        if (!canResolveThisTick && elapsedMs > 5000) {
+          const skipTelemetry = buildStepTelemetry({
+            rawF: controlInfo.rawF ?? p.rawF ?? null,
+            'raw.F': controlInfo.rawF ?? p.rawF ?? null,
+            odds_fetched_at: oddsFetchedAtIso,
+            score_fetched_at: p.scoreUpdatedAtMs
+              ? new Date(p.scoreUpdatedAtMs).toISOString()
+              : scoreFetchedAtIso,
+          });
+          const skipKey = `${matchId}-BOUNDARY_SKIPPED_NO_FRESH_ODDS-${p.innings}-${p.legalBalls}`;
+          if (!state.processedEventKeys.has(skipKey)) {
+            state.processedEventKeys.add(skipKey);
+            const skippedSignal: StrategySignal = {
+              id: `${matchId}-BOUNDARY_SKIPPED_NO_FRESH_ODDS-${nowMs}`,
+              signalType: 'BOUNDARY_SKIPPED_NO_FRESH_ODDS',
+              matchId,
+              timestamp: nowDate,
+              currentInnings,
+              currentOver,
+              ballNumber: currentBalls,
+              relevantOdds: {
+                measuredTeam,
+                teamInControl: currControl,
+                decimalOdds,
+                currentPaise,
+                rawF: skipTelemetry.rawF,
+                controlTeamKey: skipTelemetry.controlTeamKey ?? undefined,
+                oddsFetchedAt: skipTelemetry.odds_fetched_at,
+                scoreFetchedAt: skipTelemetry.score_fetched_at,
+              },
+              ruleEvaluated: `Fresh getSV3 Odds Pairing: Requires getSV3 control+odds fetched after boundary score update within 5s`,
+              status: 'FAIL',
+              explanation:
+                `BOUNDARY DROPPED (NO FRESH GETSV3 ODDS IN 5s): ${p.type} at Inn ${currentInnings}, over ${currentOver} (legal_ball_count=${p.legalBalls}) timed out after ${elapsedMs}ms without a fresh post-score getSV3 snapshot.` +
+                formatAuditTelemetrySuffix(skipTelemetry),
+              metadata: buildAuditMetadata(skipTelemetry, {
+                boundaryType: p.type,
+                boundaryLegalBalls: p.legalBalls,
+                detectedAt: p.detectedAtMs ? new Date(p.detectedAtMs).toISOString() : null,
+                expiredAt: nowDate.toISOString(),
+                elapsedMs,
+                reason: 'NO_FRESH_GETSV3_SNAPSHOT_WITHIN_5S',
+              }),
+            };
+            state.signalsHistory.unshift(skippedSignal);
+            signals.push(skippedSignal);
+          }
+          state.pendingBoundaryBall = null;
+        }
+      }
+
       if (ballProgressed) {
         // Snapshot the last valid tick BEFORE this new ball started
         state.preBallControl = state.lastEvaluatedControl;
         state.preBallPaise = state.lastEvaluatedPaise;
+        const preBallOddsFetchedMs = state.lastOddsFetchedAtMs ?? null;
+        const scoreUpdateMs = currScoreChangedAtMs ?? nowMs;
+        state.lastScoreUpdatedAtMs = scoreUpdateMs;
         state.pendingBoundaryBall = null;
 
         if (!activeBoundaryType) {
@@ -1813,47 +2246,38 @@ export class CricketStrategyEngine {
           else if (runsDelta === 6) activeBoundaryType = 'SIX';
         }
 
-        // Hold boundary evaluation if market is suspended (UNKNOWN / null) OR if odds are still identical
-        // to the pre-ball snapshot on the score-update tick (wait up to odds jump on the same ball).
-        const oddsUnchangedFromPreBall =
-          state.preBallPaise !== null &&
-          state.preBallPaise !== undefined &&
-          state.preBallControl !== undefined &&
-          state.preBallControl !== 'UNKNOWN' &&
-          currControl === state.preBallControl &&
-          currentPaise === state.preBallPaise;
-
-        if (
-          activeBoundaryType &&
-          !boundaryEvent &&
-          (currentPaise === null || currControl === 'UNKNOWN' || oddsUnchangedFromPreBall)
-        ) {
-          state.pendingBoundaryBall = {
-            innings: currentInnings,
-            legalBalls: currentLegalBalls,
-            type: activeBoundaryType,
-          };
-          activeBoundaryType = null;
+        if (activeBoundaryType && !boundaryEvent) {
+          const isFresh = checkFreshGetSV3ForBoundary(scoreUpdateMs, preBallOddsFetchedMs, true);
+          if (!isFresh) {
+            // Keep boundary pending up to 5 seconds until a fresh post-score getSV3 snapshot arrives
+            state.pendingBoundaryBall = {
+              innings: currentInnings,
+              legalBalls: currentLegalBalls,
+              type: activeBoundaryType,
+              detectedAtMs: nowMs,
+              scoreUpdatedAtMs: scoreUpdateMs,
+              preBallOddsFetchedAtMs: preBallOddsFetchedMs,
+              rawF: controlInfo.rawF,
+            };
+            activeBoundaryType = null;
+          }
         }
       } else if (
         !activeBoundaryType &&
         state.pendingBoundaryBall &&
         state.pendingBoundaryBall.innings === currentInnings &&
-        state.pendingBoundaryBall.legalBalls === currentLegalBalls &&
-        currentPaise !== null &&
-        currControl !== 'UNKNOWN'
+        state.pendingBoundaryBall.legalBalls === currentLegalBalls
       ) {
-        const oddsChangedFromPreBall =
-          state.preBallPaise === null ||
-          state.preBallPaise === undefined ||
-          state.preBallControl === undefined ||
-          state.preBallControl === 'UNKNOWN' ||
-          currControl !== state.preBallControl ||
-          currentPaise !== state.preBallPaise;
+        const pending = state.pendingBoundaryBall;
+        const isFresh = checkFreshGetSV3ForBoundary(
+          pending.scoreUpdatedAtMs ?? pending.detectedAtMs ?? nowMs,
+          pending.preBallOddsFetchedAtMs,
+          false
+        );
 
-        if (oddsChangedFromPreBall) {
-          // Delayed odds arrived on the same boundary ball using preserved preBall snapshot
-          activeBoundaryType = state.pendingBoundaryBall.type;
+        if (isFresh) {
+          // Fresh getSV3 snapshot arrived within <= 5s after the score update on this boundary ball!
+          activeBoundaryType = pending.type;
           state.pendingBoundaryBall = null;
         }
       }
@@ -1861,9 +2285,14 @@ export class CricketStrategyEngine {
 
     const minPaiseInclusive = this.config.firstEntry.minPaiseInclusive; // 85 (>= 85 required)
     const withinWindow = isWithinEntryWindow(currentInnings, currentOver, this.config);
+    const controlKeyMatchesBatting =
+      currControl === 'BATTING' &&
+      Boolean(controlInfo.controlTeamKey) &&
+      Boolean(controlInfo.battingTeamKey) &&
+      normalizeTeamKey(controlInfo.controlTeamKey) === normalizeTeamKey(controlInfo.battingTeamKey);
 
     // 3. Evaluate Boundary Rules: Booking Team Confirmation & Entry Confirmation / Immediate First Entry
-    if (activeBoundaryType && currentPaise !== null && currControl !== 'UNKNOWN') {
+    if (activeBoundaryType && isFromGetSV3 && currentPaise !== null && currControl !== 'UNKNOWN') {
       state.pendingBoundaryBall = null;
 
       const prevControl =
@@ -1875,20 +2304,29 @@ export class CricketStrategyEngine {
       const paiseCalc =
         prevPaise !== null && prevControl !== 'UNKNOWN'
           ? calculatePaiseChange(prevControl, prevPaise, currControl, currentPaise)
-          : boundaryEvent?.oddsMovement !== undefined
+          : boundaryMoveDeltaOverride !== undefined
           ? {
-              delta: currControl === 'BATTING' ? boundaryEvent.oddsMovement : 0,
+              delta: currControl === 'BATTING' && controlKeyMatchesBatting ? boundaryMoveDeltaOverride : 0,
               formula:
-                currControl === 'BATTING'
-                  ? `Boundary move: ${boundaryEvent.oddsMovement} paise`
+                currControl === 'BATTING' && controlKeyMatchesBatting
+                  ? `Boundary move: ${boundaryMoveDeltaOverride} paise`
                   : 'Batting team is not in control after the ball',
-              qualifiesBattingControl: currControl === 'BATTING' && boundaryEvent.oddsMovement > 0,
+              qualifiesBattingControl:
+                currControl === 'BATTING' && controlKeyMatchesBatting && boundaryMoveDeltaOverride > 0,
             }
           : {
               delta: 0,
               formula: 'No prior tick odds before boundary ball',
-              qualifiesBattingControl: currControl === 'BATTING',
+              qualifiesBattingControl: currControl === 'BATTING' && controlKeyMatchesBatting,
             };
+
+      const boundaryTelemetry = buildStepTelemetry({
+        control_before: prevControl,
+        control_after: currControl,
+        odds_before: prevPaise,
+        odds_after: currentPaise,
+        move: paiseCalc.delta,
+      });
 
       const abnormalSignal = this.evaluateAbnormalActivity({
         matchId,
@@ -1900,14 +2338,15 @@ export class CricketStrategyEngine {
         measuredTeam,
         decimalOdds,
         previousDecimalOdds: oddsState?.previousOdds?.bookmaker?.decimalBack ?? null,
-        teamInControl: currControl,
+        teamInControl: controlKeyMatchesBatting ? currControl : 'UNKNOWN',
         customFormulaExplanation: paiseCalc.formula,
+        timestamp: nowDate,
       });
       signals.push(abnormalSignal);
 
-      const battingAtOrAbove85 = currControl === 'BATTING' && currentPaise >= minPaiseInclusive;
+      const battingAtOrAbove85 = controlKeyMatchesBatting && currentPaise >= minPaiseInclusive;
 
-      // 3A. Booking Team Confirmation: control = BATTING, control_team_odds >= 85, move >= 11 (4) / >= 18 (6)
+      // 3A. Booking Team Confirmation: control = BATTING, controlTeamKey === battingTeamKey, control_team_odds >= 85, move >= 11 (4) / >= 18 (6)
       if (
         state.stage === 'WAITING_FOR_CONFIRMATION' &&
         abnormalSignal.status === 'PASS' &&
@@ -1922,17 +2361,17 @@ export class CricketStrategyEngine {
           over: currentOver,
           ball: currentBalls,
           paiseDelta: paiseCalc.delta,
-          timestamp: new Date(),
+          timestamp: nowDate,
         };
 
         const confirmKey = `${matchId}-BOOKING_TEAM_CONFIRMED-${currentInnings}-${currentOver}.${currentBalls}`;
         if (!state.processedEventKeys.has(confirmKey)) {
           state.processedEventKeys.add(confirmKey);
           const confirmSignal: StrategySignal = {
-            id: `${matchId}-BOOKING_TEAM_CONFIRMED-${Date.now()}`,
+            id: `${matchId}-BOOKING_TEAM_CONFIRMED-${nowMs}`,
             signalType: 'BOOKING_TEAM_CONFIRMED',
             matchId,
-            timestamp: new Date(),
+            timestamp: nowDate,
             currentInnings,
             currentOver,
             ballNumber: currentBalls,
@@ -1942,116 +2381,98 @@ export class CricketStrategyEngine {
               decimalOdds,
               currentPaise,
               calculatedDelta: paiseCalc.delta,
+              rawF: boundaryTelemetry.rawF,
+              controlTeamKey: boundaryTelemetry.controlTeamKey ?? undefined,
+              oddsFetchedAt: boundaryTelemetry.odds_fetched_at,
+              scoreFetchedAt: boundaryTelemetry.score_fetched_at,
             },
-            ruleEvaluated: `Booking Team Confirmation: BATTING control, odds >= ${minPaiseInclusive}p, 4 (>= 11p) / 6 (>= 18p)`,
+            ruleEvaluated: `Booking Team Confirmation: BATTING control (controlTeamKey === battingTeamKey), odds >= ${minPaiseInclusive}p, 4 (>= 11p) / 6 (>= 18p)`,
             status: 'PASS',
-            explanation: `CONFIRMED BOOKING TEAM: ${controlInfo.battingTeamName} confirmed via ${activeBoundaryType} (${paiseCalc.delta}p move, odds ${currentPaise}p >= ${minPaiseInclusive}p). Waiting for next 4 or 6 for entry confirmation.`,
-            metadata: {
+            explanation:
+              `CONFIRMED BOOKING TEAM: ${controlInfo.battingTeamName} (${controlInfo.battingTeamKey}) confirmed via ${activeBoundaryType} (${paiseCalc.delta}p move, odds ${currentPaise}p >= ${minPaiseInclusive}p). Waiting for next 4 or 6 for entry confirmation.` +
+              formatAuditTelemetrySuffix(boundaryTelemetry),
+            metadata: buildAuditMetadata(boundaryTelemetry, {
               formula: paiseCalc.formula,
+              boundaryType: activeBoundaryType,
               bookingTeam: controlInfo.battingTeamName,
+              bookingTeamKey: controlInfo.battingTeamKey,
               currentPaise,
-            },
+            }),
           };
           state.signalsHistory.unshift(confirmSignal);
           signals.push(confirmSignal);
         }
       }
       // 3B. Entry Confirmation: After booking team confirmed, next 4 (>= 11p) or 6 (>= 18p) leaving BATTING in control.
-      // If BATTING >= 85 on this ball -> enter IMMEDIATELY.
-      // If BATTING < 85 on this ball -> move to CONFIRMED_PENDING_85 and enter on first later ball >= 85 (no new 4/6 needed).
+      // Requires BOTH controlTeamKey === battingTeamKey AND stored state.bookingTeamKey === battingTeamKey.
       else if (
         state.stage === 'CONFIRMED_BOOKING_TEAM' &&
         abnormalSignal.status === 'PASS' &&
         withinWindow
       ) {
-        state.entryConfirmedBoundary = {
-          type: activeBoundaryType,
-          innings: currentInnings,
-          legalBalls: currentLegalBalls,
-          over: currentOver,
-          ball: currentBalls,
-          paiseDelta: paiseCalc.delta,
-          timestamp: new Date(),
-        };
+        const bookingKeyMatchesBatting =
+          Boolean(state.bookingTeamKey) &&
+          Boolean(controlInfo.battingTeamKey) &&
+          normalizeTeamKey(state.bookingTeamKey) === normalizeTeamKey(controlInfo.battingTeamKey);
 
-        const entryConfirmKey = `${matchId}-ENTRY_CONFIRMATION_BOUNDARY-${currentInnings}-${currentOver}.${currentBalls}`;
-        if (!state.processedEventKeys.has(entryConfirmKey)) {
-          state.processedEventKeys.add(entryConfirmKey);
-          const boundary2Signal: StrategySignal = {
-            id: `${matchId}-ENTRY_CONFIRMATION_BOUNDARY-${Date.now()}`,
-            signalType: 'ENTRY_CONFIRMATION_BOUNDARY',
-            matchId,
-            timestamp: new Date(),
-            currentInnings,
-            currentOver,
-            ballNumber: currentBalls,
-            relevantOdds: {
-              measuredTeam: controlInfo.battingTeamName,
-              teamInControl: 'BATTING',
-              decimalOdds,
-              currentPaise,
-              calculatedDelta: paiseCalc.delta,
-            },
-            ruleEvaluated: `Entry Confirmation Boundary: BATTING control + 4 (>= 11p) / 6 (>= 18p)`,
-            status: 'PASS',
-            explanation: `ENTRY CONFIRMATION BOUNDARY QUALIFIED: ${activeBoundaryType} with ${paiseCalc.delta}p shift and BATTING odds ${currentPaise}p.`,
-          };
-          state.signalsHistory.unshift(boundary2Signal);
-          signals.push(boundary2Signal);
-        }
-
-        if (battingAtOrAbove85) {
-          // Enter IMMEDIATELY on this boundary ball
-          state.stage = 'ACTIVE_FIRST_ENTRY';
-          state.pending85 = false;
-          this.recordEntry(
-            matchId,
-            'FIRST_ENTRY',
-            decimalOdds ?? Number((1 + currentPaise / 100).toFixed(2)),
-            currentInnings,
-            currentOver,
-            currentWickets,
-            new Date(),
-            state.bookingTeamName || controlInfo.battingTeamName,
-            controlInfo.battingTeamName,
-            controlInfo.bowlingTeamName,
-            matchTitle,
-            match.seriesName
-          );
-
-          const triggerSignal: StrategySignal = {
-            id: `${matchId}-FIRST_ENTRY_TRIGGER-${Date.now()}`,
-            signalType: 'FIRST_ENTRY_TRIGGER',
-            matchId,
-            timestamp: new Date(),
-            currentInnings,
-            currentOver,
-            ballNumber: currentBalls,
-            relevantOdds: {
-              measuredTeam: controlInfo.battingTeamName,
-              decimalOdds,
-              currentPaise,
-              teamInControl: 'BATTING',
-            },
-            ruleEvaluated: `First Entry: Booking confirmed + 4/6 move + BATTING odds >= ${minPaiseInclusive} paise`,
-            status: 'PASS',
-            explanation: `FIRST ENTRY TRIGGERED! ${controlInfo.battingTeamName} entered immediately at ${currentPaise} paise (>= ${minPaiseInclusive}p / ${decimalOdds?.toFixed(2)} decimal).`,
-            metadata: { deferredEntry: false },
-          };
-          state.signalsHistory.unshift(triggerSignal);
-          signals.push(triggerSignal);
-        } else {
-          // Enter CONFIRMED_PENDING_85 and wait for first later ball with BATTING >= 85
-          state.stage = 'CONFIRMED_PENDING_85';
-          state.pending85 = true;
-          const waitKey = `${matchId}-ENTRY_CONFIRMED_WAITING_85-${currentInnings}-${currentOver}.${currentBalls}`;
-          if (!state.processedEventKeys.has(waitKey)) {
-            state.processedEventKeys.add(waitKey);
-            const waitingSignal: StrategySignal = {
-              id: `${matchId}-ENTRY_CONFIRMED_WAITING_85-${Date.now()}`,
-              signalType: 'ENTRY_CONFIRMED_WAITING_85',
+        if (!controlKeyMatchesBatting || !bookingKeyMatchesBatting) {
+          const mismatchReason = !controlKeyMatchesBatting
+            ? `Key mismatch: controlTeamKey (${controlInfo.controlTeamKey || 'none'}) !== battingTeamKey (${controlInfo.battingTeamKey})`
+            : `Key mismatch: stored bookingTeamKey (${state.bookingTeamKey || 'none'}) !== current battingTeamKey (${controlInfo.battingTeamKey})`;
+          const failConfirmKey = `${matchId}-ENTRY_CONFIRMATION_BOUNDARY-FAIL-${currentInnings}-${currentOver}.${currentBalls}`;
+          if (!state.processedEventKeys.has(failConfirmKey)) {
+            state.processedEventKeys.add(failConfirmKey);
+            const failSignal: StrategySignal = {
+              id: `${matchId}-ENTRY_CONFIRMATION_BOUNDARY-FAIL-${nowMs}`,
+              signalType: 'ENTRY_CONFIRMATION_BOUNDARY',
               matchId,
-              timestamp: new Date(),
+              timestamp: nowDate,
+              currentInnings,
+              currentOver,
+              ballNumber: currentBalls,
+              relevantOdds: {
+                measuredTeam: controlInfo.battingTeamName,
+                teamInControl: currControl,
+                decimalOdds,
+                currentPaise,
+                calculatedDelta: paiseCalc.delta,
+                rawF: boundaryTelemetry.rawF,
+                controlTeamKey: boundaryTelemetry.controlTeamKey ?? undefined,
+                oddsFetchedAt: boundaryTelemetry.odds_fetched_at,
+                scoreFetchedAt: boundaryTelemetry.score_fetched_at,
+              },
+              ruleEvaluated: `Entry Confirmation Boundary: Requires controlTeamKey === battingTeamKey AND bookingTeamKey === battingTeamKey`,
+              status: 'FAIL',
+              explanation:
+                `ENTRY CONFIRMATION REJECTED: ${mismatchReason}. No entry recorded.` +
+                formatAuditTelemetrySuffix(boundaryTelemetry),
+              metadata: buildAuditMetadata(boundaryTelemetry, {
+                bookingTeamKey: state.bookingTeamKey || null,
+                mismatchReason,
+              }),
+            };
+            state.signalsHistory.unshift(failSignal);
+            signals.push(failSignal);
+          }
+        } else {
+          state.entryConfirmedBoundary = {
+            type: activeBoundaryType,
+            innings: currentInnings,
+            legalBalls: currentLegalBalls,
+            over: currentOver,
+            ball: currentBalls,
+            paiseDelta: paiseCalc.delta,
+            timestamp: nowDate,
+          };
+
+          const entryConfirmKey = `${matchId}-ENTRY_CONFIRMATION_BOUNDARY-${currentInnings}-${currentOver}.${currentBalls}`;
+          if (!state.processedEventKeys.has(entryConfirmKey)) {
+            state.processedEventKeys.add(entryConfirmKey);
+            const boundary2Signal: StrategySignal = {
+              id: `${matchId}-ENTRY_CONFIRMATION_BOUNDARY-${nowMs}`,
+              signalType: 'ENTRY_CONFIRMATION_BOUNDARY',
+              matchId,
+              timestamp: nowDate,
               currentInnings,
               currentOver,
               ballNumber: currentBalls,
@@ -2061,22 +2482,127 @@ export class CricketStrategyEngine {
                 decimalOdds,
                 currentPaise,
                 calculatedDelta: paiseCalc.delta,
+                rawF: boundaryTelemetry.rawF,
+                controlTeamKey: boundaryTelemetry.controlTeamKey ?? undefined,
+                oddsFetchedAt: boundaryTelemetry.odds_fetched_at,
+                scoreFetchedAt: boundaryTelemetry.score_fetched_at,
               },
-              ruleEvaluated: `Deferred First Entry: Confirmed at ${currentPaise}p (< ${minPaiseInclusive}p); wait for first later ball >= ${minPaiseInclusive}p`,
+              ruleEvaluated: `Entry Confirmation Boundary: BATTING control (controlTeamKey === battingTeamKey === bookingTeamKey) + 4 (>= 11p) / 6 (>= 18p)`,
               status: 'PASS',
-              explanation: `ENTRY CONFIRMED (CONFIRMED_PENDING_85): ${activeBoundaryType} moved ${paiseCalc.delta}p to BATTING ${currentPaise}p (< ${minPaiseInclusive}p). Will enter on first later ball with BATTING >= ${minPaiseInclusive}p inside window (no new 4/6 needed).`,
+              explanation:
+                `ENTRY CONFIRMATION BOUNDARY QUALIFIED: ${activeBoundaryType} with ${paiseCalc.delta}p shift and BATTING odds ${currentPaise}p.` +
+                formatAuditTelemetrySuffix(boundaryTelemetry),
+              metadata: buildAuditMetadata(boundaryTelemetry, {
+                formula: paiseCalc.formula,
+                boundaryType: activeBoundaryType,
+                bookingTeamKey: state.bookingTeamKey || null,
+              }),
             };
-            state.signalsHistory.unshift(waitingSignal);
-            signals.push(waitingSignal);
+            state.signalsHistory.unshift(boundary2Signal);
+            signals.push(boundary2Signal);
+          }
+
+          if (battingAtOrAbove85) {
+            // Enter IMMEDIATELY on this boundary ball
+            state.stage = 'ACTIVE_FIRST_ENTRY';
+            state.pending85 = false;
+            this.recordEntry(
+              matchId,
+              'FIRST_ENTRY',
+              decimalOdds ?? Number((1 + currentPaise / 100).toFixed(2)),
+              currentInnings,
+              currentOver,
+              currentWickets,
+              nowDate,
+              state.bookingTeamName || controlInfo.battingTeamName,
+              controlInfo.battingTeamName,
+              controlInfo.bowlingTeamName,
+              matchTitle,
+              match.seriesName,
+              false
+            );
+
+            const triggerSignal: StrategySignal = {
+              id: `${matchId}-FIRST_ENTRY_TRIGGER-${nowMs}`,
+              signalType: 'FIRST_ENTRY_TRIGGER',
+              matchId,
+              timestamp: nowDate,
+              currentInnings,
+              currentOver,
+              ballNumber: currentBalls,
+              relevantOdds: {
+                measuredTeam: controlInfo.battingTeamName,
+                decimalOdds,
+                currentPaise,
+                teamInControl: 'BATTING',
+                calculatedDelta: paiseCalc.delta,
+                rawF: boundaryTelemetry.rawF,
+                controlTeamKey: boundaryTelemetry.controlTeamKey ?? undefined,
+                oddsFetchedAt: boundaryTelemetry.odds_fetched_at,
+                scoreFetchedAt: boundaryTelemetry.score_fetched_at,
+              },
+              ruleEvaluated: `First Entry: Booking confirmed + 4/6 move + BATTING odds >= ${minPaiseInclusive} paise`,
+              status: 'PASS',
+              explanation:
+                `FIRST ENTRY TRIGGERED! ${controlInfo.battingTeamName} entered immediately at ${currentPaise} paise (>= ${minPaiseInclusive}p / ${decimalOdds?.toFixed(2)} decimal).` +
+                formatAuditTelemetrySuffix(boundaryTelemetry),
+              metadata: buildAuditMetadata(boundaryTelemetry, {
+                deferredEntry: false,
+                bookingTeamKey: state.bookingTeamKey || null,
+              }),
+            };
+            state.signalsHistory.unshift(triggerSignal);
+            signals.push(triggerSignal);
+          } else {
+            // Enter CONFIRMED_PENDING_85 and wait for first later ball with BATTING >= 85
+            state.stage = 'CONFIRMED_PENDING_85';
+            state.pending85 = true;
+            const waitKey = `${matchId}-ENTRY_CONFIRMED_WAITING_85-${currentInnings}-${currentOver}.${currentBalls}`;
+            if (!state.processedEventKeys.has(waitKey)) {
+              state.processedEventKeys.add(waitKey);
+              const waitingSignal: StrategySignal = {
+                id: `${matchId}-ENTRY_CONFIRMED_WAITING_85-${nowMs}`,
+                signalType: 'ENTRY_CONFIRMED_WAITING_85',
+                matchId,
+                timestamp: nowDate,
+                currentInnings,
+                currentOver,
+                ballNumber: currentBalls,
+                relevantOdds: {
+                  measuredTeam: controlInfo.battingTeamName,
+                  teamInControl: 'BATTING',
+                  decimalOdds,
+                  currentPaise,
+                  calculatedDelta: paiseCalc.delta,
+                  rawF: boundaryTelemetry.rawF,
+                  controlTeamKey: boundaryTelemetry.controlTeamKey ?? undefined,
+                  oddsFetchedAt: boundaryTelemetry.odds_fetched_at,
+                  scoreFetchedAt: boundaryTelemetry.score_fetched_at,
+                },
+                ruleEvaluated: `Deferred First Entry: Confirmed at ${currentPaise}p (< ${minPaiseInclusive}p); wait for first later ball >= ${minPaiseInclusive}p`,
+                status: 'PASS',
+                explanation:
+                  `ENTRY CONFIRMED (CONFIRMED_PENDING_85): ${activeBoundaryType} moved ${paiseCalc.delta}p to BATTING ${currentPaise}p (< ${minPaiseInclusive}p). Will enter on first later ball with BATTING >= ${minPaiseInclusive}p inside window (no new 4/6 needed).` +
+                  formatAuditTelemetrySuffix(boundaryTelemetry),
+                metadata: buildAuditMetadata(boundaryTelemetry, {
+                  bookingTeamKey: state.bookingTeamKey || null,
+                  boundaryType: activeBoundaryType,
+                }),
+              };
+              state.signalsHistory.unshift(waitingSignal);
+              signals.push(waitingSignal);
+            }
           }
         }
       }
     }
 
     // 3C. Deferred First Entry: When in CONFIRMED_PENDING_85, enter on first later ball with BATTING >= 85 inside window
+    // Strictly enforces controlTeamKey === battingTeamKey AND stored bookingTeamKey === battingTeamKey.
     if (
       state.stage === 'CONFIRMED_PENDING_85' &&
       !hasAnyEntry &&
+      isFromGetSV3 &&
       currControl === 'BATTING' &&
       currentPaise !== null &&
       currentPaise >= minPaiseInclusive &&
@@ -2095,47 +2621,113 @@ export class CricketStrategyEngine {
         currentLegalBalls > confirmedLegalBalls;
 
       if (isLaterBall) {
-        state.stage = 'ACTIVE_FIRST_ENTRY';
-        state.pending85 = false;
-        this.recordEntry(
-          matchId,
-          'FIRST_ENTRY',
-          decimalOdds ?? Number((1 + currentPaise / 100).toFixed(2)),
-          currentInnings,
-          currentOver,
-          currentWickets,
-          new Date(),
-          state.bookingTeamName || controlInfo.battingTeamName,
-          controlInfo.battingTeamName,
-          controlInfo.bowlingTeamName,
-          matchTitle,
-          match.seriesName
-        );
+        const deferredTelemetry = buildStepTelemetry({
+          control_before: state.lastEvaluatedControl,
+          control_after: currControl,
+          odds_before: state.lastEvaluatedPaise,
+          odds_after: currentPaise,
+          move:
+            state.lastEvaluatedPaise !== null && state.lastEvaluatedControl === 'BATTING'
+              ? currentPaise - state.lastEvaluatedPaise
+              : null,
+        });
+        const bookingKeyMatchesBatting =
+          Boolean(state.bookingTeamKey) &&
+          Boolean(controlInfo.battingTeamKey) &&
+          normalizeTeamKey(state.bookingTeamKey) === normalizeTeamKey(controlInfo.battingTeamKey);
 
-        const deferredTriggerKey = `${matchId}-FIRST_ENTRY_TRIGGER-DEFERRED-${currentInnings}-${currentOver}.${currentBalls}`;
-        if (!state.processedEventKeys.has(deferredTriggerKey)) {
-          state.processedEventKeys.add(deferredTriggerKey);
-          const triggerSignal: StrategySignal = {
-            id: `${matchId}-FIRST_ENTRY_TRIGGER-${Date.now()}`,
-            signalType: 'FIRST_ENTRY_TRIGGER',
+        if (!controlKeyMatchesBatting || !bookingKeyMatchesBatting) {
+          const mismatchReason = !controlKeyMatchesBatting
+            ? `Key mismatch: controlTeamKey (${controlInfo.controlTeamKey || 'none'}) !== battingTeamKey (${controlInfo.battingTeamKey})`
+            : `Key mismatch: stored bookingTeamKey (${state.bookingTeamKey || 'none'}) !== current battingTeamKey (${controlInfo.battingTeamKey})`;
+          const failDefKey = `${matchId}-FIRST_ENTRY_TRIGGER-DEFERRED-FAIL-${currentInnings}-${currentOver}.${currentBalls}-${state.bookingTeamKey || 'none'}-${controlInfo.battingTeamKey}`;
+          if (!state.processedEventKeys.has(failDefKey)) {
+            state.processedEventKeys.add(failDefKey);
+            const failSignal: StrategySignal = {
+              id: `${matchId}-FIRST_ENTRY_TRIGGER-FAIL-${nowMs}`,
+              signalType: 'FIRST_ENTRY_TRIGGER',
+              matchId,
+              timestamp: nowDate,
+              currentInnings,
+              currentOver,
+              ballNumber: currentBalls,
+              relevantOdds: {
+                measuredTeam: controlInfo.battingTeamName,
+                decimalOdds,
+                currentPaise,
+                teamInControl: currControl,
+                rawF: deferredTelemetry.rawF,
+                controlTeamKey: deferredTelemetry.controlTeamKey ?? undefined,
+                oddsFetchedAt: deferredTelemetry.odds_fetched_at,
+                scoreFetchedAt: deferredTelemetry.score_fetched_at,
+              },
+              ruleEvaluated: `Deferred First Entry: Requires controlTeamKey === battingTeamKey AND bookingTeamKey === battingTeamKey`,
+              status: 'FAIL',
+              explanation:
+                `DEFERRED FIRST ENTRY BLOCKED: ${mismatchReason}. Entry NOT recorded.` +
+                formatAuditTelemetrySuffix(deferredTelemetry),
+              metadata: buildAuditMetadata(deferredTelemetry, {
+                deferredEntry: true,
+                bookingTeamKey: state.bookingTeamKey || null,
+                mismatchReason,
+              }),
+            };
+            state.signalsHistory.unshift(failSignal);
+            signals.push(failSignal);
+          }
+        } else {
+          state.stage = 'ACTIVE_FIRST_ENTRY';
+          state.pending85 = false;
+          this.recordEntry(
             matchId,
-            timestamp: new Date(),
+            'FIRST_ENTRY',
+            decimalOdds ?? Number((1 + currentPaise / 100).toFixed(2)),
             currentInnings,
             currentOver,
-            ballNumber: currentBalls,
-            relevantOdds: {
-              measuredTeam: controlInfo.battingTeamName,
-              decimalOdds,
-              currentPaise,
-              teamInControl: 'BATTING',
-            },
-            ruleEvaluated: `Deferred First Entry: CONFIRMED_PENDING_85 + BATTING odds >= ${minPaiseInclusive} paise on later ball`,
-            status: 'PASS',
-            explanation: `DEFERRED FIRST ENTRY TRIGGERED! ${controlInfo.battingTeamName} reached ${currentPaise} paise (>= ${minPaiseInclusive}p) on later ball @ ${currentOver} ov.`,
-            metadata: { deferredEntry: true },
-          };
-          state.signalsHistory.unshift(triggerSignal);
-          signals.push(triggerSignal);
+            currentWickets,
+            nowDate,
+            state.bookingTeamName || controlInfo.battingTeamName,
+            controlInfo.battingTeamName,
+            controlInfo.bowlingTeamName,
+            matchTitle,
+            match.seriesName,
+            false
+          );
+
+          const deferredTriggerKey = `${matchId}-FIRST_ENTRY_TRIGGER-DEFERRED-${currentInnings}-${currentOver}.${currentBalls}`;
+          if (!state.processedEventKeys.has(deferredTriggerKey)) {
+            state.processedEventKeys.add(deferredTriggerKey);
+            const triggerSignal: StrategySignal = {
+              id: `${matchId}-FIRST_ENTRY_TRIGGER-${nowMs}`,
+              signalType: 'FIRST_ENTRY_TRIGGER',
+              matchId,
+              timestamp: nowDate,
+              currentInnings,
+              currentOver,
+              ballNumber: currentBalls,
+              relevantOdds: {
+                measuredTeam: controlInfo.battingTeamName,
+                decimalOdds,
+                currentPaise,
+                teamInControl: 'BATTING',
+                rawF: deferredTelemetry.rawF,
+                controlTeamKey: deferredTelemetry.controlTeamKey ?? undefined,
+                oddsFetchedAt: deferredTelemetry.odds_fetched_at,
+                scoreFetchedAt: deferredTelemetry.score_fetched_at,
+              },
+              ruleEvaluated: `Deferred First Entry: CONFIRMED_PENDING_85 + BATTING odds >= ${minPaiseInclusive} paise on later ball`,
+              status: 'PASS',
+              explanation:
+                `DEFERRED FIRST ENTRY TRIGGERED! ${controlInfo.battingTeamName} reached ${currentPaise} paise (>= ${minPaiseInclusive}p) on later ball @ ${currentOver} ov.` +
+                formatAuditTelemetrySuffix(deferredTelemetry),
+              metadata: buildAuditMetadata(deferredTelemetry, {
+                deferredEntry: true,
+                bookingTeamKey: state.bookingTeamKey || null,
+              }),
+            };
+            state.signalsHistory.unshift(triggerSignal);
+            signals.push(triggerSignal);
+          }
         }
       }
     }
@@ -2151,6 +2743,7 @@ export class CricketStrategyEngine {
       currentWickets,
       ballNumber: currentBalls,
       measuredTeam,
+      timestamp: nowDate,
     });
     signals.push(firstEntrySignal);
 
@@ -2173,6 +2766,7 @@ export class CricketStrategyEngine {
         currentOver,
         ballNumber: currentBalls,
         measuredTeam: controlInfo.bowlingTeamName,
+        timestamp: nowDate,
       });
       signals.push(secondEntrySignal);
 
@@ -2186,22 +2780,34 @@ export class CricketStrategyEngine {
           currentInnings,
           currentOver,
           currentWickets,
-          new Date(),
+          nowDate,
           state.bookingTeamName || controlInfo.battingTeamName,
           controlInfo.battingTeamName,
           controlInfo.bowlingTeamName,
           matchTitle,
-          match.seriesName
+          match.seriesName,
+          false
         );
+
+        const secondTelemetry = buildStepTelemetry({
+          control_before: state.lastEvaluatedControl,
+          control_after: currControl,
+          odds_before: state.lastEvaluatedPaise,
+          odds_after: currentPaise,
+          move:
+            state.lastEvaluatedPaise !== null && currentPaise !== null
+              ? currentPaise - state.lastEvaluatedPaise
+              : null,
+        });
 
         const secondTriggerKey = `${matchId}-SECOND_ENTRY_TRIGGER-${currentInnings}-${currentOver}.${currentBalls}-${currentWickets}`;
         if (!state.processedEventKeys.has(secondTriggerKey)) {
           state.processedEventKeys.add(secondTriggerKey);
           const secondTrigger: StrategySignal = {
-            id: `${matchId}-SECOND_ENTRY_TRIGGER-${Date.now()}`,
+            id: `${matchId}-SECOND_ENTRY_TRIGGER-${nowMs}`,
             signalType: 'SECOND_ENTRY_TRIGGER',
             matchId,
-            timestamp: new Date(),
+            timestamp: nowDate,
             currentInnings,
             currentOver,
             ballNumber: currentBalls,
@@ -2210,10 +2816,20 @@ export class CricketStrategyEngine {
               teamInControl: 'BOWLING',
               decimalOdds: entryDec,
               currentPaise,
+              rawF: secondTelemetry.rawF,
+              controlTeamKey: secondTelemetry.controlTeamKey ?? undefined,
+              oddsFetchedAt: secondTelemetry.odds_fetched_at,
+              scoreFetchedAt: secondTelemetry.score_fetched_at,
             },
             ruleEvaluated: `Second Entry: Wicket after 1st entry + BOWLING control_team_odds < ${this.config.secondEntry.maxBowlingPaiseExclusive} paise`,
             status: 'PASS',
-            explanation: `SECOND ENTRY TRIGGERED! Wicket confirmed and BOWLING control_team_odds dropped to ${currentPaise} paise (< ${this.config.secondEntry.maxBowlingPaiseExclusive}p). Holding both entries until Bookset (BOWLING > ${this.config.bookset.minBowlingPaiseExclusive}p).`,
+            explanation:
+              `SECOND ENTRY TRIGGERED! Wicket confirmed and BOWLING control_team_odds dropped to ${currentPaise} paise (< ${this.config.secondEntry.maxBowlingPaiseExclusive}p). Holding both entries until Bookset (BOWLING > ${this.config.bookset.minBowlingPaiseExclusive}p).` +
+              formatAuditTelemetrySuffix(secondTelemetry),
+            metadata: buildAuditMetadata(secondTelemetry, {
+              currentWickets,
+              anchorWickets: state.firstEntryTrade?.entryWickets ?? state.firstEntryPosition.entryWickets ?? 0,
+            }),
           };
           state.signalsHistory.unshift(secondTrigger);
           signals.push(secondTrigger);
@@ -2226,6 +2842,17 @@ export class CricketStrategyEngine {
     //    - If only 1st entry active:
     //      (a) FIRST_EXIT_BELOW_55: if no wicket since 1st entry AND BATTING <= 55 -> exits 1st entry.
     //      (b) Bookset: BOWLING > 85 -> closes 1st entry.
+    const exitTelemetry = buildStepTelemetry({
+      control_before: state.lastEvaluatedControl,
+      control_after: currControl,
+      odds_before: state.lastEvaluatedPaise,
+      odds_after: currentPaise,
+      move:
+        state.lastEvaluatedPaise !== null && currentPaise !== null
+          ? currentPaise - state.lastEvaluatedPaise
+          : null,
+    });
+
     if (
       state.stage === 'ACTIVE_SECOND_ENTRY' ||
       (state.secondEntryPosition.status === 'RECORDED_ENTRY' &&
@@ -2241,6 +2868,8 @@ export class CricketStrategyEngine {
         ballNumber: currentBalls,
         measuredTeam: controlInfo.bowlingTeamName,
         signalType: 'SECOND_BOOKSET_TARGET',
+        timestamp: nowDate,
+        auditTelemetry: exitTelemetry,
       });
       signals.push(booksetSignal);
 
@@ -2252,8 +2881,9 @@ export class CricketStrategyEngine {
           'SECOND_ENTRY',
           exitDec,
           currentOver,
-          new Date(),
-          'FULL_BOOKSET_OPPOSING_85'
+          nowDate,
+          'FULL_BOOKSET_OPPOSING_85',
+          false
         );
       }
     } else if (
@@ -2272,6 +2902,8 @@ export class CricketStrategyEngine {
         currentOver,
         ballNumber: currentBalls,
         measuredTeam: controlInfo.battingTeamName,
+        timestamp: nowDate,
+        auditTelemetry: exitTelemetry,
       });
       signals.push(exitBelow55Signal);
 
@@ -2283,8 +2915,9 @@ export class CricketStrategyEngine {
           'FIRST_ENTRY',
           exitDec,
           currentOver,
-          new Date(),
-          'FIRST_EXIT_BELOW_55'
+          nowDate,
+          'FIRST_EXIT_BELOW_55',
+          false
         );
       } else {
         const booksetSignal = this.evaluateBooksetExit({
@@ -2297,6 +2930,8 @@ export class CricketStrategyEngine {
           ballNumber: currentBalls,
           measuredTeam: controlInfo.bowlingTeamName,
           signalType: 'FIRST_BOOKSET_TARGET',
+          timestamp: nowDate,
+          auditTelemetry: exitTelemetry,
         });
         signals.push(booksetSignal);
 
@@ -2308,8 +2943,9 @@ export class CricketStrategyEngine {
             'FIRST_ENTRY',
             exitDec,
             currentOver,
-            new Date(),
-            'FULL_BOOKSET_OPPOSING_85'
+            nowDate,
+            'FULL_BOOKSET_OPPOSING_85',
+            false
           );
         }
       }

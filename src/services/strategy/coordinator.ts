@@ -60,6 +60,9 @@ function stableShortHash(input: string): string {
 }
 
 export function buildSignalDedupeHash(signal: StrategySignal): string {
+  const manualTag = signal.metadata?.isManual
+    ? `:MANUAL:${new Date(signal.timestamp).getTime()}`
+    : '';
   const raw = [
     signal.matchId,
     signal.signalType,
@@ -71,7 +74,7 @@ export function buildSignalDedupeHash(signal: StrategySignal): string {
     signal.relevantOdds?.decimalOdds ?? 'null',
     signal.relevantOdds?.oddsDelta ?? 'null',
     signal.relevantOdds?.currentPaise ?? 'null',
-  ].join(':');
+  ].join(':') + manualTag;
 
   if (raw.length <= 160) {
     return raw;
@@ -406,6 +409,12 @@ export class StrategyPersistenceCoordinator {
     oddsState: MatchOddsState,
     options?: {
       isStale?: boolean;
+      now?: Date | number;
+      scoreFetchedAt?: Date | string | null;
+      scoreChangedAt?: Date | string | null;
+      oddsFetchedAt?: Date | string | null;
+      oddsSource?: 'getSV3' | 'flb' | 'none';
+      sameGetSV3ScorePacket?: boolean;
       boundaryEvent?: { type: 'FOUR' | 'SIX'; oddsMovement: number };
       dbAvailable?: boolean;
     }
@@ -421,7 +430,15 @@ export class StrategyPersistenceCoordinator {
       match,
       oddsState,
       options?.boundaryEvent,
-      { isStale: options?.isStale }
+      {
+        isStale: options?.isStale,
+        now: options?.now,
+        scoreFetchedAt: options?.scoreFetchedAt,
+        scoreChangedAt: options?.scoreChangedAt,
+        oddsFetchedAt: options?.oddsFetchedAt,
+        oddsSource: options?.oddsSource,
+        sameGetSV3ScorePacket: options?.sameGetSV3ScorePacket,
+      }
     );
 
     const emittedTrades = [...this.emittedTradesBuffer];
@@ -455,6 +472,8 @@ export class StrategyPersistenceCoordinator {
       this.activeMatchContext.set(params.matchId, params.match);
     }
     this.emittedTradesBuffer = [];
+    const now = new Date();
+    const entryPaise = Math.round((params.entryOdds - 1) * 100);
 
     this.engine.recordEntry(
       params.matchId,
@@ -463,13 +482,50 @@ export class StrategyPersistenceCoordinator {
       params.innings,
       params.over,
       params.wickets,
-      new Date(),
+      now,
       params.bookingTeam,
       params.battingTeam,
       params.bowlingTeam,
       params.matchName,
-      params.seriesName
+      params.seriesName,
+      true
     );
+
+    const state = this.engine.getState(params.matchId);
+    const signalType =
+      params.positionType === 'FIRST_ENTRY' ? 'FIRST_ENTRY_TRIGGER' : 'SECOND_ENTRY_TRIGGER';
+    const manualSignal: StrategySignal = {
+      id: `${params.matchId}-MANUAL-${signalType}-${now.getTime()}`,
+      signalType,
+      matchId: params.matchId,
+      timestamp: now,
+      currentInnings: params.innings,
+      currentOver: params.over,
+      ballNumber: Math.round((params.over - Math.floor(params.over)) * 10),
+      relevantOdds: {
+        measuredTeam: params.bookingTeam,
+        teamInControl: params.positionType === 'FIRST_ENTRY' ? 'BATTING' : 'BOWLING',
+        decimalOdds: params.entryOdds,
+        currentPaise: entryPaise,
+      },
+      ruleEvaluated: `[MANUAL] Manual Override ${params.positionType} Entry`,
+      status: 'PASS',
+      explanation: `[MANUAL] Manual ${params.positionType} recorded for ${params.bookingTeam} at ${entryPaise} paise (${params.entryOdds.toFixed(2)}) @ ${params.over} ov (Inn ${params.innings}, ${params.wickets} wkts).`,
+      metadata: {
+        isManual: true,
+        source: 'MANUAL',
+        positionType: params.positionType,
+        entryPaise,
+        entryOdds: params.entryOdds,
+        innings: params.innings,
+        over: params.over,
+        wickets: params.wickets,
+        battingTeam: params.battingTeam,
+        bowlingTeam: params.bowlingTeam,
+      },
+    };
+    state.signalsHistory.unshift(manualSignal);
+    if (state.signalsHistory.length > 200) state.signalsHistory.pop();
 
     const emittedTrades = [...this.emittedTradesBuffer];
     this.emittedTradesBuffer = [];
@@ -477,7 +533,7 @@ export class StrategyPersistenceCoordinator {
     await this.persistEvaluationArtifacts(
       params.matchId,
       params.match,
-      [],
+      [manualSignal],
       emittedTrades,
       params.dbAvailable
     );
@@ -497,7 +553,8 @@ export class StrategyPersistenceCoordinator {
       this.activeMatchContext.set(params.matchId, params.match);
     }
     this.emittedTradesBuffer = [];
-
+    const now = new Date();
+    const exitPaise = Math.round((params.exitOdds - 1) * 100);
     const reason = params.exitReason || 'FULL_BOOKSET_OPPOSING_85';
 
     this.engine.recordExit(
@@ -505,9 +562,51 @@ export class StrategyPersistenceCoordinator {
       params.positionType,
       params.exitOdds,
       params.over,
-      new Date(),
-      reason
+      now,
+      reason,
+      true
     );
+
+    const state = this.engine.getState(params.matchId);
+    const signalType =
+      reason === 'FIRST_EXIT_BELOW_55'
+        ? 'FIRST_EXIT_BELOW_55'
+        : params.positionType === 'FIRST_ENTRY'
+        ? 'FIRST_BOOKSET_TARGET'
+        : 'SECOND_BOOKSET_TARGET';
+    const currentInnings =
+      params.positionType === 'FIRST_ENTRY'
+        ? state.firstEntryTrade?.innings ?? state.lastEvaluatedInnings ?? 1
+        : state.secondEntryTrade?.innings ?? state.lastEvaluatedInnings ?? 1;
+    const manualSignal: StrategySignal = {
+      id: `${params.matchId}-MANUAL-EXIT-${now.getTime()}`,
+      signalType,
+      matchId: params.matchId,
+      timestamp: now,
+      currentInnings,
+      currentOver: params.over,
+      ballNumber: Math.round((params.over - Math.floor(params.over)) * 10),
+      relevantOdds: {
+        measuredTeam: state.bookingTeamName || 'Manual Override',
+        teamInControl: reason === 'FIRST_EXIT_BELOW_55' ? 'BATTING' : 'BOWLING',
+        decimalOdds: params.exitOdds,
+        currentPaise: exitPaise,
+      },
+      ruleEvaluated: `[MANUAL] Manual Override ${params.positionType} Exit (${reason})`,
+      status: 'PASS',
+      explanation: `[MANUAL] Manual ${params.positionType} exit recorded at ${exitPaise} paise (${params.exitOdds.toFixed(2)}) @ ${params.over} ov. Reason: ${reason}.`,
+      metadata: {
+        isManual: true,
+        source: 'MANUAL',
+        positionType: params.positionType,
+        exitPaise,
+        exitOdds: params.exitOdds,
+        over: params.over,
+        exitReason: reason,
+      },
+    };
+    state.signalsHistory.unshift(manualSignal);
+    if (state.signalsHistory.length > 200) state.signalsHistory.pop();
 
     const emittedTrades = [...this.emittedTradesBuffer];
     this.emittedTradesBuffer = [];
@@ -515,7 +614,7 @@ export class StrategyPersistenceCoordinator {
     await this.persistEvaluationArtifacts(
       params.matchId,
       params.match,
-      [],
+      [manualSignal],
       emittedTrades,
       params.dbAvailable
     );

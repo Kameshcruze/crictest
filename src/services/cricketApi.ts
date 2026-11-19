@@ -86,6 +86,53 @@ export function parseInningsScore(raw?: string, inningIndex = 1): ParsedInningsS
 }
 
 /**
+ * Validates whether raw 2nd-innings score text (item.k) is a real active 2nd-innings score:
+ * - Must parse as a real score using parseInningsScore regex rules
+ * - AND must show overs or balls greater than 0 (rejects "-", "Yet to bat", "0/0(0.0)", etc.)
+ */
+export function isValidActiveSecondInningsScore(raw?: string): ParsedInningsScore | undefined {
+  const parsed = parseInningsScore(raw, 2);
+  if (!parsed) return undefined;
+  const hasActivePlay =
+    parsed.overs > 0 ||
+    parsed.totalBalls > 0 ||
+    parsed.completedOvers > 0 ||
+    parsed.ballsInOver > 0;
+  return hasActivePlay ? parsed : undefined;
+}
+
+/**
+ * Determines current innings (1 or 2) and active batting/bowling team keys independently
+ * of placeholder strings (e.g. "-", "Yet to bat", "0/0(0.0)").
+ */
+export function resolveInningsAndBattingTeam(raw: Pick<RawCrexMatch, 'b' | 'c' | 'j' | 'k'>): {
+  innings: 1 | 2;
+  hasInn1: boolean;
+  hasInn2: boolean;
+  inn1?: ParsedInningsScore;
+  inn2?: ParsedInningsScore;
+  battingTeamKey: string;
+  bowlingTeamKey: string;
+} {
+  const inn1 = parseInningsScore(raw.j, 1);
+  const inn2 = isValidActiveSecondInningsScore(raw.k);
+  const hasInn1 = Boolean(inn1);
+  const hasInn2 = Boolean(inn2);
+  const innings: 1 | 2 = hasInn2 ? 2 : 1;
+  const team1Key = String(raw.b || '').replace(/^\^/, '').trim();
+  const team2Key = String(raw.c || '').replace(/^\^/, '').trim();
+  return {
+    innings,
+    hasInn1,
+    hasInn2,
+    inn1,
+    inn2,
+    battingTeamKey: innings === 2 ? team2Key : team1Key,
+    bowlingTeamKey: innings === 2 ? team1Key : team2Key,
+  };
+}
+
+/**
  * Parse win probability string like "R,218014,646624,13"
  */
 export function parseWinProbability(wpStr?: string, team1Key?: string, team2Key?: string): WinProbability | undefined {
@@ -138,7 +185,7 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
   const format = (raw.fo || raw.t || 'Match').toString().trim();
   const matchTitlePrefix = raw.matchNums ? `${raw.matchNums} ${format}` : format;
 
-  // Innings parsing
+  // Innings parsing (item.k counts as 2nd innings ONLY if it parses as a real score AND overs/balls > 0)
   const innings: ParsedInningsScore[] = [];
   if (raw.j) {
     const inn1 = parseInningsScore(raw.j, 1);
@@ -148,7 +195,7 @@ export function transformCrexMatch(id: string, raw: RawCrexMatch): ParsedCricket
     }
   }
   if (raw.k) {
-    const inn2 = parseInningsScore(raw.k, 2);
+    const inn2 = isValidActiveSecondInningsScore(raw.k);
     if (inn2) {
       inn2.teamCode = team2.shortName;
       innings.push(inn2);

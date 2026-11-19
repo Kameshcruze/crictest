@@ -151,6 +151,8 @@ export interface MatchOddsState {
   error?: string;
   recordsCount: number;
   lastUpdated?: Date;
+  oddsFetchedAt?: Date | string | null;
+  oddsSource?: 'getSV3' | 'flb' | 'none';
   consistency: OddsConsistencyResult;
 }
 

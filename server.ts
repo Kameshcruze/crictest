@@ -5,6 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import pg from 'pg';
 import dotenv from 'dotenv';
 import { parseBookmakerRate, parseSessionMarkets, transformGetSV3Response } from './src/services/oddsApi';
+import { parseInningsScore, isValidActiveSecondInningsScore } from './src/services/cricketApi';
 import { resolveTeam, resolveSeries, resolveVenue } from './src/data/cricketMapping';
 import { ParsedCricketMatch, ParsedInningsScore } from './src/types/cricket';
 import { MatchOddsState } from './src/types/odds';
@@ -17,6 +18,8 @@ import {
   StrategyStorageAdapter,
   StrategyTradeRecord,
   TradePosition,
+  resolveExactTeamControl,
+  normalizeTeamKey,
 } from './src/services/strategy/index';
 
 dotenv.config();
@@ -626,15 +629,37 @@ function isAllowedTournament(item: any, mapping?: { series?: any[] }): boolean {
   });
 }
 
-// Per-match fetch timestamps, ball/run snapshots, and missed tick counters
+// Per-match fetch timestamps, score-change timestamps, ball/run snapshots, and missed tick counters
 const scoreFetchedAtByMatch = new Map<string, Date>();
+const scoreChangedAtByMatch = new Map<string, Date>();
+const scoreSourceByMatch = new Map<string, 'getSV3' | 'goscorer' | 'crex'>();
+const lastObservedRawScoresByMatch = new Map<string, { j: string; k: string }>();
 const oddsFetchedAtByMatch = new Map<string, Date>();
 const missedTicksByMatch: Record<string, number> = {};
+const warnedInconsistentMatches = new Set<string>();
 const lastTimelineSnapshot: Record<
   string,
   { innings: number; legalBallCount: number; runs: number }
 > = {};
 const lastLatestStateSyncAt = new Map<string, number>();
+
+function recordScoreObservation(
+  matchId: string,
+  jRaw: unknown,
+  kRaw: unknown,
+  fetchedAt: Date,
+  source: 'getSV3' | 'goscorer' | 'crex'
+) {
+  scoreFetchedAtByMatch.set(matchId, fetchedAt);
+  const j = typeof jRaw === 'string' ? jRaw.trim() : '';
+  const k = typeof kRaw === 'string' ? kRaw.trim() : '';
+  const prev = lastObservedRawScoresByMatch.get(matchId);
+  if (!prev || prev.j !== j || prev.k !== k) {
+    lastObservedRawScoresByMatch.set(matchId, { j, k });
+    scoreChangedAtByMatch.set(matchId, fetchedAt);
+    scoreSourceByMatch.set(matchId, source);
+  }
+}
 
 function incrementMissedTick(matchId: string) {
   missedTicksByMatch[matchId] = (missedTicksByMatch[matchId] || 0) + 1;
@@ -985,7 +1010,14 @@ async function syncGoscorerApi(countryCode = 'IN') {
           }
           continue;
         }
-        scoreFetchedAtByMatch.set(id, fetchedAt);
+        const rawItem = m as any;
+        recordScoreObservation(
+          id,
+          rawItem?.j ?? matchStore.matches[id]?.j,
+          rawItem?.k ?? matchStore.matches[id]?.k,
+          fetchedAt,
+          'goscorer'
+        );
         const changed = await processMatchUpdate(id, m);
         if (changed) hasChange = true;
       }
@@ -1107,7 +1139,14 @@ async function syncCrexPool() {
                 }
                 continue;
               }
-              scoreFetchedAtByMatch.set(id, crexFetchedAt);
+              const rawItem = m as any;
+              recordScoreObservation(
+                id,
+                rawItem?.j ?? matchStore.matches[id]?.j,
+                rawItem?.k ?? matchStore.matches[id]?.k,
+                crexFetchedAt,
+                'crex'
+              );
               const changed = await processMatchUpdate(id, m);
               if (changed) hasChange = true;
             }
@@ -1184,8 +1223,10 @@ async function syncLiveMatchScores() {
             if (data && matchStore.matches[key]) {
               const existing = matchStore.matches[key];
               let changed = false;
+              const nextJ = data.j || existing.j;
+              const nextK = data.k || existing.k;
               if (data.j || data.k || data.res) {
-                scoreFetchedAtByMatch.set(key, now);
+                recordScoreObservation(key, nextJ, nextK, now, 'getSV3');
               }
               if (data.j && existing.j !== data.j) {
                 existing.j = data.j;
@@ -1228,10 +1269,12 @@ async function syncLiveMatchScores() {
 }
 
 /**
- * Resolves team control ('BATTING' | 'BOWLING' | 'UNKNOWN') and favorite info from raw.F + match teams.
+ * Resolves team control ('BATTING' | 'BOWLING' | 'UNKNOWN'), keys, and favorite info
+ * from raw.F + raw.cl using STRICT exact normalized key / exact team-name matching ONLY.
+ * No substring matching, no empty string matches, and no winProbability fallback.
  */
 function resolveControlForMatch(
-  item: any,
+  _item: any,
   oddsData: any,
   battingTeamKey: string,
   battingTeamName: string,
@@ -1239,53 +1282,44 @@ function resolveControlForMatch(
   bowlingTeamKey: string,
   bowlingTeamName: string,
   bowlingShort: string
-): { control: 'BATTING' | 'BOWLING' | 'UNKNOWN'; favoriteTeam: string | null } {
+): {
+  control: 'BATTING' | 'BOWLING' | 'UNKNOWN';
+  favoriteTeam: string | null;
+  controlTeamKey: string | null;
+  battingTeamKey: string;
+  rawF: string | null;
+} {
+  if (!oddsData) {
+    return {
+      control: 'UNKNOWN',
+      favoriteTeam: null,
+      controlTeamKey: null,
+      battingTeamKey: String(battingTeamKey || '').replace(/^\^/, '').trim(),
+      rawF: null,
+    };
+  }
+
   const speechNames =
     oddsData?.speech_names && typeof oddsData.speech_names === 'object' ? oddsData.speech_names : {};
-  const rawF = oddsData?.F;
-  const favKey = typeof rawF === 'string' ? rawF.replace(/^\^/, '').trim() : '';
-  const favSpeechName = favKey && speechNames[favKey] ? String(speechNames[favKey]) : '';
+  const exact = resolveExactTeamControl({
+    rawF: oddsData?.F,
+    clList: Array.isArray(oddsData?.cl) ? oddsData.cl : undefined,
+    speechNames,
+    battingTeamKey,
+    battingTeamName,
+    battingTeamShortName: battingShort,
+    bowlingTeamKey,
+    bowlingTeamName,
+    bowlingTeamShortName: bowlingShort,
+  });
 
-  let control: 'BATTING' | 'BOWLING' | 'UNKNOWN' = 'UNKNOWN';
-  if (favKey || favSpeechName) {
-    const batK = battingTeamKey.replace(/^\^/, '').toLowerCase();
-    const bowlK = bowlingTeamKey.replace(/^\^/, '').toLowerCase();
-    const fk = favKey.toLowerCase();
-    const fn = favSpeechName.toLowerCase();
-    const batN = battingTeamName.toLowerCase();
-    const batS = battingShort.toLowerCase();
-    const bowlN = bowlingTeamName.toLowerCase();
-    const bowlS = bowlingShort.toLowerCase();
-
-    if (fk && fk === batK) control = 'BATTING';
-    else if (fk && fk === bowlK) control = 'BOWLING';
-    else if (
-      (fn && (fn.includes(batS) || batN.includes(fn))) ||
-      (fk && (fk === batS || batN.includes(fk)))
-    ) {
-      control = 'BATTING';
-    } else if (
-      (fn && (fn.includes(bowlS) || bowlN.includes(fn))) ||
-      (fk && (fk === bowlS || bowlN.includes(fk)))
-    ) {
-      control = 'BOWLING';
-    } else if (Array.isArray(oddsData?.cl)) {
-      const matched = oddsData.cl.find((c: any) => c.code === favKey);
-      if (matched?.name) {
-        const cn = String(matched.name).toLowerCase();
-        if (cn.includes(batS) || batN.includes(cn)) control = 'BATTING';
-        else if (cn.includes(bowlS) || bowlN.includes(cn)) control = 'BOWLING';
-      }
-    }
-  }
-
-  let favoriteTeam: string | null = favSpeechName || null;
-  if (!favoriteTeam && favKey) {
-    if (control === 'BATTING') favoriteTeam = battingTeamName;
-    else if (control === 'BOWLING') favoriteTeam = bowlingTeamName;
-    else favoriteTeam = favKey;
-  }
-  return { control, favoriteTeam };
+  return {
+    control: exact.teamInControl,
+    favoriteTeam: exact.controlTeamName || null,
+    controlTeamKey: exact.controlTeamKey || null,
+    battingTeamKey: exact.battingTeamKey,
+    rawF: exact.rawF,
+  };
 }
 
 /**
@@ -1498,6 +1532,8 @@ async function syncLatestStateToDb(
 const serverParsedOddsCache = new Map<string, MatchOddsState>();
 
 function mapTradeRow(row: any): StrategyTradeRecord {
+  const bookingTeamStr = String(row.booking_team || '');
+  const isManual = /^\[?MANUAL\]?/i.test(bookingTeamStr);
   return {
     id: String(row.id),
     matchId: row.match_id,
@@ -1520,6 +1556,8 @@ function mapTradeRow(row: any): StrategyTradeRecord {
     exitTime: row.exit_time ? new Date(row.exit_time) : undefined,
     exitReason: row.exit_reason || undefined,
     status: row.status,
+    isManual,
+    source: isManual ? 'MANUAL' : 'AUTO',
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
@@ -1891,15 +1929,28 @@ function buildServerInningsScore(
   teamCode: string
 ): ParsedInningsScore | undefined {
   if (!rawStr || !String(rawStr).trim()) return undefined;
+  const validated = parseInningsScore(String(rawStr), inningIndex);
+  if (!validated) return undefined;
+  if (
+    inningIndex === 2 &&
+    !(
+      validated.overs > 0 ||
+      validated.totalBalls > 0 ||
+      validated.completedOvers > 0 ||
+      validated.ballsInOver > 0
+    )
+  ) {
+    return undefined;
+  }
   return {
     inningIndex,
-    runs: parsed.runs,
-    wickets: parsed.wickets,
-    overs: parsed.oversDecimal,
-    completedOvers: parsed.completedOvers,
-    ballsInOver: parsed.ballsInOver,
-    totalBalls: parsed.legalBallCount,
-    runRate: parsed.runRate,
+    runs: validated.runs,
+    wickets: validated.wickets,
+    overs: validated.overs,
+    completedOvers: validated.completedOvers,
+    ballsInOver: validated.ballsInOver,
+    totalBalls: parsed.legalBallCount > 0 ? parsed.legalBallCount : validated.totalBalls,
+    runRate: validated.runRate || parsed.runRate,
     rawString: String(rawStr),
     teamCode,
   };
@@ -1984,9 +2035,10 @@ function buildSnapshotForEvaluation(
   };
 
   const prevParsedOddsState = serverParsedOddsCache.get(matchId);
-  const effectiveRaw = meta.oddsData || (item.flb ? { R: item.flb } : {});
-  const parsedOdds = transformGetSV3Response(matchId, effectiveRaw, 0);
-  if (meta.oddsFetchedAt) {
+  // Strictly require a real getSV3 odds payload; never fall back to item.flb
+  const hasGetSV3Odds = Boolean(meta.oddsData);
+  const parsedOdds = hasGetSV3Odds ? transformGetSV3Response(matchId, meta.oddsData, 0) : null;
+  if (parsedOdds && meta.oddsFetchedAt) {
     parsedOdds.timestamp = meta.oddsFetchedAt;
   }
 
@@ -1997,6 +2049,7 @@ function buildSnapshotForEvaluation(
     deltaLay: 0,
   };
   if (
+    parsedOdds &&
     prevBookmaker &&
     prevBookmaker.backRate !== null &&
     parsedOdds.bookmaker.backRate !== null
@@ -2020,23 +2073,27 @@ function buildSnapshotForEvaluation(
     matchId,
     oddsKey: matchId,
     maskedKey: matchId.length > 2 ? `${matchId.slice(0, 2)}${'*'.repeat(matchId.length - 2)}` : matchId,
-    status: parsedOdds.bookmaker.isSuspended ? 'unavailable' : 'success',
+    status: parsedOdds && !parsedOdds.bookmaker.isSuspended ? 'success' : 'unavailable',
     odds: parsedOdds,
     previousOdds: prevParsedOddsState?.odds || null,
     movement,
-    recordsCount: (prevParsedOddsState?.recordsCount || 0) + 1,
+    recordsCount: (prevParsedOddsState?.recordsCount || 0) + (hasGetSV3Odds ? 1 : 0),
     lastUpdated: meta.oddsFetchedAt || new Date(),
+    oddsFetchedAt: hasGetSV3Odds ? meta.oddsFetchedAt : null,
+    oddsSource: hasGetSV3Odds ? 'getSV3' : 'none',
     consistency: {
       isConsistent: true,
-      status: 'verified',
-      reason: 'Server 1s snapshot',
+      status: hasGetSV3Odds ? 'verified' : 'unverified',
+      reason: hasGetSV3Odds ? 'Server 1s getSV3 snapshot' : 'No getSV3 snapshot available',
     },
   };
 
-  serverParsedOddsCache.set(matchId, parsedOddsState);
+  if (parsedOdds) {
+    serverParsedOddsCache.set(matchId, parsedOddsState);
+  }
 
   const isStale =
-    !meta.oddsFetchedAt || Date.now() - meta.oddsFetchedAt.getTime() > 15000;
+    !hasGetSV3Odds || !meta.oddsFetchedAt || Date.now() - meta.oddsFetchedAt.getTime() > 15000;
 
   return { parsedMatch, parsedOddsState, isStale };
 }
@@ -2106,8 +2163,9 @@ async function persistLiveTimelineTicks() {
           const team2 = resolveFullTeamInfo(item.c, item.t2Name || item.team2, item.t2Sname);
           const seriesName = resolveSeriesNameFromMapping(item);
 
-          const hasInn1 = Boolean(item.j && String(item.j).trim());
-          const hasInn2 = Boolean(item.k && String(item.k).trim());
+          // Strict innings detection: item.k only starts 2nd innings if it parses as a real score AND overs/balls > 0
+          const hasInn1 = Boolean(parseInningsScore(item.j, 1));
+          const hasInn2 = Boolean(isValidActiveSecondInningsScore(item.k));
           const innings = hasInn2 ? 2 : 1;
 
           const score1 = parseScore(item.j);
@@ -2117,9 +2175,37 @@ async function persistLiveTimelineTicks() {
           const battingTeamObj = innings === 2 ? team2 : team1;
           const bowlingTeamObj = innings === 2 ? team1 : team2;
 
+          // Log a warning once per match if team order or innings metadata looks inconsistent
+          if (!warnedInconsistentMatches.has(matchId)) {
+            const kTrimmed = typeof item.k === 'string' ? item.k.trim() : '';
+            const relFkeyNorm = item.relevant_team_fkey ? normalizeTeamKey(String(item.relevant_team_fkey)) : '';
+            const batNorm = normalizeTeamKey(battingTeamObj.key);
+            const t1Norm = normalizeTeamKey(team1.key);
+            const t2Norm = normalizeTeamKey(team2.key);
+            const issues: string[] = [];
+            if (hasInn2 && !hasInn1) issues.push(`hasInn2=true but item.j invalid ("${item.j ?? ''}")`);
+            if (!t1Norm || !t2Norm || t1Norm === t2Norm) issues.push(`suspicious team keys t1="${team1.key}" t2="${team2.key}"`);
+            if (relFkeyNorm && batNorm && relFkeyNorm !== batNorm) {
+              issues.push(`relevant_team_fkey="${item.relevant_team_fkey}" disagrees with innings=${innings} battingTeam="${battingTeamObj.key}"`);
+            }
+            if (!hasInn2 && kTrimmed && kTrimmed !== '-' && !/^yet to bat$/i.test(kTrimmed) && !/^0\/0\(0(?:\.0)?\)$/.test(kTrimmed)) {
+              const kParsed = parseInningsScore(kTrimmed, 2);
+              if (!kParsed || (kParsed.overs === 0 && kParsed.totalBalls === 0 && kParsed.runs > 0)) {
+                issues.push(`unusual item.k="${kTrimmed}" treated as Inn 1`);
+              }
+            }
+            if (issues.length > 0) {
+              warnedInconsistentMatches.add(matchId);
+              console.warn(
+                `[Team/Innings Metadata Warning] match_id=${matchId} (${team1.shortName} vs ${team2.shortName}) innings=${innings} item.b="${item.b}" item.c="${item.c}" item.j="${item.j ?? ''}" item.k="${item.k ?? ''}": ${issues.join('; ')}`
+              );
+            }
+          }
+
           const cachedOdds = serverOddsCache.get(matchId);
           const oddsData = cachedOdds?.data || null;
-          const bookmaker = parseBookmakerRate(oddsData?.R ?? oddsData?.r ?? item.flb);
+          // Strictly use getSV3 odds snapshot; do NOT fall back to item.flb for control or control_team_odds
+          const bookmaker = oddsData ? parseBookmakerRate(oddsData.R ?? oddsData.r) : parseBookmakerRate(null);
           const sessions = parseSessionMarkets(oddsData?.Z, oddsData?.D);
           const speechNames =
             oddsData?.speech_names && typeof oddsData.speech_names === 'object'
@@ -2160,7 +2246,15 @@ async function persistLiveTimelineTicks() {
           }
 
           const scoreFetchedAt = scoreFetchedAtByMatch.get(matchId) || null;
+          const scoreChangedAt = scoreChangedAtByMatch.get(matchId) || scoreFetchedAt;
+          const scoreSource = scoreSourceByMatch.get(matchId);
           const oddsFetchedAt = oddsFetchedAtByMatch.get(matchId) || null;
+          const sameGetSV3ScorePacket = Boolean(
+            scoreSource === 'getSV3' &&
+              scoreChangedAt &&
+              oddsFetchedAt &&
+              scoreChangedAt.getTime() === oddsFetchedAt.getTime()
+          );
 
           // Build the unified per-second snapshot shared with the Strategy Engine
           const { parsedMatch, parsedOddsState, isStale } = buildSnapshotForEvaluation(matchId, item, {
@@ -2301,6 +2395,11 @@ async function persistLiveTimelineTicks() {
           if (isLive) {
             await strategyCoordinator.evaluateMatchSnapshot(parsedMatch, parsedOddsState, {
               isStale,
+              scoreFetchedAt,
+              scoreChangedAt,
+              oddsFetchedAt,
+              oddsSource: oddsData ? 'getSV3' : 'none',
+              sameGetSV3ScorePacket,
               dbAvailable: isDbAvailable,
             });
           }
@@ -2451,8 +2550,10 @@ app.get(['/api/odds', '/api/v3/getSV3'], async (req, res) => {
     if (data && matchStore.matches[key]) {
       const existing = matchStore.matches[key];
       let changed = false;
+      const nextJ = data.j || existing.j;
+      const nextK = data.k || existing.k;
       if (data.j || data.k || data.res) {
-        scoreFetchedAtByMatch.set(key, now);
+        recordScoreObservation(key, nextJ, nextK, now, 'getSV3');
       }
       if (data.j && existing.j !== data.j) {
         existing.j = data.j;
@@ -3192,18 +3293,27 @@ app.post('/api/strategy/:matchId/override-entry', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'Valid matchId and entryOdds (> 1.0) required' });
   }
 
+  const rawItem = matchStore.matches[matchId];
+  const t1 = rawItem ? resolveFullTeamInfo(rawItem.b, rawItem.t1Name || rawItem.team1, rawItem.t1Sname) : null;
+  const t2 = rawItem ? resolveFullTeamInfo(rawItem.c, rawItem.t2Name || rawItem.team2, rawItem.t2Sname) : null;
+  const fallbackMatchName = t1 && t2 ? `${t1.shortName} vs ${t2.shortName}` : undefined;
+  const fallbackSeriesName = rawItem ? resolveSeriesNameFromMapping(rawItem) : undefined;
+  const innings = Number(body.innings) || (rawItem && isValidActiveSecondInningsScore(rawItem.k) ? 2 : 1);
+  const fallbackBat = t1 && t2 ? (innings === 2 ? t2.name : t1.name) : 'Batting Team';
+  const fallbackBowl = t1 && t2 ? (innings === 2 ? t1.name : t2.name) : 'Bowling Team';
+
   const state = await strategyCoordinator.recordManualEntry({
     matchId,
     positionType,
     entryOdds,
-    innings: Number(body.innings) || 1,
+    innings,
     over: Number(body.over) || 0,
     wickets: Number(body.wickets) || 0,
     bookingTeam: body.bookingTeam || 'Manual Override',
-    battingTeam: body.battingTeam || 'Batting Team',
-    bowlingTeam: body.bowlingTeam || 'Bowling Team',
-    matchName: body.matchName,
-    seriesName: body.seriesName,
+    battingTeam: body.battingTeam || fallbackBat,
+    bowlingTeam: body.bowlingTeam || fallbackBowl,
+    matchName: body.matchName || fallbackMatchName,
+    seriesName: body.seriesName || fallbackSeriesName,
     dbAvailable: isDbAvailable,
   });
 

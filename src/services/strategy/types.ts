@@ -19,7 +19,8 @@ export type SignalType =
   | 'SECOND_BOOKSET_TARGET'
   | 'FULL_BOOKSET_TARGET'
   | 'DISQUALIFIED_WICKET_LIMIT'
-  | 'WICKET_EVENT';
+  | 'WICKET_EVENT'
+  | 'BOUNDARY_SKIPPED_NO_FRESH_ODDS';
 
 export type PositionType = 'FIRST_ENTRY' | 'SECOND_ENTRY';
 
@@ -57,6 +58,10 @@ export interface RelevantOddsInfo {
   bookmakerRateString?: string;
   spread?: number | null;
   isStale?: boolean;
+  rawF?: string | null;
+  controlTeamKey?: string;
+  oddsFetchedAt?: string | null;
+  scoreFetchedAt?: string | null;
 }
 
 export interface StrategySignal {
@@ -117,6 +122,8 @@ export interface StrategyTradeRecord {
   exitTime?: Date;
   exitReason?: 'FIRST_EXIT_BELOW_55' | 'FIRST_BOOKSET_45_55' | 'FULL_BOOKSET_OPPOSING_85';
   status: 'ACTIVE' | 'BOOKSET_COMPLETED' | 'CANCELLED';
+  isManual?: boolean;
+  source?: 'AUTO' | 'MANUAL';
   createdAt: Date;
   updatedAt: Date;
 }
@@ -151,7 +158,13 @@ export interface MatchStrategyState {
     innings: number;
     legalBalls: number;
     type: 'FOUR' | 'SIX';
+    detectedAtMs?: number;
+    scoreUpdatedAtMs?: number;
+    preBallOddsFetchedAtMs?: number | null;
+    rawF?: string | null;
   } | null;
+  lastScoreUpdatedAtMs?: number | null;
+  lastOddsFetchedAtMs?: number | null;
   bookingConfirmedBoundary?: {
     type: 'FOUR' | 'SIX';
     over: number;
