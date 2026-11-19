@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   X,
   MapPin,
@@ -10,6 +10,7 @@ import {
   Clock,
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
+import { useModalFocusTrap } from './useModalFocusTrap';
 
 interface MatchDetailModalProps {
   match: ParsedCricketMatch | null;
@@ -19,15 +20,7 @@ interface MatchDetailModalProps {
 export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({ match, onClose }) => {
   const [copied, setCopied] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
-
-  useEffect(() => {
-    if (!match) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [match, onClose]);
+  const dialogRef = useModalFocusTrap(Boolean(match), onClose);
 
   if (!match) return null;
 
@@ -47,9 +40,12 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({ match, onClo
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="relative w-full max-w-2xl bg-[var(--sf)] border border-[var(--bd)] rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
         role="dialog"
         aria-modal="true"
+        aria-labelledby="match-detail-title"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Top Bar */}
@@ -58,7 +54,7 @@ export const MatchDetailModal: React.FC<MatchDetailModalProps> = ({ match, onClo
             <span className="text-xs font-semibold text-[var(--rdt)] uppercase tracking-wider">
               {match.format} · {match.board || 'ICC'}
             </span>
-            <h2 className="text-base font-bold text-[var(--tx)] truncate">
+            <h2 id="match-detail-title" className="text-base font-bold text-[var(--tx)] truncate">
               {match.seriesName}
             </h2>
           </div>

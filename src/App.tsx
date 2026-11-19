@@ -52,7 +52,6 @@ import {
   AlertTriangle,
   RefreshCw,
   Info,
-  Send,
 } from 'lucide-react';
 
 export default function App() {
@@ -635,6 +634,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--tx)] flex">
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
+
       {/* Desktop Left Sidebar (>= 1024px) */}
       <DesktopSidebar
         activeNav={activeNav}
@@ -659,7 +662,11 @@ export default function App() {
 
       {/* Main Content Column */}
       <div className="flex-1 min-w-0 flex flex-col min-h-screen">
-        <main className="flex-1 w-full max-w-[1280px] mx-auto px-3.5 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-24 md:pb-8">
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="flex-1 w-full max-w-[1280px] mx-auto px-3.5 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-24 md:pb-8"
+        >
           <TopHeaderBar
             activeNav={activeNav}
             onSelectNav={setActiveNav}
@@ -677,6 +684,7 @@ export default function App() {
             onSearchChange={setSearchQuery}
             selectedFormat={selectedFormat}
             onFormatChange={setSelectedFormat}
+            isSseConnected={isSseConnected}
           />
 
           {activeNav === 'settings' ? (
@@ -724,7 +732,11 @@ export default function App() {
               />
 
               {error && (
-                <div className="my-4 p-3.5 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/35 text-[var(--rdt)] text-xs flex items-center justify-between gap-3">
+                <div
+                  role="alert"
+                  aria-live="assertive"
+                  className="my-4 p-3.5 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/35 text-[var(--rdt)] text-xs flex items-center justify-between gap-3"
+                >
                   <div className="flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 shrink-0" />
                     <span>{error}</span>
@@ -741,21 +753,85 @@ export default function App() {
 
               <section className="mt-4">
                 {isFetching && matches.length === 0 ? (
-                  <div className="py-20 flex flex-col items-center justify-center text-center">
-                    <RefreshCw className="w-7 h-7 text-[var(--rdt)] animate-spin mb-3" />
-                    <p className="text-sm font-semibold text-[var(--tx)]">
-                      Fetching live cricket data from Crex API...
+                  <div
+                    aria-busy="true"
+                    aria-label="Loading live cricket matches"
+                    className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"
+                  >
+                    {Array.from({ length: 6 }).map((_, idx) => (
+                      <div
+                        key={idx}
+                        style={{ boxShadow: 'var(--card-shadow)' }}
+                        className="rounded-2xl border border-[var(--bd)] bg-[var(--sf)] p-4 animate-pulse space-y-4"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="h-3 w-44 rounded bg-[var(--sf-2)]" />
+                          <div className="h-5 w-14 rounded-full bg-[var(--sf-2)]" />
+                        </div>
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-8 h-8 rounded-full bg-[var(--sf-2)] shrink-0" />
+                              <div className="space-y-1.5">
+                                <div className="h-3.5 w-16 rounded bg-[var(--sf-2)]" />
+                                <div className="h-2.5 w-28 rounded bg-[var(--sf-2)]" />
+                              </div>
+                            </div>
+                            <div className="space-y-1.5 text-right">
+                              <div className="h-5 w-12 rounded bg-[var(--sf-2)] ml-auto" />
+                              <div className="h-2.5 w-10 rounded bg-[var(--sf-2)] ml-auto" />
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-8 h-8 rounded-full bg-[var(--sf-2)] shrink-0" />
+                              <div className="space-y-1.5">
+                                <div className="h-3.5 w-14 rounded bg-[var(--sf-2)]" />
+                                <div className="h-2.5 w-24 rounded bg-[var(--sf-2)]" />
+                              </div>
+                            </div>
+                            <div className="h-3.5 w-16 rounded bg-[var(--sf-2)]" />
+                          </div>
+                        </div>
+                        <div className="pt-3 border-t border-[var(--bd)] space-y-2.5">
+                          <div className="h-4 w-36 rounded bg-[var(--sf-2)]" />
+                          <div className="h-1.5 w-full rounded-full bg-[var(--sf-2)]" />
+                        </div>
+                        <div className="flex items-center justify-between pt-1">
+                          <div className="h-3 w-32 rounded bg-[var(--sf-2)]" />
+                          <div className="h-8 w-24 rounded-xl bg-[var(--sf-2)]" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : matches.length === 0 ? (
+                  <div className="py-16 flex flex-col items-center justify-center text-center border border-dashed border-[var(--bd)] bg-[var(--sf)] rounded-2xl p-8">
+                    <div className="w-11 h-11 rounded-2xl bg-[var(--sf-2)] flex items-center justify-center text-[var(--mu)] mb-3">
+                      <Info className="w-5 h-5" />
+                    </div>
+                    <h3 className="text-sm font-bold text-[var(--tx)]">
+                      No matches from live feed
+                    </h3>
+                    <p className="text-xs text-[var(--mu)] mt-1 max-w-sm">
+                      There are currently no active or scheduled matches returned by the Crex feed.
                     </p>
-                    <p className="text-xs text-[var(--mu)] mt-1">
-                      Connecting to live match feed
-                    </p>
+                    <button
+                      type="button"
+                      onClick={() => loadMatches(false)}
+                      className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[var(--rd)] hover:opacity-90 rounded-xl transition-opacity"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? 'animate-spin' : ''}`} />
+                      <span>Refresh</span>
+                    </button>
                   </div>
                 ) : filteredMatches.length === 0 ? (
                   <div className="py-16 flex flex-col items-center justify-center text-center border border-dashed border-[var(--bd)] bg-[var(--sf)] rounded-2xl p-8">
                     <div className="w-11 h-11 rounded-2xl bg-[var(--sf-2)] flex items-center justify-center text-[var(--mu)] mb-3">
                       <Info className="w-5 h-5" />
                     </div>
-                    <h3 className="text-sm font-bold text-[var(--tx)]">No matches found</h3>
+                    <h3 className="text-sm font-bold text-[var(--tx)]">
+                      No matches for these filters
+                    </h3>
                     <p className="text-xs text-[var(--mu)] mt-1 max-w-sm">
                       No matches match your current filter ({activeTab}, {selectedFormat}) or search query.
                     </p>
@@ -790,44 +866,6 @@ export default function App() {
             </>
           )}
         </main>
-
-        {/* Subtle Desktop/Tablet Footer */}
-        <footer className="hidden md:block border-t border-[var(--bd)] bg-[var(--sf)] py-4 text-xs text-[var(--mu)]">
-          <div className="max-w-[1280px] mx-auto px-6 lg:px-8 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-[var(--tx)]">Crex Live Cricket Scorer</span>
-              <span>·</span>
-              <span>Real-time updates every 1 second</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <a
-                href="https://t.me/my_cricket_tracker_bot"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[var(--blut)] hover:underline flex items-center gap-1 font-semibold"
-              >
-                <Send className="w-3 h-3 -rotate-12" />
-                <span>@my_cricket_tracker_bot</span>
-              </a>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={() => openTelegramModal('credentials')}
-                className="hover:text-[var(--tx)] transition-colors"
-              >
-                Telegram Settings
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={() => setIsInspectorModalOpen(true)}
-                className="hover:text-[var(--tx)] transition-colors"
-              >
-                API Raw Inspector
-              </button>
-            </div>
-          </div>
-        </footer>
       </div>
 
       {/* Mobile Bottom Navigation (< 768px) */}

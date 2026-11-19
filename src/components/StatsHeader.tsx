@@ -28,7 +28,7 @@ export const StatsHeader: React.FC<StatsHeaderProps> = ({
         <button
           type="button"
           onClick={() => onTabChange(activeTab === 'live' ? 'all' : 'live')}
-          className="flex flex-col items-center justify-center text-center px-2 border-r border-[var(--bd)]"
+          className="flex flex-col items-center justify-center text-center px-2 rounded-xl"
         >
           <span className="text-xl font-bold tabular-nums text-[var(--rdt)]">
             {liveCount}
@@ -39,7 +39,7 @@ export const StatsHeader: React.FC<StatsHeaderProps> = ({
         <button
           type="button"
           onClick={() => onTabChange(activeTab === 'upcoming' ? 'all' : 'upcoming')}
-          className="flex flex-col items-center justify-center text-center px-2 border-r border-[var(--bd)]"
+          className="flex flex-col items-center justify-center text-center px-2 rounded-xl"
         >
           <span className="text-xl font-bold tabular-nums text-[var(--tx)]">
             {upcomingCount}
@@ -50,7 +50,7 @@ export const StatsHeader: React.FC<StatsHeaderProps> = ({
         <button
           type="button"
           onClick={() => onTabChange(activeTab === 'completed' ? 'all' : 'completed')}
-          className="flex flex-col items-center justify-center text-center px-2"
+          className="flex flex-col items-center justify-center text-center px-2 rounded-xl"
         >
           <span className="text-xl font-bold tabular-nums text-[var(--tx)]">
             {completedCount}

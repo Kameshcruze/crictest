@@ -269,16 +269,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             type="button"
             onClick={onOpenTelegramModal}
-            className="flex items-center justify-between p-3.5 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--blu)] border border-[var(--bd)] text-left transition-colors group"
+            className="flex items-center justify-between p-3.5 rounded-xl bg-[var(--sf-2)] hover:bg-[var(--rds)] border border-[var(--bd)] text-left transition-colors group"
           >
             <div className="flex items-center gap-2.5">
-              <Send className="w-4 h-4 text-[var(--blut)]" />
+              <Send className="w-4 h-4 text-[var(--rdt)]" />
               <div>
-                <div className="text-xs font-semibold text-[var(--tx)]">Telegram Bot Modal</div>
+                <div className="text-xs font-semibold text-[var(--tx)]">Telegram Settings</div>
                 <div className="text-[11px] text-[var(--mu)]">Token, Chat ID, ping & scoreboard</div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-[var(--mu)] group-hover:text-[var(--blut)]" />
+            <ChevronRight className="w-4 h-4 text-[var(--mu)] group-hover:text-[var(--rdt)]" />
           </button>
         </div>
       </section>

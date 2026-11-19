@@ -20,6 +20,7 @@ import {
   testOverCompletionAlert,
 } from '../services/telegramService';
 import { ParsedCricketMatch } from '../types/cricket';
+import { useModalFocusTrap } from './useModalFocusTrap';
 
 interface TelegramBotModalProps {
   isOpen: boolean;
@@ -66,6 +67,8 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
     setNotifyPeriodicDigest(config.notifyPeriodicDigest ?? false);
   }, [config]);
 
+  const dialogRef = useModalFocusTrap(isOpen, onClose);
+
   useEffect(() => {
     if (!isOpen) return;
     if (initialSection === 'alerts' && alertsSectionRef.current) {
@@ -73,12 +76,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
         alertsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 60);
     }
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isOpen, initialSection, onClose]);
+  }, [isOpen, initialSection]);
 
   if (!isOpen) return null;
 
@@ -182,21 +180,23 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="relative w-full max-w-2xl bg-[var(--sf)] border border-[var(--bd)] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
         role="dialog"
         aria-modal="true"
-        aria-label="Telegram Integration"
+        aria-labelledby="telegram-modal-title"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--bd)] bg-[var(--sf)] shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[var(--blu)] border border-[var(--info-bd)] flex items-center justify-center text-[var(--blut)]">
+            <div className="w-9 h-9 rounded-xl bg-[var(--rds)] border border-[var(--rd)]/30 flex items-center justify-center text-[var(--rdt)]">
               <Send className="w-4 h-4 -rotate-12" />
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base font-bold text-[var(--tx)]">
+                <h2 id="telegram-modal-title" className="text-base font-bold text-[var(--tx)]">
                   {initialSection === 'alerts' ? 'Telegram Alerts Configuration' : 'Telegram Integration'}
                 </h2>
                 <span
@@ -300,7 +300,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                     value={botToken}
                     onChange={(e) => setBotToken(e.target.value)}
                     placeholder="e.g. 789123456:AAFlkXb123456..."
-                    className="w-full bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-3 py-2 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:outline-none focus:border-[var(--rd)] pr-10 font-mono"
+                    className="w-full bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-3 py-2 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:border-[var(--rd)] pr-10 font-mono"
                   />
                   <button
                     type="button"
@@ -326,7 +326,7 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                   value={chatId}
                   onChange={(e) => setChatId(e.target.value)}
                   placeholder="e.g. -1001234567890 (for groups) or 12345678 (for private)"
-                  className="w-full bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-3 py-2 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:outline-none focus:border-[var(--rd)] font-mono"
+                  className="w-full bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-3 py-2 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:border-[var(--rd)] font-mono"
                 />
               </div>
             </div>
@@ -490,10 +490,11 @@ export const TelegramBotModal: React.FC<TelegramBotModalProps> = ({
                   <div className="flex items-center gap-1.5">
                     <span className="text-[11px] text-[var(--mu)]">Every</span>
                     <select
+                      aria-label="Digest interval"
                       value={digestIntervalMinutes}
                       onChange={(e) => setDigestIntervalMinutes(Number(e.target.value))}
                       disabled={!notifyPeriodicDigest}
-                      className="bg-[var(--sf-2)] border border-[var(--bd)] text-xs text-[var(--tx)] rounded px-2 py-1 focus:outline-none disabled:opacity-50"
+                      className="bg-[var(--sf-2)] border border-[var(--bd)] text-xs text-[var(--tx)] rounded px-2 py-1 focus:border-[var(--rd)] disabled:opacity-50"
                     >
                       <option value={1}>1 min</option>
                       <option value={2}>2 min</option>

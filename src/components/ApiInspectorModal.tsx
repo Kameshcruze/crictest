@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   X,
   Code2,
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { RawApiResponse } from '../types/cricket';
 import { API_ENDPOINT } from '../services/cricketApi';
+import { useModalFocusTrap } from './useModalFocusTrap';
 
 interface ApiInspectorModalProps {
   isOpen: boolean;
@@ -34,15 +35,7 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
   const [countryCode, setCountryCode] = useState('IN');
   const [searchKey, setSearchKey] = useState('');
   const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isOpen, onClose]);
+  const dialogRef = useModalFocusTrap(isOpen, onClose);
 
   const filteredData = useMemo(() => {
     if (!rawData || !searchKey.trim()) return rawData;
@@ -90,9 +83,12 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="relative w-full max-w-4xl bg-[var(--sf)] border border-[var(--bd)] rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
         role="dialog"
         aria-modal="true"
+        aria-labelledby="api-inspector-title"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -102,7 +98,7 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
               <Code2 className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-[var(--tx)]">
+              <h2 id="api-inspector-title" className="text-base font-bold text-[var(--tx)]">
                 Crex API Live Inspector
               </h2>
               <p className="text-xs text-[var(--mu)]">
@@ -137,9 +133,10 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
                 <span className="text-xs text-[var(--mu)]">Country Code:</span>
                 <input
                   type="text"
+                  aria-label="Country code"
                   value={countryCode}
                   onChange={(e) => setCountryCode(e.target.value.toUpperCase())}
-                  className="w-16 bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-2 py-1 text-xs text-center font-mono text-[var(--tx)] focus:outline-none focus:border-[var(--rd)]"
+                  className="w-16 bg-[var(--sf)] border border-[var(--bd)] rounded-lg px-2 py-1 text-xs text-center font-mono text-[var(--tx)] focus:border-[var(--rd)]"
                   maxLength={6}
                 />
                 <button
@@ -179,10 +176,11 @@ export const ApiInspectorModal: React.FC<ApiInspectorModalProps> = ({
                 <Search className="w-3.5 h-3.5 text-[var(--mu)] absolute left-2.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
+                  aria-label="Filter JSON keys or values"
                   value={searchKey}
                   onChange={(e) => setSearchKey(e.target.value)}
                   placeholder="Filter keys or values..."
-                  className="w-full bg-[var(--sf-2)] border border-[var(--bd)] rounded-lg pl-7 pr-2 py-1 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:outline-none focus:border-[var(--rd)]"
+                  className="w-full bg-[var(--sf-2)] border border-[var(--bd)] rounded-lg pl-7 pr-2 py-1 text-xs text-[var(--tx)] placeholder-[var(--mu)] focus:border-[var(--rd)]"
                 />
               </div>
 

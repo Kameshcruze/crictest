@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   X,
   Copy,
@@ -9,6 +9,7 @@ import {
   Github,
   CheckCircle2,
 } from 'lucide-react';
+import { useModalFocusTrap } from './useModalFocusTrap';
 
 interface OnlineScriptModalProps {
   isOpen: boolean;
@@ -23,15 +24,7 @@ export const OnlineScriptModal: React.FC<OnlineScriptModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'worker' | 'python' | 'node' | 'github' | 'curl'>('worker');
   const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isOpen, onClose]);
+  const dialogRef = useModalFocusTrap(isOpen, onClose);
 
   if (!isOpen) return null;
 
@@ -194,19 +187,22 @@ jobs:
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="relative w-full max-w-3xl bg-[var(--sf)] border border-[var(--bd)] rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
         role="dialog"
         aria-modal="true"
+        aria-labelledby="online-script-title"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="px-5 py-4 border-b border-[var(--bd)] flex items-center justify-between bg-[var(--sf)]">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-[var(--ok-bg)] flex items-center justify-center text-[var(--ok-tx)]">
+            <div className="w-8 h-8 rounded-lg bg-[var(--sf-2)] border border-[var(--bd)] flex items-center justify-center text-[var(--tx)]">
               <Cloud className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-[var(--tx)]">
+              <h2 id="online-script-title" className="text-base font-bold text-[var(--tx)]">
                 Online Automated Scripts
               </h2>
               <p className="text-xs text-[var(--mu)]">

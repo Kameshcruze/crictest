@@ -538,48 +538,56 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--tx)] flex flex-col">
-      {/* Top Navigation Bar */}
-      <header className="sticky top-0 z-30 border-b border-[var(--bd)] bg-[var(--sf)] px-3 sm:px-6 py-3">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-2 sm:gap-3">
-          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-            <button
-              type="button"
-              onClick={onBack}
-              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-[var(--tx)] bg-[var(--sf-2)] border border-[var(--bd)] hover:bg-[var(--rds)] hover:text-[var(--rdt)] transition-colors shrink-0"
-              title="Return to Dashboard"
-            >
-              <ArrowLeft className="w-4 h-4 text-[var(--rdt)]" />
-              <span className="hidden sm:inline">Dashboard</span>
-            </button>
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
 
-            <div className="h-4 w-px bg-[var(--bd)] hidden sm:block" />
+      {/* Top Navigation Bar: wraps cleanly into 2 rows on 390px mobile */}
+      <header className="sticky top-0 z-30 border-b border-[var(--bd)] bg-[var(--sf)] px-3 sm:px-6 py-2.5 sm:py-3">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3">
+          {/* Row 1 on mobile: Back button, title and LIVE pill */}
+          <div className="flex items-center justify-between sm:justify-start gap-2 sm:gap-3 min-w-0">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={onBack}
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-[var(--tx)] bg-[var(--sf-2)] border border-[var(--bd)] hover:bg-[var(--rds)] hover:text-[var(--rdt)] transition-colors shrink-0"
+                title="Back to Matches"
+              >
+                <ArrowLeft className="w-4 h-4 text-[var(--rdt)]" />
+                <span>Matches</span>
+              </button>
 
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <span className="font-mono text-[11px] px-1.5 sm:px-2 py-0.5 rounded bg-[var(--sf-2)] text-[var(--mu)] border border-[var(--bd)] hidden sm:inline">
-                  ID: {matchId}
-                </span>
-                <h1 className="text-sm sm:text-base font-bold text-[var(--tx)] truncate">
-                  {match ? `${team1Short} vs ${team2Short}` : `Match ${matchId}`}
-                </h1>
-                {isLive && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--rds)] text-[var(--rdt)] text-[10px] font-bold uppercase tracking-wider shrink-0">
-                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--rdt)]" />
-                    LIVE
+              <div className="h-4 w-px bg-[var(--bd)] hidden sm:block" />
+
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+                  <span className="font-mono text-[11px] px-1.5 sm:px-2 py-0.5 rounded bg-[var(--sf-2)] text-[var(--mu)] border border-[var(--bd)] hidden md:inline shrink-0">
+                    ID: {matchId}
                   </span>
-                )}
+                  <h1 className="text-sm sm:text-base font-bold text-[var(--tx)] truncate">
+                    {match ? `${team1Short} vs ${team2Short}` : `Match ${matchId}`}
+                  </h1>
+                </div>
               </div>
             </div>
+
+            {isLive && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--rds)] text-[var(--rdt)] text-[10px] font-bold uppercase tracking-wider shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--rdt)]" />
+                LIVE
+              </span>
+            )}
           </div>
 
-          {/* Right Controls: Match Switcher, Theme Toggle & Odds Refresh */}
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {allMatches.length > 1 && (
+          {/* Row 2 on mobile (inline right on sm+): Match Switcher, Theme Toggle & Odds Refresh */}
+          <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
+            {allMatches.length > 1 ? (
               <select
                 aria-label="Switch active match"
                 value={matchId}
                 onChange={(e) => onSelectMatch(e.target.value)}
-                className="text-xs bg-[var(--sf-2)] border border-[var(--bd)] text-[var(--tx)] rounded-xl px-2 sm:px-2.5 py-1.5 focus:outline-none focus:border-[var(--rd)] font-medium max-w-[115px] sm:max-w-[200px] truncate"
+                className="flex-1 sm:flex-none text-xs bg-[var(--sf-2)] border border-[var(--bd)] text-[var(--tx)] rounded-xl px-2.5 py-1.5 focus:border-[var(--rd)] font-medium min-w-0 sm:max-w-[200px] truncate"
               >
                 {allMatches.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -587,28 +595,33 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
                   </option>
                 ))}
               </select>
+            ) : (
+              <div className="sm:hidden" />
             )}
 
-            {theme && onThemeChange && (
-              <ThemeToggle theme={theme} onToggle={onThemeChange} />
-            )}
+            <div className="flex items-center gap-2 shrink-0">
+              {theme && onThemeChange && (
+                <ThemeToggle theme={theme} onToggle={onThemeChange} />
+              )}
 
-            <button
-              type="button"
-              onClick={handleManualRefresh}
-              disabled={isRefreshing}
-              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-[var(--rdt)] bg-[var(--rds)] border border-[var(--rd)]/30 hover:opacity-90 transition-opacity disabled:opacity-50"
-              title="Refresh live odds for this match"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Refresh Odds</span>
-            </button>
+              <button
+                type="button"
+                onClick={handleManualRefresh}
+                disabled={isRefreshing}
+                aria-label="Refresh live odds"
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-[var(--rdt)] bg-[var(--rds)] border border-[var(--rd)]/30 hover:opacity-90 transition-opacity disabled:opacity-50"
+                title="Refresh live odds for this match"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Refresh Odds</span>
+              </button>
+            </div>
           </div>
         </div>
       </header>
 
       {/* Main Content: Organized in Sections A, B, C */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 space-y-5 sm:space-y-6">
+      <main id="main-content" tabIndex={-1} className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 space-y-5 sm:space-y-6">
         {/* ======================================================== */}
         {/* SECTION A: MATCH INFORMATION                            */}
         {/* ======================================================== */}
@@ -909,9 +922,17 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
           </div>
 
           {oddsState?.status === 'loading' && !oddsState.odds ? (
-            <div className="py-12 text-center text-[var(--mu)]">
-              <RefreshCw className="w-8 h-8 text-[var(--rdt)] animate-spin mx-auto mb-2" />
-              <p className="text-sm font-medium">Retrieving live odds stream for key {oddsState.maskedKey}...</p>
+            <div aria-busy="true" aria-label="Loading live odds" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 animate-pulse">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="p-4 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="h-3 w-20 rounded bg-[var(--bd)]" />
+                    <div className="h-4 w-12 rounded bg-[var(--bd)]" />
+                  </div>
+                  <div className="h-8 w-16 rounded bg-[var(--bd)]" />
+                  <div className="h-3 w-28 rounded bg-[var(--bd)]" />
+                </div>
+              ))}
             </div>
           ) : oddsState?.status === 'error' && !oddsState.odds ? (
             <div className="py-8 text-center bg-[var(--rds)] border border-[var(--rd)]/30 rounded-xl p-4">
@@ -1588,8 +1609,15 @@ export const MatchAnalysisPage: React.FC<MatchAnalysisPageProps> = ({
             </div>
 
             {isLoadingHistory && timelineTicks.length === 0 ? (
-              <div className="py-6 text-center text-[var(--mu)] text-xs">
-                Loading full saved timeline history from PostgreSQL...
+              <div aria-busy="true" aria-label="Loading saved timeline history" className="space-y-2 py-2 animate-pulse">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="h-8 w-full rounded-lg bg-[var(--sf)] border border-[var(--bd)] px-3 flex items-center gap-3">
+                    <div className="h-3 w-14 rounded bg-[var(--sf-2)]" />
+                    <div className="h-3 w-24 rounded bg-[var(--sf-2)]" />
+                    <div className="h-3 w-16 rounded bg-[var(--sf-2)]" />
+                    <div className="h-3 flex-1 rounded bg-[var(--sf-2)]" />
+                  </div>
+                ))}
               </div>
             ) : displayedTimelineRows.length === 0 ? (
               <div className="py-6 text-center text-[var(--mu)] text-xs italic">

@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   X,
   Target,
@@ -19,6 +19,7 @@ import {
   isWithinEntryWindow,
   detectTeamInControl,
 } from '../services/strategy/engine';
+import { useModalFocusTrap } from './useModalFocusTrap';
 
 export interface EntryOpportunity {
   matchId: string;
@@ -75,15 +76,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
   recordedFirstEntries = new Set(),
 }) => {
   const [filterMode, setFilterMode] = useState<'all' | 'opportunities' | 'monitoring'>('all');
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isOpen, onClose]);
+  const dialogRef = useModalFocusTrap(isOpen, onClose);
 
   const { opportunities, radarWatchlist } = useMemo(() => {
     const oppList: EntryOpportunity[] = [];
@@ -270,6 +263,8 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="bg-[var(--sf)] border border-[var(--bd)] rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-[var(--tx)]"
         role="dialog"
         aria-modal="true"
@@ -317,9 +312,10 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
 
         {/* Filter Bar */}
         <div className="px-5 sm:px-6 py-2.5 bg-[var(--sf-2)] border-b border-[var(--bd)] flex items-center justify-between gap-2 text-xs overflow-x-auto no-scrollbar">
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div role="group" aria-label="Filter radar matches" className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
+              aria-pressed={filterMode === 'all'}
               onClick={() => setFilterMode('all')}
               className={`px-3 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap ${
                 filterMode === 'all'
@@ -331,6 +327,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
             </button>
             <button
               type="button"
+              aria-pressed={filterMode === 'opportunities'}
               onClick={() => setFilterMode('opportunities')}
               className={`px-3 py-1.5 rounded-lg font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                 filterMode === 'opportunities'
@@ -343,6 +340,7 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
             </button>
             <button
               type="button"
+              aria-pressed={filterMode === 'monitoring'}
               onClick={() => setFilterMode('monitoring')}
               className={`px-3 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap ${
                 filterMode === 'monitoring'
@@ -516,6 +514,15 @@ export const EntryPossibilitiesModal: React.FC<EntryPossibilitiesModalProps> = (
               <div className="p-8 text-center text-[var(--mu)] bg-[var(--sf-2)] rounded-xl border border-[var(--bd)]">
                 <HelpCircle className="w-8 h-8 mx-auto mb-2 opacity-60" />
                 <p className="text-xs">No active matches match the selected filter.</p>
+                {filterMode !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setFilterMode('all')}
+                    className="mt-3 px-3.5 py-1.5 rounded-xl bg-[var(--rd)] text-white text-xs font-semibold hover:opacity-90 transition-opacity"
+                  >
+                    Show All
+                  </button>
+                )}
               </div>
             ) : (
               <div className="space-y-2.5">

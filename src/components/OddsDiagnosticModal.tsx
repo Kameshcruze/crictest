@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   X,
   RefreshCw,
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { ParsedCricketMatch } from '../types/cricket';
 import { MatchOddsState } from '../types/odds';
+import { useModalFocusTrap } from './useModalFocusTrap';
 
 interface OddsDiagnosticModalProps {
   isOpen: boolean;
@@ -44,14 +45,7 @@ export const OddsDiagnosticModal: React.FC<OddsDiagnosticModalProps> = ({
     details: string[];
   } | null>(null);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isOpen, onClose]);
+  const dialogRef = useModalFocusTrap(isOpen, onClose);
 
   if (!isOpen) return null;
 
@@ -127,20 +121,23 @@ export const OddsDiagnosticModal: React.FC<OddsDiagnosticModalProps> = ({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="bg-[var(--sf)] border border-[var(--bd)] rounded-2xl w-full max-w-5xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden"
         role="dialog"
         aria-modal="true"
+        aria-labelledby="odds-diagnostic-title"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-[var(--bd)] flex items-center justify-between bg-[var(--sf)] shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-[var(--warn-bg)] border border-[var(--warn-bd)] flex items-center justify-center text-[var(--warn-tx)] shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-[var(--sf-2)] border border-[var(--bd)] flex items-center justify-center text-[var(--tx)] shrink-0">
               <Zap className="w-5 h-5" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base font-bold text-[var(--tx)]">
+                <h2 id="odds-diagnostic-title" className="text-base font-bold text-[var(--tx)]">
                   Odds Integration Diagnostics
                 </h2>
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--warn-bg)] text-[var(--warn-tx)] border border-[var(--warn-bd)] uppercase tracking-wider">
